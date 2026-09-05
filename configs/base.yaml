@@ -5,6 +5,7 @@ hydra:
     chdir: True
 
 data: safe
+seed: 1
 
 wandb:
   project: genmol
@@ -58,6 +59,8 @@ noise:
   type: loglinear
 
 training:
+  # Missing in legacy checkpoints; model.py deliberately defaults it to mdlm.
+  diffusion: mdlm  # mdlm / udlm
   T: 0  # 0 (continuous time) / 1000
   ema: 0.9999
   antithetic_sampling: True
@@ -67,6 +70,19 @@ training:
   # Examples with more tokens (longer sequences) implicitly contribute more to the loss
   # It's weighted by sequence length
   use_bracket_safe: False
+  # Explicit initialization is distinct from Lightning checkpoint resume.
+  # Set only for a UDLM warm-start experiment.
+  init_from_mdlm_checkpoint: null
+  init_from_mdlm_ema: True
+  udlm:
+    # The released UDLM uses all vocabulary entries. Excluding tokenizer
+    # control symbols is a separate molecule-specific ablation.
+    exclude_special_tokens: False
+    noise_eps: 1e-3
+    inference_eps: 1e-5
+    sampling_steps: 64
+    time_embedding_size: 256
+    zero_init_conditioning: True
 
 callback:
   _target_: lightning.pytorch.callbacks.ModelCheckpoint

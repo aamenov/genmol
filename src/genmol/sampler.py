@@ -51,31 +51,86 @@ class Sampler:
         self.pad_index = self.model.tokenizer.pad_token_id
         self.mdlm = self.model.mdlm
         self.mdlm.to_device(self.model.device)
+        self.diffusion_type = getattr(self.model, 'diffusion_type', 'mdlm')
         
     @torch.no_grad()
-    def generate(self, x, softmax_temp=1.2, randomness=2, fix=True, gamma=0, w=2, **kwargs):
+    def generate(
+        self,
+        x,
+        softmax_temp=1.2,
+        randomness=2,
+        fix=True,
+        gamma=0,
+        w=2,
+        num_steps=None,
+        **kwargs,
+    ):
         x = x.to(self.model.device)
-        num_steps = max(self.mdlm.get_num_steps_confidence(x), 2)
         attention_mask = x != self.pad_index
-        
-        for i in range(num_steps):
-            logits = self.model(x, attention_mask)
-
+        if self.diffusion_type == 'udlm':
             if gamma and w:
-                x_poor = x.clone()
-                context_tokens = (x_poor[0] != self.model.bos_index).to(int) * \
-                    (x_poor[0] != self.model.eos_index).to(int) * \
-                    (x_poor[0] != self.model.mask_index).to(int) * \
-                    (x_poor[0] != self.pad_index).to(int)
-                context_token_ids = context_tokens.nonzero(as_tuple=True)[0].tolist()
-                # mask 100 * gamma % of the context (given fragments) tokens
-                num_mask_poor = int(context_tokens.sum() * gamma)
-                mask_idx_poor = random.sample(context_token_ids, num_mask_poor)
-                x_poor[:, mask_idx_poor] = self.model.mask_index
-                logits_poor = self.model(x_poor, attention_mask=attention_mask)
-                logits = w * logits + (1 - w) * logits_poor
+                raise ValueError(
+                    'GenMol MCG blends clean logits and is not a valid UDLM '
+                    'posterior-space guidance rule; UDLM guidance is not yet enabled.'
+                )
+            editable_mask = x == self.model.mask_index
+            prior = self.mdlm.sample_prior(x.shape, device=x.device)
+            x = torch.where(editable_mask, prior, x)
+            udlm_config = self.model.config.training.get('udlm', {})
+            if num_steps is None:
+                num_steps = int(udlm_config.get('sampling_steps', 64))
+            if num_steps <= 0:
+                raise ValueError('num_steps must be positive for UDLM sampling')
+            inference_eps = float(udlm_config.get('inference_eps', 1e-5))
+            if not 0 < inference_eps < 1:
+                raise ValueError('UDLM inference_eps must lie strictly between 0 and 1')
 
-            x = self.mdlm.step_confidence(logits, x, i, num_steps, softmax_temp, randomness)
+            timesteps = torch.linspace(
+                1.0,
+                inference_eps,
+                num_steps + 1,
+                device=x.device,
+                dtype=torch.float32,
+            )
+            for i in range(num_steps):
+                t = timesteps[i].expand(x.shape[0])
+                s = timesteps[i + 1].expand(x.shape[0])
+                logits = self.model(x, attention_mask, t=t)
+                x = self.mdlm.step(
+                    logits,
+                    x,
+                    t,
+                    s,
+                    mutable_mask=editable_mask,
+                    temperature=softmax_temp,
+                )
+        else:
+            num_steps = max(self.mdlm.get_num_steps_confidence(x), 2)
+            for i in range(num_steps):
+                logits = self.model(x, attention_mask)
+
+                if gamma and w:
+                    x_poor = x.clone()
+                    context_tokens = (x_poor[0] != self.model.bos_index).to(int) * \
+                        (x_poor[0] != self.model.eos_index).to(int) * \
+                        (x_poor[0] != self.model.mask_index).to(int) * \
+                        (x_poor[0] != self.pad_index).to(int)
+                    context_token_ids = context_tokens.nonzero(as_tuple=True)[0].tolist()
+                    # mask 100 * gamma % of the context (given fragments) tokens
+                    num_mask_poor = int(context_tokens.sum() * gamma)
+                    mask_idx_poor = random.sample(context_token_ids, num_mask_poor)
+                    x_poor[:, mask_idx_poor] = self.model.mask_index
+                    logits_poor = self.model(x_poor, attention_mask=attention_mask)
+                    logits = w * logits + (1 - w) * logits_poor
+
+                x = self.mdlm.step_confidence(
+                    logits,
+                    x,
+                    i,
+                    num_steps,
+                    softmax_temp,
+                    randomness,
+                )
             
         # decode to SAFE strings
         samples = self.model.tokenizer.batch_decode(x, skip_special_tokens=True)
@@ -110,7 +165,7 @@ class Sampler:
                           torch.full((1, 1), self.model.eos_index)])
         x = self._insert_mask(x, num_samples, min_add_len=min_add_len)
         x = x.to(self.model.device)
-        return self.generate(x, softmax_temp, randomness)
+        return self.generate(x, softmax_temp, randomness, **kwargs)
     
     def fragment_linking_onestep(self, fragment, num_samples=1, softmax_temp=1.2, randomness=2, gamma=0, min_add_len=30, **kwargs):
         if self.model.config.training.get('use_bracket_safe'):
@@ -123,7 +178,9 @@ class Sampler:
                                  truncation=True,
                                  max_length=self.model.config.model.max_position_embeddings)['input_ids']
         x = self._insert_mask(x, num_samples, min_add_len=min_add_len)
-        samples = self.generate(x, softmax_temp, randomness, gamma=gamma)
+        samples = self.generate(
+            x, softmax_temp, randomness, gamma=gamma, **kwargs
+        )
         samples = filter_by_substructure(samples, fragment)
         return samples
     
@@ -136,14 +193,18 @@ class Sampler:
                                  truncation=True,
                                  max_length=self.model.config.model.max_position_embeddings)['input_ids']
         x = self._insert_mask(x, num_samples, min_add_len=min_add_len)
-        prefix_samples = self.generate(x, softmax_temp, randomness, gamma=gamma)
+        prefix_samples = self.generate(
+            x, softmax_temp, randomness, gamma=gamma, **kwargs
+        )
 
         x = self.model.tokenizer([suffix + '.'],
                                  return_tensors='pt',
                                  truncation=True,
                                  max_length=self.model.config.model.max_position_embeddings)['input_ids']
         x = self._insert_mask(x, num_samples, min_add_len=min_add_len)
-        suffix_samples = self.generate(x, softmax_temp, randomness, gamma=gamma)
+        suffix_samples = self.generate(
+            x, softmax_temp, randomness, gamma=gamma, **kwargs
+        )
         
         samples = filter_by_substructure(mix_sequences(prefix_samples, suffix_samples,
                                                       *fragment.split('.'), num_samples), fragment)
@@ -160,7 +221,9 @@ class Sampler:
                                  truncation=True,
                                  max_length=self.model.config.model.max_position_embeddings)['input_ids']
         x = self._insert_mask(x, num_samples)
-        samples = self.generate(x, softmax_temp, randomness, gamma=gamma)
+        samples = self.generate(
+            x, softmax_temp, randomness, gamma=gamma, **kwargs
+        )
 
         if apply_filter:
             return filter_by_substructure(samples, fragment)

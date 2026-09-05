@@ -35,6 +35,7 @@ omegaconf.OmegaConf.register_new_resolver('div_up', lambda x, y: (x + y - 1) // 
     config_name="base",
 )
 def train(config):
+    L.seed_everything(config.get('seed', 1), workers=True)
     wandb_logger = None
     if config.wandb.name is not None:
         wandb_logger = L.pytorch.loggers.WandbLogger(
@@ -46,6 +47,23 @@ def train(config):
 
     model = GenMol(config)
     ckpt_path = get_last_checkpoint(config.callback.dirpath)
+    init_from_mdlm = config.training.get('init_from_mdlm_checkpoint')
+    if ckpt_path is not None and init_from_mdlm:
+        raise ValueError(
+            'Cannot resume a training checkpoint and initialize from MDLM at '
+            'the same time; use a fresh callback.dirpath for warm-starting.'
+        )
+    if init_from_mdlm:
+        source_path = hydra.utils.to_absolute_path(init_from_mdlm)
+        report = model.initialize_from_mdlm_checkpoint(
+            source_path,
+            use_ema=bool(config.training.get('init_from_mdlm_ema', True)),
+        )
+        print(
+            'Initialized UDLM backbone from MDLM: '
+            f"{report['source_path']} (weights={report['weights']}, "
+            f"parameters={report['parameter_tensors']})"
+        )
     
     train_dataloader = get_dataloader(config)
     trainer = hydra.utils.instantiate(

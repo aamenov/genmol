@@ -17,7 +17,6 @@
 import os
 import torch
 import datasets
-import torch
 from safe.tokenizer import SAFETokenizer
 from rdkit import RDLogger
 from genmol.utils.bracket_safe_converter import safe2bracketsafe
@@ -42,21 +41,39 @@ def get_tokenizer():
 
 
 class Collator:
+    """Tokenize SAFE strings from hosted or user-defined dataset schemas."""
+
+    TEXT_COLUMNS = ('safe', 'input')
+
     def __init__(self, config):
         self.tokenizer = get_tokenizer()
         self.max_length = config.model.max_position_embeddings
         self.use_bracket_safe = config.training.get('use_bracket_safe')
-    
-    def __call__(self, examples):
-        if self.use_bracket_safe:
-            for example in examples: example['input'] = safe2bracketsafe(example['input'])
 
-        batch = self.tokenizer([example['input'] for example in examples],
-                               return_tensors='pt',
-                               padding=True,
-                               truncation=True,
-                               max_length=self.max_length)
-        del batch['token_type_ids']
+    @classmethod
+    def _read_safe(cls, example):
+        for column in cls.TEXT_COLUMNS:
+            value = example.get(column)
+            if isinstance(value, str) and value:
+                return value
+        raise KeyError(
+            f"Expected one non-empty SAFE string in {cls.TEXT_COLUMNS}; "
+            f"received columns {sorted(example)}."
+        )
+
+    def __call__(self, examples):
+        safe_strings = [self._read_safe(example) for example in examples]
+        if self.use_bracket_safe:
+            safe_strings = [safe2bracketsafe(value) for value in safe_strings]
+
+        batch = self.tokenizer(
+            safe_strings,
+            return_tensors='pt',
+            padding=True,
+            truncation=True,
+            max_length=self.max_length,
+        )
+        batch.pop('token_type_ids', None)
         return batch
     
 
@@ -69,8 +86,8 @@ class UserDataset(datasets.Dataset):
     def __len__(self):
         return len(self.safe_list)
 
-    def __getitem__(self, indices):
-        return {'input': self.safe_list[i] for i in indices}
+    def __getitem__(self, index):
+        return {'input': self.safe_list[index]}
     
 
 def get_dataloader(config):
@@ -82,7 +99,7 @@ def get_dataloader(config):
             num_workers=config.loader.num_workers,
             pin_memory=config.loader.pin_memory,
             shuffle=False,  # streaming
-            persistent_workers=True)
+            persistent_workers=config.loader.num_workers > 0)
 
     # User-defined dataset
     return torch.utils.data.DataLoader(
@@ -92,4 +109,4 @@ def get_dataloader(config):
         num_workers=config.loader.num_workers,
         pin_memory=config.loader.pin_memory,
         shuffle=True,
-        persistent_workers=True)
+        persistent_workers=config.loader.num_workers > 0)

@@ -1,0 +1,9 @@
+defaults:
+  - base
+  - _self_
+
+# Continuous-time Uniform Diffusion Language Model (UDLM).  Architecture and
+# data settings remain identical to GenMol so initial comparisons isolate the
+# diffusion process.  Use command-line overrides for deliberately small pilots.
+training:
+  diffusion: udlm
