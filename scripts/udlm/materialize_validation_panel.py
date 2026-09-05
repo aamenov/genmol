@@ -6,7 +6,6 @@ import argparse
 import hashlib
 import json
 import subprocess
-from itertools import islice
 from pathlib import Path
 
 from datasets import load_dataset
@@ -44,9 +43,12 @@ def validate_panel(panel: dict) -> None:
     bos_id = metadata.get("bos_token_id")
     eos_id = metadata.get("eos_token_id")
     encoded_rows = []
+    previous_source_index = -1
     for expected_index, row in enumerate(rows):
-        if row.get("source_index") != expected_index:
-            raise ValueError("source indices must be contiguous and ordered")
+        source_index = row.get("source_index")
+        if type(source_index) is not int or source_index <= previous_source_index:
+            raise ValueError("source indices must be strictly increasing")
+        previous_source_index = source_index
         ids = row.get("input_ids")
         if not isinstance(ids, list) or not 2 <= len(ids) <= MAX_SEQUENCE_LENGTH:
             raise ValueError(f"invalid token length at row {expected_index}")
@@ -79,10 +81,12 @@ def materialize_panel(sample_count: int) -> dict:
     safe_payloads = []
     id_payloads = []
     special_ids = set(int(value) for value in tokenizer.all_special_ids)
-    for source_index, record in enumerate(islice(dataset, sample_count)):
+    skipped_invalid_source_indices = []
+    for source_index, record in enumerate(dataset):
         value = record.get("input") or record.get("safe")
         if not isinstance(value, str) or not value:
-            raise RuntimeError(f"invalid validation SAFE row {source_index}")
+            skipped_invalid_source_indices.append(source_index)
+            continue
         input_ids = [
             int(token_id)
             for token_id in tokenizer(
@@ -105,6 +109,8 @@ def materialize_panel(sample_count: int) -> dict:
                 "safe_sha256": hashlib.sha256(safe_payload).hexdigest(),
             }
         )
+        if len(rows) == sample_count:
+            break
     if len(rows) != sample_count:
         raise RuntimeError(f"validation stream ended after {len(rows)} rows")
     panel = {
@@ -116,7 +122,8 @@ def materialize_panel(sample_count: int) -> dict:
             "repo_id": SAFE_GPT_REPO_ID,
             "revision": SAFE_GPT_DATASET_REVISION,
             "split": "validation",
-            "selection": f"first {sample_count} streaming rows",
+            "selection": f"first {sample_count} non-empty streaming rows",
+            "skipped_invalid_source_indices": skipped_invalid_source_indices,
             "ordered_safe_text_sha256": _length_prefixed_digest(safe_payloads),
             "raw_safe_text_included": False,
         },

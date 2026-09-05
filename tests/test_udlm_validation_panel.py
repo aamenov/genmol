@@ -46,7 +46,7 @@ def test_fixed_panel_structural_validation_accepts_framed_content():
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [
-        (lambda panel: panel["rows"][0].update(source_index=9), "contiguous"),
+        (lambda panel: panel["rows"][0].update(source_index=9), "increasing"),
         (lambda panel: panel["rows"][0].update(input_ids=[27, 2]), "BOS/EOS"),
         (lambda panel: panel["rows"][0].update(content_length=9), "content length"),
         (lambda panel: panel.update(ordered_token_ids_sha256="bad"), "digest"),
