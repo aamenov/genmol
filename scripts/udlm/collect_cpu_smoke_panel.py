@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import math
@@ -13,6 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import torch
+
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 EXPECTED_VARIANTS = (
@@ -20,6 +23,92 @@ EXPECTED_VARIANTS = (
     "schedule_uniform",
     "empirical_frequency",
 )
+FREQUENCY_RELATIVE_PATH = Path(
+    "experiments/udlm/token_frequency/train_first_10000.json"
+)
+FREQUENCY_SHA256 = "088c78e75611f3cc42c4011e1da6f65a377e673b9cba07a28b126b0fc62f06ed"
+TOKENIZER_SHA256 = "0db5f4dbdc7e8ff759e98483759611a426e187ee7f3f0a91edc8800abe7bf140"
+SOURCE_PATHS = {
+    "smoke_runner": Path("scripts/udlm/cpu_smoke.py"),
+    "model": Path("src/genmol/model.py"),
+    "diffusion": Path("src/genmol/diffusion.py"),
+    "sampler": Path("src/genmol/sampler.py"),
+}
+PRIOR_METADATA_FIELDS = {
+    "schema_version",
+    "variant",
+    "comparison_role",
+    "process_family",
+    "schedule_variant",
+    "objective_scope",
+    "prior_source",
+    "full_vocab_size",
+    "active_vocab_size",
+    "excluded_token_ids",
+    "sampling_eps",
+    "noise_eps",
+    "antithetic_sampling",
+    "active_token_ids_sha256",
+    "stationary_probs_sha256",
+    "uniform_mixture_weight",
+    "frequency_artifact_path",
+    "frequency_artifact_sha256",
+    "frequency_artifact_schema_version",
+    "frequency_example_count",
+    "frequency_content_token_count",
+    "frequency_active_token_count",
+    "frequency_dataset_repo_id",
+    "frequency_dataset_revision",
+    "frequency_dataset_split",
+    "frequency_dataset_selection",
+    "frequency_ordered_text_sha256",
+    "frequency_implementation_git_sha",
+    "tokenizer_repo_id",
+    "tokenizer_revision",
+    "tokenizer_json_sha256",
+}
+FREQUENCY_METADATA_FIELDS = {
+    "uniform_mixture_weight",
+    "frequency_artifact_path",
+    "frequency_artifact_sha256",
+    "frequency_artifact_schema_version",
+    "frequency_example_count",
+    "frequency_content_token_count",
+    "frequency_active_token_count",
+    "frequency_dataset_repo_id",
+    "frequency_dataset_revision",
+    "frequency_dataset_split",
+    "frequency_dataset_selection",
+    "frequency_ordered_text_sha256",
+    "frequency_implementation_git_sha",
+}
+VARIANT_IDENTITIES = {
+    "release_uniform": {
+        "comparison_role": "faithful_release_control",
+        "process_family": "released_continuous_uniform",
+        "schedule_variant": "released_ideal_loss_residual_forward",
+        "objective_scope": "released_model_dependent_ct_integrand",
+        "prior_source": "uniform",
+    },
+    "schedule_uniform": {
+        "comparison_role": "schedule_repair_uniform_control",
+        "process_family": "rank_one_continuous_categorical",
+        "schedule_variant": "schedule_consistent_residual_forward_and_loss",
+        "objective_scope": (
+            "model_dependent_ct_integrand_without_parameter_independent_endpoint_kl"
+        ),
+        "prior_source": "uniform",
+    },
+    "empirical_frequency": {
+        "comparison_role": "empirical_prior_treatment",
+        "process_family": "rank_one_continuous_categorical",
+        "schedule_variant": "schedule_consistent_residual_forward_and_loss",
+        "objective_scope": (
+            "model_dependent_ct_integrand_without_parameter_independent_endpoint_kl"
+        ),
+        "prior_source": "pinned_frequency_artifact_uniform_mixture",
+    },
+}
 
 
 def _sha256(payload: bytes) -> str:
@@ -73,6 +162,200 @@ def _read_regular_file(path: Path) -> bytes:
         os.close(descriptor)
 
 
+def _canonical_sequence_sha256(values: list[int] | list[float]) -> str:
+    canonical = [value.hex() if isinstance(value, float) else value for value in values]
+    payload = json.dumps(canonical, separators=(",", ":")).encode("ascii")
+    return _sha256(payload)
+
+
+def _require_sha256(value: object, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"{label} must be a lowercase SHA-256 digest")
+    return value
+
+
+def _current_source_inputs(variant: str) -> dict[str, dict[str, object]]:
+    paths = dict(SOURCE_PATHS)
+    if variant == "empirical_frequency":
+        paths["frequency_artifact"] = FREQUENCY_RELATIVE_PATH
+    records = {}
+    for name, relative_path in paths.items():
+        payload = _read_regular_file(ROOT_DIR / relative_path)
+        records[name] = {
+            "path": relative_path.as_posix(),
+            "sha256": _sha256(payload),
+            "size_bytes": len(payload),
+        }
+    return records
+
+
+def _load_frequency_artifact() -> tuple[dict[str, Any], list[int]]:
+    payload = _read_regular_file(ROOT_DIR / FREQUENCY_RELATIVE_PATH)
+    if _sha256(payload) != FREQUENCY_SHA256:
+        raise ValueError("pinned frequency artifact bytes changed")
+    artifact = json.loads(payload, object_pairs_hook=_reject_duplicate_keys)
+    if not isinstance(artifact, dict):
+        raise ValueError("frequency artifact must be a JSON object")
+    counts = artifact.get("counts_by_token_id")
+    if (
+        artifact.get("schema_version") != 1
+        or artifact.get("example_count") != 10_000
+        or artifact.get("content_token_count") != 517_090
+        or not isinstance(counts, list)
+        or len(counts) != 1880
+        or any(type(count) is not int or count < 0 for count in counts)
+        or sum(counts) != 517_090
+    ):
+        raise ValueError("frequency artifact counts or schema changed")
+    return artifact, counts
+
+
+def _expected_prior_geometry(
+    variant: str,
+    *,
+    excluded_token_ids: list[int],
+    mixture_weight: float,
+) -> tuple[list[int], list[float], dict[str, Any] | None, int | None]:
+    active_ids = [
+        token_id for token_id in range(1880) if token_id not in excluded_token_ids
+    ]
+    if variant == "empirical_frequency":
+        artifact, counts = _load_frequency_artifact()
+        active_count = sum(counts[token_id] for token_id in active_ids)
+        if active_count <= 0:
+            raise ValueError("frequency artifact has no active token observations")
+        # Preserve model.py's two-step Python-float evaluation exactly. Folding
+        # the division into the mixture expression changes some entries by one
+        # ULP and therefore produces a different canonical prior digest.
+        empirical_probabilities = [
+            counts[token_id] / active_count for token_id in active_ids
+        ]
+        probabilities = [
+            (1.0 - mixture_weight) * empirical + mixture_weight / len(active_ids)
+            for empirical in empirical_probabilities
+        ]
+    else:
+        artifact = None
+        active_count = None
+        probabilities = [1.0 / len(active_ids)] * len(active_ids)
+    canonical = torch.tensor(probabilities, dtype=torch.float64)
+    canonical /= canonical.sum()
+    return (
+        active_ids,
+        [float(value) for value in canonical.tolist()],
+        artifact,
+        active_count,
+    )
+
+
+def _validate_effective_config(record: dict[str, Any], variant: str) -> dict[str, Any]:
+    config = record.get("effective_config")
+    if not isinstance(config, dict):
+        raise ValueError(f"{variant}: effective_config must be an object")
+    training = config.get("training")
+    model = config.get("model")
+    if not isinstance(training, dict) or not isinstance(model, dict):
+        raise ValueError(f"{variant}: malformed effective model/training config")
+    udlm = training.get("udlm")
+    if not isinstance(udlm, dict):
+        raise ValueError(f"{variant}: missing effective UDLM config")
+    expected = {
+        "diffusion": "udlm",
+        "antithetic_sampling": True,
+        "sampling_eps": 1e-3,
+        "global_mean_loss": True,
+    }
+    if any(training.get(field) != value for field, value in expected.items()):
+        raise ValueError(f"{variant}: effective training config changed")
+    if model.get("vocab_size") != 1880 or model.get("pad_token_id") != 3:
+        raise ValueError(f"{variant}: effective tokenizer/model geometry changed")
+    if (
+        udlm.get("prior_variant") != variant
+        or udlm.get("empirical_uniform_mix") != 0.01
+        or udlm.get("exclude_special_tokens") != record.get("exclude_special_tokens")
+        or udlm.get("noise_eps") != 1e-3
+        or udlm.get("sampling_steps") != record.get("sampling_steps")
+    ):
+        raise ValueError(f"{variant}: result and effective UDLM config disagree")
+    if config.get("seed") != 1 or record.get("seed") != 1:
+        raise ValueError(f"{variant}: unexpected smoke seed")
+    return udlm
+
+
+def _validate_prior_metadata(record: dict[str, Any], variant: str) -> None:
+    metadata = record.get("prior_metadata")
+    if not isinstance(metadata, dict) or set(metadata) != PRIOR_METADATA_FIELDS:
+        raise ValueError(f"{variant}: prior metadata schema mismatch")
+    if metadata.get("schema_version") != 1 or metadata.get("variant") != variant:
+        raise ValueError(f"{variant}: prior metadata identity mismatch")
+    for field, expected in VARIANT_IDENTITIES[variant].items():
+        if metadata.get(field) != expected:
+            raise ValueError(f"{variant}: prior metadata {field} mismatch")
+    udlm = _validate_effective_config(record, variant)
+    excluded = [0, 1, 2, 3, 4] if record["exclude_special_tokens"] else []
+    if metadata.get("excluded_token_ids") != excluded:
+        raise ValueError(f"{variant}: excluded-token metadata mismatch")
+    mixture = float(udlm["empirical_uniform_mix"])
+    active_ids, probabilities, artifact, active_count = _expected_prior_geometry(
+        variant,
+        excluded_token_ids=excluded,
+        mixture_weight=mixture,
+    )
+    scalar_expectations = {
+        "full_vocab_size": 1880,
+        "active_vocab_size": len(active_ids),
+        "sampling_eps": 1e-3,
+        "noise_eps": 1e-3,
+        "antithetic_sampling": True,
+        "active_token_ids_sha256": _canonical_sequence_sha256(active_ids),
+        "stationary_probs_sha256": _canonical_sequence_sha256(probabilities),
+        "tokenizer_repo_id": "datamol-io/safe-gpt",
+        "tokenizer_revision": "3d5fa0988383e898d5ac5db7cd52bf715bc37061",
+        "tokenizer_json_sha256": TOKENIZER_SHA256,
+    }
+    for field, expected in scalar_expectations.items():
+        if metadata.get(field) != expected:
+            raise ValueError(f"{variant}: prior metadata {field} mismatch")
+    _require_sha256(metadata["active_token_ids_sha256"], "active token digest")
+    _require_sha256(metadata["stationary_probs_sha256"], "stationary prior digest")
+
+    if variant != "empirical_frequency":
+        if any(metadata.get(field) is not None for field in FREQUENCY_METADATA_FIELDS):
+            raise ValueError(f"{variant}: unexpected empirical-prior metadata")
+        return
+    assert artifact is not None and active_count is not None
+    dataset = artifact["dataset"]
+    frequency_expected = {
+        "uniform_mixture_weight": mixture,
+        "frequency_artifact_path": FREQUENCY_RELATIVE_PATH.as_posix(),
+        "frequency_artifact_sha256": FREQUENCY_SHA256,
+        "frequency_artifact_schema_version": artifact["schema_version"],
+        "frequency_example_count": artifact["example_count"],
+        "frequency_content_token_count": artifact["content_token_count"],
+        "frequency_active_token_count": active_count,
+        "frequency_dataset_repo_id": dataset["repo_id"],
+        "frequency_dataset_revision": dataset["revision"],
+        "frequency_dataset_split": dataset["split"],
+        "frequency_dataset_selection": dataset["selection"],
+        "frequency_ordered_text_sha256": dataset["ordered_safe_text_sha256"],
+        "frequency_implementation_git_sha": artifact["git_sha"],
+    }
+    for field, expected in frequency_expected.items():
+        if metadata.get(field) != expected:
+            raise ValueError(f"{variant}: empirical metadata {field} mismatch")
+
+
+def _validate_source_inputs(record: dict[str, Any], variant: str) -> None:
+    source_inputs = record.get("source_inputs")
+    expected = _current_source_inputs(variant)
+    if source_inputs != expected:
+        raise ValueError(f"{variant}: source input hashes do not match current files")
+
+
 def _git_provenance() -> dict[str, object]:
     def command(*arguments: str) -> str:
         return subprocess.check_output(
@@ -116,13 +399,19 @@ def _validate_diagnostic_pair(record: dict[str, Any], variant: str) -> None:
         _finite_number(after[time_value].get("loss"), f"{variant} after loss")
         before_digest = before[time_value].get("corrupted_token_ids_sha256")
         after_digest = after[time_value].get("corrupted_token_ids_sha256")
-        if before_digest != after_digest or not isinstance(before_digest, str):
+        if before_digest != after_digest:
             raise ValueError(f"{variant}: corruption changed at t={time_value}")
+        _require_sha256(before_digest, f"{variant} t={time_value} corruption digest")
     if float(after["0.5"]["loss"]) >= float(before["0.5"]["loss"]):
         raise ValueError(f"{variant}: t=0.5 loss did not improve")
 
 
-def _validate_result(record: dict[str, Any], expected_variant: str) -> None:
+def _validate_result(
+    record: dict[str, Any],
+    expected_variant: str,
+    *,
+    strict_provenance: bool = True,
+) -> None:
     if record.get("schema_version") != 2:
         raise ValueError(f"{expected_variant}: unsupported smoke schema")
     if record.get("purpose") != (
@@ -138,6 +427,8 @@ def _validate_result(record: dict[str, Any], expected_variant: str) -> None:
         raise ValueError(f"{expected_variant}: source tree was not clean")
     if not git.get("commit") or git.get("commit") != git.get("upstream"):
         raise ValueError(f"{expected_variant}: source commit was not pushed")
+    if git.get("status_porcelain") not in (None, []):
+        raise ValueError(f"{expected_variant}: recorded Git status was not empty")
     metadata = record.get("prior_metadata")
     if not isinstance(metadata, dict) or metadata.get("variant") != expected_variant:
         raise ValueError(f"{expected_variant}: prior metadata mismatch")
@@ -170,6 +461,9 @@ def _validate_result(record: dict[str, Any], expected_variant: str) -> None:
             raise ValueError("empirical_frequency: frequency artifact mismatch")
     elif metadata.get("uniform_mixture_weight") is not None:
         raise ValueError(f"{expected_variant}: unexpected empirical mixture")
+    if strict_provenance:
+        _validate_prior_metadata(record, expected_variant)
+        _validate_source_inputs(record, expected_variant)
     if record.get("all_losses_finite") is not True:
         raise ValueError(f"{expected_variant}: non-finite loss was reported")
     if record.get("all_gradient_norms_finite") is not True:
@@ -191,9 +485,19 @@ def _validate_result(record: dict[str, Any], expected_variant: str) -> None:
         or type(decoded) is not int
         or not 0 < decoded <= requested
         or not isinstance(generated, list)
+        or any(not isinstance(value, str) or not value for value in generated)
         or decoded != len(generated)
     ):
         raise ValueError(f"{expected_variant}: invalid no-repair decode evidence")
+    if (
+        type(record.get("steps")) is not int
+        or record["steps"] <= 0
+        or type(record.get("sampling_steps")) is not int
+        or record["sampling_steps"] <= 0
+        or record.get("empirical_uniform_mix_requested") != 0.01
+    ):
+        raise ValueError(f"{expected_variant}: invalid bounded-run configuration")
+    _finite_number(record.get("runtime_seconds"), f"{expected_variant} runtime")
     _validate_diagnostic_pair(record, expected_variant)
 
 
@@ -201,11 +505,16 @@ def build_panel(
     artifacts: dict[str, tuple[Path, bytes, dict[str, Any]]],
     *,
     git: dict[str, object],
+    strict_provenance: bool = True,
 ) -> dict[str, object]:
     if tuple(sorted(artifacts)) != tuple(sorted(EXPECTED_VARIANTS)):
         raise ValueError("panel requires exactly one artifact for each prior variant")
     for variant in EXPECTED_VARIANTS:
-        _validate_result(artifacts[variant][2], variant)
+        _validate_result(
+            artifacts[variant][2],
+            variant,
+            strict_provenance=strict_provenance,
+        )
 
     records = [artifacts[variant][2] for variant in EXPECTED_VARIANTS]
     shared_fields = (
@@ -223,6 +532,8 @@ def build_panel(
         values = [record.get(field) for record in records]
         if any(value != values[0] for value in values[1:]):
             raise ValueError(f"smoke panel is not matched on {field}")
+    _require_sha256(records[0]["clean_input_ids_sha256"], "clean input digest")
+    _require_sha256(records[0]["attention_mask_sha256"], "attention-mask digest")
     artifact_commits = {record["git"]["commit"] for record in records}
     if artifact_commits != {git["commit"]}:
         raise ValueError("smoke artifacts do not match the current pushed commit")
@@ -237,13 +548,14 @@ def build_panel(
         ),
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "git": git,
-        "matched_fields": {
-            field: records[0][field] for field in shared_fields
-        },
+        "matched_fields": {field: records[0][field] for field in shared_fields},
         "variants": {
             variant: {
                 "source_path": str(artifacts[variant][0].relative_to(ROOT_DIR)),
                 "source_artifact_sha256": _sha256(artifacts[variant][1]),
+                "source_artifact_base64": base64.b64encode(
+                    artifacts[variant][1]
+                ).decode("ascii"),
                 "result": artifacts[variant][2],
             }
             for variant in EXPECTED_VARIANTS
@@ -264,6 +576,20 @@ def _write_json_exclusive(path: Path, payload: dict[str, object]) -> None:
         os.fsync(handle.fileno())
 
 
+def _bind_output_path(path: Path) -> Path:
+    """Resolve the parent while retaining and rejecting any existing leaf."""
+
+    lexical = Path(os.path.abspath(os.fspath(path)))
+    if not lexical.name:
+        raise ValueError("output must name a JSON file")
+    bound = lexical.parent.resolve() / lexical.name
+    if bound == ROOT_DIR or ROOT_DIR not in bound.parents:
+        raise ValueError("output must remain inside the repository")
+    if os.path.lexists(bound):
+        raise FileExistsError(f"refusing to overwrite panel artifact: {bound}")
+    return bound
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, action="append", required=True)
@@ -271,11 +597,7 @@ def main() -> None:
     args = parser.parse_args()
     if len(args.input) != len(EXPECTED_VARIANTS):
         raise ValueError("provide exactly three --input artifacts")
-    output = args.output.resolve()
-    if output != ROOT_DIR and ROOT_DIR not in output.parents:
-        raise ValueError("output must remain inside the repository")
-    if output.exists():
-        raise FileExistsError(f"refusing to overwrite panel artifact: {output}")
+    output = _bind_output_path(args.output)
 
     artifacts: dict[str, tuple[Path, bytes, dict[str, Any]]] = {}
     for raw_path in args.input:

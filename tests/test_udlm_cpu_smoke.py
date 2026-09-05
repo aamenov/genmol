@@ -1,6 +1,7 @@
 import pytest
 
 from scripts.udlm.cpu_smoke import (
+    _bind_output_path,
     _config,
     _validate_git_provenance,
     _validate_smoke_gate,
@@ -67,9 +68,7 @@ def test_smoke_gate_rejects_failed_evidence(losses, before_after, generated, mes
 
 
 def test_smoke_requires_clean_pushed_commit():
-    _validate_git_provenance(
-        {"commit": "a" * 40, "upstream": "a" * 40, "dirty": False}
-    )
+    _validate_git_provenance({"commit": "a" * 40, "upstream": "a" * 40, "dirty": False})
     with pytest.raises(RuntimeError, match="upstream"):
         _validate_git_provenance(
             {"commit": "a" * 40, "upstream": "b" * 40, "dirty": False}
@@ -86,3 +85,14 @@ def test_smoke_writer_is_no_clobber(tmp_path):
     with pytest.raises(FileExistsError):
         _write_json_exclusive(path, {"value": 2})
     assert path.read_text(encoding="utf-8") == '{\n  "value": 1\n}\n'
+
+
+def test_smoke_output_binding_rejects_a_dangling_leaf_symlink(tmp_path, monkeypatch):
+    monkeypatch.setattr("scripts.udlm.cpu_smoke.ROOT_DIR", tmp_path)
+    dangling = tmp_path / "result.json"
+    dangling.symlink_to(tmp_path / "missing-target.json")
+
+    with pytest.raises(FileExistsError, match="refusing to overwrite"):
+        _bind_output_path(dangling)
+    assert dangling.is_symlink()
+    assert not (tmp_path / "missing-target.json").exists()

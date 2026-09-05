@@ -139,6 +139,20 @@ def _write_json_exclusive(path: Path, payload: dict[str, object]) -> None:
         os.fsync(handle.fileno())
 
 
+def _bind_output_path(path: Path) -> Path:
+    """Resolve only the parent so a dangling leaf symlink cannot disappear."""
+
+    lexical = Path(os.path.abspath(os.fspath(path)))
+    if not lexical.name:
+        raise ValueError("output must name a JSON file")
+    bound = lexical.parent.resolve() / lexical.name
+    if bound == ROOT_DIR or ROOT_DIR not in bound.parents:
+        raise ValueError(f"output must remain inside repository root {ROOT_DIR}")
+    if os.path.lexists(bound):
+        raise FileExistsError(f"refusing to overwrite existing smoke artifact: {bound}")
+    return bound
+
+
 def _config(
     *,
     exclude_special_tokens: bool,
@@ -200,7 +214,9 @@ def _config(
 
 def _batch(model: GenMol):
     converter = sf.SAFEConverter()
-    safe_strings = [converter.encoder(smiles, allow_empty=True) for smiles in TOY_SMILES]
+    safe_strings = [
+        converter.encoder(smiles, allow_empty=True) for smiles in TOY_SMILES
+    ]
     batch = model.tokenizer(
         safe_strings,
         return_tensors="pt",
@@ -270,7 +286,9 @@ def _validate_smoke_gate(losses, before, after, generated):
     else:
         window = min(5, max(1, len(losses) // 2))
         if sum(losses[-window:]) / window >= sum(losses[:window]) / window:
-            failures.append("last-window mean loss did not fall below first-window mean")
+            failures.append(
+                "last-window mean loss did not fall below first-window mean"
+            )
     if after["0.5"]["loss"] >= before["0.5"]["loss"]:
         failures.append("fixed t=0.5 diagnostic loss did not improve")
     for time_value, before_row in before.items():
@@ -313,7 +331,7 @@ def main():
         0.0 < args.empirical_uniform_mix < 1.0
     ):
         raise ValueError("empirical-uniform-mix must lie in (0, 1)")
-    output_path = (
+    output_path = _bind_output_path(
         args.output
         if args.output is not None
         else ROOT_DIR
@@ -324,11 +342,7 @@ def main():
             f"{args.prior_variant}_seed{args.seed}_steps{args.steps}_"
             f"n{args.sample_count}.json"
         )
-    ).resolve()
-    if output_path != ROOT_DIR and ROOT_DIR not in output_path.parents:
-        raise ValueError(f"output must remain inside repository root {ROOT_DIR}")
-    if output_path.exists():
-        raise FileExistsError(f"refusing to overwrite existing smoke artifact: {output_path}")
+    )
 
     started = time.time()
     started_at = datetime.now(timezone.utc).isoformat()

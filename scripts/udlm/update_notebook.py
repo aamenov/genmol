@@ -1448,8 +1448,11 @@ dataset imbalance, suppress useful rare chemistry, or reduce exploration. We
 therefore treat it as a falsifiable hypothesis, not an automatic improvement.
 
 **Symbols and mathematics.** Let $\mathcal A\subseteq\{1,\ldots,K\}$ be the
-active diffusion alphabet after the five immutable tokenizer-control IDs are
-removed, and let $A=|\mathcal A|$. Let
+configured active diffusion alphabet and let $A=|\mathcal A|$. The primary
+three-way comparison keeps all $K=1880$ tokenizer entries active so that
+`release_uniform`, `schedule_uniform`, and `empirical_frequency` have identical
+support. Removing the five tokenizer-control IDs gives $A=1875$ and is a
+separate, explicitly labeled support ablation. Let
 $\pi=(\pi_j)_{j\in\mathcal A}$ satisfy $\pi_j>0$ and
 $\sum_{j\in\mathcal A}\pi_j=1$. For clean token $x$, candidate token $j$,
 time $t\in[0,1]$, and
@@ -1506,7 +1509,8 @@ $f_j=c_j/\sum_{k\in\mathcal A}c_k$. We use
 $$\pi_j=(1-\lambda)f_j+\lambda/A,\qquad \lambda=0.01.$$
 
 The uniform component gives every active category positive mass, including
-categories unseen in the prefix. The dataset revision, ordered-text digest,
+categories unseen in the prefix and, in the primary full-support comparison,
+the five zero-count control tokens. The dataset revision, ordered-text digest,
 tokenizer revision, counts, and artifact bytes are pinned; the prefix is a
 prior-design diagnostic, not an estimate with a benchmark claim.
 
@@ -1522,8 +1526,9 @@ undo that structured corruption.
 posterior, loss, and endpoint-KL values on a three-category example. Tensors
 `x0` and `xt` have shape `(B,L)`, logits have shape `(B,L,A)`, and posterior
 probabilities have shape `(B,L,A)`. A second part validates the exact pinned
-10,000-row frequency artifact and constructs all 1,875 active probabilities
-without network or GPU access.
+10,000-row frequency artifact and constructs both the primary 1,880-entry
+prior and the separate 1,875-entry control-token-excluded ablation without
+network or GPU access.
 
 **Difference from released implementations.** Official UDLM uses uniform
 $\pi$ and an idealized loss schedule in its released compatibility path.
@@ -1619,8 +1624,11 @@ categorical_logits = torch.tensor(
     dtype=torch.float64,
 )                                                               # (B,L,A)
 
+categorical_alpha_reference = (
+    1.0 - (1.0 - 1e-3) * categorical_t
+)
 categorical_forward_reference = reference_categorical_forward(
-    categorical_x0, categorical_udlm.alpha(categorical_t), toy_pi
+    categorical_x0, categorical_alpha_reference, toy_pi
 )
 categorical_posterior_reference = reference_categorical_posterior(
     categorical_logits,
@@ -1634,6 +1642,31 @@ categorical_posterior_production = categorical_udlm.posterior_probs(
     categorical_logits, categorical_xt, categorical_t, categorical_s
 )
 assert categorical_forward_reference.shape == (2, 3, 3)
+categorical_draw_count = 50_000
+categorical_draw_clean = torch.zeros(
+    (categorical_draw_count, 1), dtype=torch.long
+)
+categorical_draw_times = torch.full((categorical_draw_count,), 0.75)
+categorical_draws = categorical_udlm.forward_process(
+    categorical_draw_clean,
+    categorical_draw_times,
+    generator=torch.Generator().manual_seed(205),
+)
+categorical_forward_empirical = (
+    torch.bincount(categorical_draws[:, 0], minlength=3).to(torch.float64)
+    / categorical_draw_count
+)
+categorical_forward_expected = reference_categorical_forward(
+    torch.zeros((1, 1), dtype=torch.long),
+    torch.tensor([1.0 - (1.0 - 1e-3) * 0.75], dtype=torch.float64),
+    toy_pi,
+)[0, 0]
+assert torch.allclose(
+    categorical_forward_empirical,
+    categorical_forward_expected,
+    atol=0.006,
+    rtol=0,
+)
 assert categorical_posterior_production.shape == (2, 3, 3)
 assert torch.allclose(
     categorical_posterior_production,
@@ -1708,33 +1741,53 @@ stage20_special_ids = tuple(
 stage20_counts = torch.tensor(
     stage20_frequency["counts_by_token_id"], dtype=torch.float64
 )
-stage20_active_ids = torch.tensor(
+assert stage20_counts.shape == (1880,)
+assert stage20_special_ids == (0, 1, 2, 3, 4)
+assert torch.count_nonzero(stage20_counts[list(stage20_special_ids)]) == 0
+stage20_uniform_mix = 0.01
+stage20_primary_active_ids = torch.arange(stage20_counts.numel())
+stage20_primary_counts = stage20_counts[stage20_primary_active_ids]
+stage20_primary_empirical = stage20_primary_counts / stage20_primary_counts.sum()
+stage20_primary_pi = (
+    (1.0 - stage20_uniform_mix) * stage20_primary_empirical
+    + stage20_uniform_mix / stage20_primary_active_ids.numel()
+)
+assert stage20_primary_pi.shape == (1880,)
+assert torch.all(stage20_primary_pi > 0)
+assert torch.isclose(
+    stage20_primary_pi.sum(), torch.tensor(1.0, dtype=torch.float64)
+)
+assert not torch.allclose(
+    stage20_primary_pi,
+    torch.full_like(
+        stage20_primary_pi, 1.0 / stage20_primary_active_ids.numel()
+    ),
+)
+
+stage20_excluded_active_ids = torch.tensor(
     [
         token_id
         for token_id in range(stage20_counts.numel())
         if token_id not in stage20_special_ids
     ]
 )
-assert stage20_counts.shape == (1880,)
-assert stage20_special_ids == (0, 1, 2, 3, 4)
-assert torch.count_nonzero(stage20_counts[list(stage20_special_ids)]) == 0
-stage20_active_counts = stage20_counts[stage20_active_ids]
-stage20_empirical = stage20_active_counts / stage20_active_counts.sum()
-stage20_uniform_mix = 0.01
-stage20_empirical_pi = (
-    (1.0 - stage20_uniform_mix) * stage20_empirical
-    + stage20_uniform_mix / stage20_active_ids.numel()
+stage20_excluded_counts = stage20_counts[stage20_excluded_active_ids]
+stage20_excluded_empirical = (
+    stage20_excluded_counts / stage20_excluded_counts.sum()
 )
-assert stage20_empirical_pi.shape == (1875,)
-assert torch.all(stage20_empirical_pi > 0)
-assert torch.isclose(stage20_empirical_pi.sum(), torch.tensor(1.0, dtype=torch.float64))
-assert not torch.allclose(
-    stage20_empirical_pi,
-    torch.full_like(stage20_empirical_pi, 1.0 / stage20_active_ids.numel()),
+stage20_excluded_pi = (
+    (1.0 - stage20_uniform_mix) * stage20_excluded_empirical
+    + stage20_uniform_mix / stage20_excluded_active_ids.numel()
+)
+assert stage20_excluded_pi.shape == (1875,)
+assert torch.all(stage20_excluded_pi > 0)
+assert torch.isclose(
+    stage20_excluded_pi.sum(), torch.tensor(1.0, dtype=torch.float64)
 )
 
 stage20_categorical_checks = {
     "toy_forward_shape": tuple(categorical_forward_reference.shape),
+    "forward_sampler_matches_analytical_frequencies": True,
     "toy_posterior_shape": tuple(categorical_posterior_production.shape),
     "posterior_matches_bayes_oracle": True,
     "loss_matches_density_ratio_oracle": True,
@@ -1743,12 +1796,18 @@ stage20_categorical_checks = {
         stage20_frequency_bytes
     ).hexdigest(),
     "frequency_examples": stage20_frequency["example_count"],
-    "frequency_content_tokens": int(stage20_active_counts.sum()),
-    "active_vocab_size": stage20_active_ids.numel(),
-    "zero_count_active_tokens": int((stage20_active_counts == 0).sum()),
+    "frequency_content_tokens": int(stage20_primary_counts.sum()),
+    "primary_active_vocab_size": stage20_primary_active_ids.numel(),
+    "primary_zero_count_active_tokens": int(
+        (stage20_primary_counts == 0).sum()
+    ),
+    "excluded_ablation_active_vocab_size": stage20_excluded_active_ids.numel(),
+    "excluded_ablation_zero_count_active_tokens": int(
+        (stage20_excluded_counts == 0).sum()
+    ),
     "uniform_mixture_weight": stage20_uniform_mix,
-    "stationary_prior_min": float(stage20_empirical_pi.min()),
-    "stationary_prior_max": float(stage20_empirical_pi.max()),
+    "primary_stationary_prior_min": float(stage20_primary_pi.min()),
+    "primary_stationary_prior_max": float(stage20_primary_pi.max()),
 }
 print(stage20_categorical_checks)
 """,
