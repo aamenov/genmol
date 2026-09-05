@@ -688,6 +688,39 @@ class AblationCollectorTests(unittest.TestCase):
                     collector._parse_launch_command(missing_prior_command)
                 )
 
+    def test_matrix_plan_resolves_only_the_declared_output_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clean_clone = root / "clean-clone"
+            clean_clone.mkdir()
+            physical_output = root / "physical-output"
+            (physical_output / "pmo_ablation" / "test_experiment").mkdir(
+                parents=True
+            )
+            (clean_clone / "output").symlink_to(
+                physical_output, target_is_directory=True
+            )
+            matrix_path = self._write_matrix(clean_clone)
+            matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+            matrix["common"]["output_root"] = "output/pmo_ablation"
+            matrix_path.write_text(json.dumps(matrix), encoding="utf-8")
+
+            experiment_root = physical_output / "pmo_ablation" / "test_experiment"
+            with mock.patch.object(launcher, "REPOSITORY_ROOT", clean_clone):
+                plan = collector._load_matrix_plan(matrix_path, experiment_root)
+
+            self.assertEqual(set(plan.jobs), {("qed", "delta", 0)})
+            with self.assertRaisesRegex(collector.CollectionError, "symlinks"):
+                collector.collect_results(
+                    clean_clone
+                    / "output"
+                    / "pmo_ablation"
+                    / "test_experiment",
+                    root / "archive",
+                    matrix_path=matrix_path,
+                    trust_local_checkpoints=True,
+                )
+
     def test_schema_gates_explicit_pair_and_nonempty_null_metrics(self):
         with tempfile.TemporaryDirectory() as directory:
             _, run_dir = self._completed_run(directory, summary_schema=2)

@@ -788,7 +788,9 @@ def _load_matrix_plan(
         if identity in jobs:
             raise CollectionError(f"matrix repeats job identity {identity!r}")
         expected_dir = experiment_root / job.oracle / job.variant / f"seed_{job.seed}"
-        generated_dir = _lexical_absolute(ablation_launcher._run_dir(matrix, job))
+        generated_dir = _lexical_absolute(
+            ablation_launcher._run_dir(matrix, job)
+        ).resolve(strict=False)
         _equal(generated_dir, expected_dir, f"matrix output directory for {identity!r}")
         jobs[identity] = job
     if not jobs:
