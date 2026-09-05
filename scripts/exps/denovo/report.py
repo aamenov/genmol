@@ -5,8 +5,9 @@ The report consumes only completed per-seed artifacts produced by
 authoritative count ledger: all validity, uniqueness, quality, repair, and
 largest-component counts are recomputed before any aggregate is published.
 
-This script is intentionally CPU-only.  It neither loads the model checkpoint
-nor imports Torch, RDKit, SAFE, or TDC.
+This script is intentionally CPU-only. It never loads the model checkpoint or
+imports RDKit, SAFE, or TDC. Categorical-prior validation imports Torch only to
+reproduce the checkpoint constructor's exact float64 normalization and digest.
 """
 
 from __future__ import annotations
@@ -49,12 +50,16 @@ from scripts.exps.denovo.benchmark import (  # noqa: E402
     TDC_METRIC_IMPLEMENTATION_SHA256,
     TDC_METRIC_IMPLEMENTATION_SIZE_BYTES,
     TDC_METRIC_IMPLEMENTATION_PATHS,
+    UDLM_CATEGORICAL_PRIOR_VARIANTS,
+    UDLM_PRIOR_VARIANT_IDENTITIES,
+    UDLM_PRIOR_VARIANTS,
     benchmark_run_label,
+    validate_udlm_prior_metadata_record,
     validate_sampling_config,
 )
 
 
-REPORT_SCHEMA_VERSION = 3
+REPORT_SCHEMA_VERSION = 4
 EXPECTED_SEEDS = (0, 1, 2)
 EXPECTED_SAMPLES_PER_SEED = 1_000
 EXPECTED_GLOBAL_STEP = 50_000
@@ -70,6 +75,8 @@ PAPER_V1_SAMPLING_CONFIG = {
     "num_steps": None,
     "inference_eps": None,
     "exclude_special_tokens": None,
+    "prior_variant": None,
+    "prior_metadata_sha256": None,
 }
 EXPECTED_GENERATION_PROTOCOL = {
     "diffusion_type": "mdlm",
@@ -81,6 +88,8 @@ EXPECTED_GENERATION_PROTOCOL = {
     ),
     "inference_eps": None,
     "exclude_special_tokens": None,
+    "prior_variant": None,
+    "prior_metadata_sha256": None,
     "temperature": 0.5,
     "randomness": 0.5,
     "randomness_used_by_sampler": True,
@@ -190,6 +199,7 @@ METRIC_LABELS = {
 }
 BRANCH_PREFIX = {"released_comparable": "released", "strict": "strict"}
 HEX_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+HEX_GIT_REVISION = re.compile(r"[0-9a-f]{40}\Z")
 
 
 class ReportValidationError(ValueError):
@@ -302,6 +312,14 @@ def _validate_compute_processes(value: Any, context: str) -> list[dict[str, Any]
 def _sha256_value(value: Any, context: str) -> str:
     if not isinstance(value, str) or not HEX_SHA256.fullmatch(value):
         raise ReportValidationError(f"{context} must be a lowercase SHA-256 digest")
+    return value
+
+
+def _git_revision_value(value: Any, context: str) -> str:
+    if not isinstance(value, str) or not HEX_GIT_REVISION.fullmatch(value):
+        raise ReportValidationError(
+            f"{context} must be a 40-digit lowercase Git revision"
+        )
     return value
 
 
@@ -646,6 +664,9 @@ def _validate_cuda_provenance(
     seed: int,
     checkpoint_global_step: int,
     checkpoint_sha256: str,
+    checkpoint_path: Any,
+    config_path: Any,
+    config_sha256: str,
     git_commit: Any,
     summary_path: Path,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -756,9 +777,11 @@ def _validate_cuda_provenance(
     inventory_snapshot_completed_at_utc = None
     final_uuid_probe_completed_at_utc = None
     if selection_schema_version is None:
-        physical_gpu_field = "physical_gpu"
-        selected_gpu_telemetry_stage = "legacy_final_launch_probe"
-    elif (
+        raise ReportValidationError(
+            f"{context} schema-{RUN_SCHEMA_VERSION} runs require the dynamic "
+            "gpu_selection_schema_version 2 launch contract"
+        )
+    if (
         _integer(
             selection_schema_version,
             f"{context} launch snapshot gpu_selection_schema_version",
@@ -819,10 +842,14 @@ def _validate_cuda_provenance(
         raise ReportValidationError(
             f"{context} launch snapshot lacks exact source revision provenance"
         )
-    if (
-        source_revision.get("head") != source_revision.get("upstream")
-        or source_revision.get("head") != git_commit
-    ):
+    source_head = _git_revision_value(
+        source_revision.get("head"), f"{context} launch snapshot source_revision.head"
+    )
+    source_upstream = _git_revision_value(
+        source_revision.get("upstream"),
+        f"{context} launch snapshot source_revision.upstream",
+    )
+    if source_head != source_upstream or source_head != git_commit:
         raise ReportValidationError(
             f"{context} benchmark source was not the recorded pushed commit"
         )
@@ -1128,6 +1155,94 @@ def _validate_cuda_provenance(
             raise ReportValidationError(
                 f"{summary_path}: run.command {option} must equal {expected}"
             )
+    pinned_digest = _command_option(
+        command,
+        "--expected-checkpoint-sha256",
+        f"{summary_path}: run.command",
+    )
+    if pinned_digest != checkpoint_sha256:
+        raise ReportValidationError(
+            f"{summary_path}: run.command --expected-checkpoint-sha256 must "
+            "equal the loaded checkpoint digest"
+        )
+    pinned_source_revision = _command_option(
+        command,
+        "--expected-source-revision",
+        f"{summary_path}: run.command",
+    )
+    if pinned_source_revision != source_head:
+        raise ReportValidationError(
+            f"{summary_path}: run.command --expected-source-revision must "
+            "equal the launcher's pushed source revision"
+        )
+    pinned_config_digest = _command_option(
+        command,
+        "--expected-config-sha256",
+        f"{summary_path}: run.command",
+    )
+    if pinned_config_digest != config_sha256:
+        raise ReportValidationError(
+            f"{summary_path}: run.command --expected-config-sha256 must "
+            "equal the loaded inference-config digest"
+        )
+    expected_paths = {
+        "--checkpoint": checkpoint_path,
+        "--config": config_path,
+        "--output-dir": summary_path.parent,
+    }
+    for option, expected_path in expected_paths.items():
+        raw_path = _command_option(
+            command,
+            option,
+            f"{summary_path}: run.command",
+        )
+        if not isinstance(expected_path, str | Path) or not str(expected_path):
+            raise ReportValidationError(
+                f"{summary_path}: recorded path for {option} is invalid"
+            )
+        if Path(raw_path).resolve() != Path(expected_path).resolve():
+            raise ReportValidationError(
+                f"{summary_path}: run.command {option} disagrees with its "
+                "recorded artifact path"
+            )
+    if len(command) != 20:
+        raise ReportValidationError(
+            f"{summary_path}: run.command must contain only the nine bound options"
+        )
+    working_directory = environment.get("working_directory")
+    executable = environment.get("executable")
+    if not isinstance(working_directory, str) or not working_directory:
+        raise ReportValidationError(f"{context}.working_directory must be recorded")
+    if Path(working_directory).resolve() != REPOSITORY_ROOT:
+        raise ReportValidationError(
+            f"{context}.working_directory must be the benchmark repository root"
+        )
+    if not isinstance(executable, str) or not executable:
+        raise ReportValidationError(f"{context}.executable must be recorded")
+
+    def command_path(value: str) -> Path:
+        path = Path(value)
+        return (Path(working_directory) / path).resolve() if not path.is_absolute() else path.resolve()
+
+    if command_path(command[0]) != command_path(executable):
+        raise ReportValidationError(
+            f"{summary_path}: run.command interpreter disagrees with environment"
+        )
+    project_root = (
+        REPOSITORY_ROOT.parent.parent
+        if REPOSITORY_ROOT.parent.name == "run_sources"
+        else REPOSITORY_ROOT
+    )
+    if command_path(command[0]) != (project_root / ".venv/bin/python").resolve():
+        raise ReportValidationError(
+            f"{summary_path}: run.command did not use the project .venv Python"
+        )
+    if command_path(command[1]) != (
+        REPOSITORY_ROOT / "scripts/exps/denovo/benchmark.py"
+    ).resolve():
+        raise ReportValidationError(
+            f"{summary_path}: run.command does not execute the pinned benchmark script"
+        )
 
     environment_signature = {
         "python": environment["python"],
@@ -1427,6 +1542,12 @@ def _validate_generation_protocol(
         raise ReportValidationError(f"{context}.temperature disagrees with config")
     if protocol.get("randomness") != sampling["randomness"]:
         raise ReportValidationError(f"{context}.randomness disagrees with config")
+    if protocol.get("prior_variant") != sampling["prior_variant"]:
+        raise ReportValidationError(f"{context}.prior_variant disagrees with config")
+    if protocol.get("prior_metadata_sha256") != sampling["prior_metadata_sha256"]:
+        raise ReportValidationError(
+            f"{context}.prior_metadata_sha256 disagrees with config"
+        )
 
     if diffusion_type == "udlm":
         if protocol.get("num_steps") != sampling["num_steps"] or nfe != sampling["num_steps"]:
@@ -1452,9 +1573,11 @@ def _validate_generation_protocol(
             protocol.get("num_steps") is not None
             or protocol.get("inference_eps") is not None
             or protocol.get("exclude_special_tokens") is not None
+            or protocol.get("prior_variant") is not None
+            or protocol.get("prior_metadata_sha256") is not None
         ):
             raise ReportValidationError(
-                f"{context} MDLM num_steps and inference_eps must be null"
+                f"{context} MDLM UDLM-only settings must be null"
             )
         if protocol.get("num_steps_source") != (
             "MDLM.get_num_steps_confidence on the single padded generation batch"
@@ -1563,6 +1686,16 @@ def _validate_summary_and_rows(
         raise ReportValidationError(
             f"{summary_path} is a pilot artifact and cannot enter the final report"
         )
+    started_at = _utc_datetime(
+        run.get("started_at_utc"), f"{summary_path}: run.started_at_utc"
+    )
+    completed_at = _utc_datetime(
+        run.get("completed_at_utc"), f"{summary_path}: run.completed_at_utc"
+    )
+    if completed_at < started_at:
+        raise ReportValidationError(
+            f"{summary_path} run.completed_at_utc predates run.started_at_utc"
+        )
     generation_protocol = _mapping(
         run.get("generation_protocol"), "run.generation_protocol"
     )
@@ -1575,6 +1708,10 @@ def _validate_summary_and_rows(
         raise ReportValidationError(
             f"seed {expected_seed} has invalid checkpoint step or size metadata"
         )
+    if checkpoint.get("byte_identity_verified_before_and_after_load") is not True:
+        raise ReportValidationError(
+            f"seed {expected_seed} did not verify stable checkpoint bytes around loading"
+        )
     checkpoint_diffusion_type = str(checkpoint.get("diffusion_type", "")).lower()
     if checkpoint_diffusion_type not in {"mdlm", "udlm"}:
         raise ReportValidationError(
@@ -1584,15 +1721,60 @@ def _validate_summary_and_rows(
     checkpoint_udlm_exclude_special_tokens = checkpoint.get(
         "udlm_exclude_special_tokens"
     )
-    if checkpoint_diffusion_type == "mdlm" and checkpoint_udlm_inference_eps is not None:
-        raise ReportValidationError("MDLM checkpoint must record null udlm_inference_eps")
-    if (
-        checkpoint_diffusion_type == "mdlm"
-        and checkpoint_udlm_exclude_special_tokens is not None
-    ):
-        raise ReportValidationError(
-            "MDLM checkpoint must record null udlm_exclude_special_tokens"
-        )
+    checkpoint_prior_variant = checkpoint.get("udlm_prior_variant")
+    checkpoint_prior_metadata = checkpoint.get("udlm_prior_metadata")
+    checkpoint_prior_digest = checkpoint.get("udlm_prior_metadata_sha256")
+    if checkpoint_diffusion_type == "mdlm":
+        if (
+            checkpoint_sha != EXPECTED_CHECKPOINT_SHA256
+            or global_step != EXPECTED_GLOBAL_STEP
+            or size_bytes != EXPECTED_CHECKPOINT_SIZE_BYTES
+        ):
+            raise ReportValidationError(
+                "MDLM reports are restricted to the audited 50k baseline checkpoint; "
+                "its checkpoint hash, step, and byte size must all match"
+            )
+        if any(
+            value is not None
+            for value in (
+                checkpoint_udlm_inference_eps,
+                checkpoint_udlm_exclude_special_tokens,
+                checkpoint_prior_variant,
+                checkpoint_prior_metadata,
+                checkpoint_prior_digest,
+            )
+        ):
+            raise ReportValidationError(
+                "MDLM checkpoint must record null UDLM endpoint and prior fields"
+            )
+    else:
+        if checkpoint_prior_variant not in UDLM_PRIOR_VARIANTS:
+            raise ReportValidationError(
+                "UDLM checkpoint has an invalid udlm_prior_variant"
+            )
+        if checkpoint_prior_variant == "release_uniform":
+            if checkpoint_prior_metadata is not None or checkpoint_prior_digest is not None:
+                raise ReportValidationError(
+                    "release_uniform checkpoint must not declare categorical prior metadata"
+                )
+        else:
+            try:
+                checkpoint_prior_digest = _sha256_value(
+                    checkpoint_prior_digest,
+                    "checkpoint.udlm_prior_metadata_sha256",
+                )
+                validated_prior = validate_udlm_prior_metadata_record(
+                    checkpoint_prior_metadata,
+                    expected_variant=checkpoint_prior_variant,
+                )
+            except (RuntimeError, ValueError) as exc:
+                raise ReportValidationError(
+                    f"categorical checkpoint prior metadata is invalid: {exc}"
+                ) from exc
+            if _sha256_json(validated_prior) != checkpoint_prior_digest:
+                raise ReportValidationError(
+                    "checkpoint categorical prior metadata digest is invalid"
+                )
 
     config = _mapping(summary["config"], f"{summary_path}: config")
     for key in ("sha256", "sampling_sha256", "effective_sha256"):
@@ -1637,6 +1819,27 @@ def _validate_summary_and_rows(
             raise ReportValidationError(
                 f"{summary_path} UDLM checkpoint/config special-token policies disagree"
             )
+        if checkpoint_prior_variant != sampling["prior_variant"]:
+            raise ReportValidationError(
+                f"{summary_path} UDLM checkpoint/config prior variants disagree"
+            )
+        if checkpoint_prior_digest != sampling["prior_metadata_sha256"]:
+            raise ReportValidationError(
+                f"{summary_path} UDLM checkpoint/config prior metadata hashes disagree"
+            )
+        if checkpoint_prior_variant in UDLM_CATEGORICAL_PRIOR_VARIANTS:
+            try:
+                validate_udlm_prior_metadata_record(
+                    checkpoint_prior_metadata,
+                    expected_variant=checkpoint_prior_variant,
+                    expected_exclude_special_tokens=sampling[
+                        "exclude_special_tokens"
+                    ],
+                )
+            except RuntimeError as exc:
+                raise ReportValidationError(
+                    f"categorical checkpoint/config prior identity is invalid: {exc}"
+                ) from exc
     _validate_generation_protocol(
         generation_protocol,
         sampling,
@@ -1644,7 +1847,14 @@ def _validate_summary_and_rows(
     )
     source = _mapping(config.get("source"), "config.source")
     for key, expected in sampling.items():
-        if source.get(key) != expected:
+        source_value = source.get(key)
+        if (
+            key == "prior_variant"
+            and key not in source
+            and sampling["diffusion_type"] == "udlm"
+        ):
+            source_value = "release_uniform"
+        if source_value != expected:
             raise ReportValidationError(
                 f"{summary_path} config.source.{key}={source.get(key)!r}; "
                 f"expected exact V1 value {expected!r}"
@@ -1772,6 +1982,23 @@ def _validate_summary_and_rows(
 
     git = _mapping(summary["git"], f"{summary_path}: git")
     runner_sha = _sha256_value(git.get("runner_sha256"), "git.runner_sha256")
+    git_commit = _git_revision_value(git.get("commit"), "git.commit")
+    git_upstream = _git_revision_value(git.get("upstream"), "git.upstream")
+    expected_source_revision = _git_revision_value(
+        git.get("expected_source_revision"), "git.expected_source_revision"
+    )
+    if not (git_commit == git_upstream == expected_source_revision):
+        raise ReportValidationError(
+            f"{summary_path} Git commit, upstream, and expected source revision disagree"
+        )
+    if git.get("dirty") is not False:
+        raise ReportValidationError(
+            f"{summary_path} benchmark source was dirty during provenance capture"
+        )
+    if git.get("clean_pushed_source_verified_before_and_after_run") is not True:
+        raise ReportValidationError(
+            f"{summary_path} lacks child-side pre/post clean pushed-source verification"
+        )
     environment = _mapping(summary["environment"], f"{summary_path}: environment")
     environment_signature, launch_provenance = _validate_cuda_provenance(
         environment,
@@ -1779,7 +2006,10 @@ def _validate_summary_and_rows(
         seed=expected_seed,
         checkpoint_global_step=global_step,
         checkpoint_sha256=checkpoint_sha,
-        git_commit=git.get("commit"),
+        checkpoint_path=checkpoint.get("path"),
+        config_path=config.get("path"),
+        config_sha256=config["sha256"],
+        git_commit=git_commit,
         summary_path=summary_path,
     )
     tokenizer = _validate_tokenizer_provenance(
@@ -1794,10 +2024,14 @@ def _validate_summary_and_rows(
     if set(implementation_inputs) != {
         "sampler_source",
         "model_source",
+        "ema_source",
+        "checkpoint_io_source",
         "diffusion_source",
         "backbone_source",
         "chemistry_utils_source",
         "data_utils_source",
+        "moco_utils_source",
+        "save_utils_source",
         "bracket_safe_converter_source",
         "length_distribution",
     }:
@@ -1838,6 +2072,8 @@ def _validate_summary_and_rows(
 
     return {
         "seed": expected_seed,
+        "started_at_utc": run["started_at_utc"],
+        "completed_at_utc": run["completed_at_utc"],
         "run_dir": str(run_dir.resolve()),
         "summary_path": str(summary_path.resolve()),
         "summary_sha256": _sha256_file(summary_path),
@@ -1975,6 +2211,70 @@ def _funnel_for_run(run: Mapping[str, Any]) -> dict[str, int]:
     }
 
 
+def _prior_interpretation(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
+    """Return an explicit causal label for the evaluated corruption process."""
+
+    if checkpoint["diffusion_type"] == "mdlm":
+        return {
+            "variant": None,
+            "label": "audited_local_mdlm_evaluation",
+            "comparison_role": "local_mdlm_control",
+            "process_family": "masked_diffusion_language_model",
+            "schedule_variant": None,
+            "prior_source": None,
+            "objective_scope": None,
+            "prior_metadata_sha256": None,
+            "matched_prior_effect_control": None,
+            "causal_claim_boundary": (
+                "This is a local checkpoint evaluation, not the published GenMol run. "
+                "Published GenMol V1 values remain an external paper reference, and no "
+                "categorical-prior effect is estimated by this MDLM benchmark."
+            ),
+        }
+    variant = checkpoint["udlm_prior_variant"]
+    identity = UDLM_PRIOR_VARIANT_IDENTITIES[variant]
+    labels = {
+        "release_uniform": "faithful_release_uniform_control",
+        "schedule_uniform": "schedule_repair_uniform_control",
+        "empirical_frequency": "smoothed_empirical_prior_treatment",
+    }
+    if variant == "schedule_uniform":
+        matched_control = "release_uniform diagnoses the schedule/process change"
+        boundary = (
+            "This is the uniform schedule-repair control. Any improvement over "
+            "release_uniform or MDLM is not evidence of empirical-prior benefit. "
+            "Its training objective excludes the parameter-independent endpoint KL, "
+            "which must be reported separately."
+        )
+    elif variant == "empirical_frequency":
+        matched_control = "schedule_uniform with the same categorical process and schedule"
+        boundary = (
+            "Only empirical_frequency minus a matched schedule_uniform checkpoint can "
+            "estimate a stationary-prior effect. Comparison with release_uniform or MDLM "
+            "conflates the prior with schedule/process changes and is not prior-benefit "
+            "evidence. Its training objective excludes the parameter-independent endpoint "
+            "KL, which must be reported separately."
+        )
+    else:
+        matched_control = None
+        boundary = (
+            "This is the faithful released uniform UDLM control; it contains neither "
+            "the categorical schedule repair nor an empirical prior."
+        )
+    return {
+        "variant": variant,
+        "label": labels[variant],
+        "comparison_role": identity["comparison_role"],
+        "process_family": identity["process_family"],
+        "schedule_variant": identity["schedule_variant"],
+        "prior_source": identity["prior_source"],
+        "objective_scope": identity["objective_scope"],
+        "prior_metadata_sha256": checkpoint["udlm_prior_metadata_sha256"],
+        "matched_prior_effect_control": matched_control,
+        "causal_claim_boundary": boundary,
+    }
+
+
 def collect_report(runs_dir: Path) -> dict[str, Any]:
     """Validate three run directories and return the report data model."""
     by_seed = discover_run_directories(runs_dir)
@@ -1983,6 +2283,7 @@ def collect_report(runs_dir: Path) -> dict[str, Any]:
         for seed in EXPECTED_SEEDS
     ]
     checkpoint, config = _common_identity(runs)
+    prior_interpretation = _prior_interpretation(checkpoint)
 
     local_metrics: dict[str, Any] = {}
     for branch_name in BRANCH_PREFIX:
@@ -2064,6 +2365,8 @@ def collect_report(runs_dir: Path) -> dict[str, Any]:
         seed_rows.append(
             {
                 "seed": run["seed"],
+                "started_at_utc": run["started_at_utc"],
+                "completed_at_utc": run["completed_at_utc"],
                 "summary_path": run["summary_path"],
                 "summary_sha256": run["summary_sha256"],
                 "raw_samples_path": run["raw_samples_path"],
@@ -2167,15 +2470,19 @@ def collect_report(runs_dir: Path) -> dict[str, Any]:
     ]
     evaluated_diffusion_type = config["sampling"]["diffusion_type"]
     if evaluated_diffusion_type == "udlm":
+        prior_variant = checkpoint["udlm_prior_variant"]
+        prior_identity = UDLM_PRIOR_VARIANT_IDENTITIES[prior_variant]
         deviations = [
             {
                 "item": "Diffusion formulation",
                 "local": (
-                    "Continuous-time uniform diffusion with explicit reverse-step NFE"
+                    f"{prior_interpretation['label']}: "
+                    f"{prior_identity['process_family']} / "
+                    f"{prior_identity['schedule_variant']}"
                 ),
                 "published": "GenMol V1 masked diffusion (MDLM)",
                 "consequence": (
-                    "This is the intended model comparison, not an exact reproduction."
+                    prior_interpretation["causal_claim_boundary"]
                 ),
             },
             {
@@ -2229,6 +2536,8 @@ def collect_report(runs_dir: Path) -> dict[str, Any]:
             "and disables TDC's implicit downloader during scoring."
         ),
     ]
+    if evaluated_diffusion_type == "udlm":
+        caveats.append(prior_interpretation["causal_claim_boundary"])
 
     return {
         "schema_version": REPORT_SCHEMA_VERSION,
@@ -2246,6 +2555,7 @@ def collect_report(runs_dir: Path) -> dict[str, Any]:
             * EXPECTED_SAMPLES_PER_SEED,
         },
         "checkpoint": checkpoint,
+        "udlm_prior_interpretation": prior_interpretation,
         "config": config,
         "generation_protocol": {
             **runs[0]["summary"]["run"]["generation_protocol"],
@@ -2330,6 +2640,10 @@ CSV_FIELDS = (
     "unit",
     "checkpoint_sha256",
     "global_step",
+    "udlm_prior_variant",
+    "udlm_prior_metadata_sha256",
+    "udlm_comparison_role",
+    "udlm_objective_scope",
     "note",
 )
 
@@ -2340,6 +2654,16 @@ def aggregate_csv_rows(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
     common = {
         "checkpoint_sha256": checkpoint["sha256"],
         "global_step": checkpoint["global_step"],
+        "udlm_prior_variant": checkpoint.get("udlm_prior_variant"),
+        "udlm_prior_metadata_sha256": checkpoint.get(
+            "udlm_prior_metadata_sha256"
+        ),
+        "udlm_comparison_role": payload["udlm_prior_interpretation"][
+            "comparison_role"
+        ],
+        "udlm_objective_scope": payload["udlm_prior_interpretation"][
+            "objective_scope"
+        ],
     }
     count_names = {
         "validity": ("valid_count", "validity_denominator"),
@@ -2778,7 +3102,7 @@ def render_pdf(payload: Mapping[str, Any], pdf_path: Path) -> None:
         Paragraph("AUDITABLE 3 x 1,000 DE NOVO EVALUATION", styles["kicker"]),
         Paragraph("GenMol from-scratch benchmark", styles["title"]),
         Paragraph(
-            f"Final {checkpoint['diffusion_type'].upper()} checkpoint at step "
+            f"Evaluated {checkpoint['diffusion_type'].upper()} checkpoint at step "
             f"{checkpoint['global_step']:,} compared with published GenMol V1 Table 1",
             styles["subtitle"],
         ),
@@ -2786,6 +3110,10 @@ def render_pdf(payload: Mapping[str, Any], pdf_path: Path) -> None:
             "COMPARATIVE RESULT - NOT AN EXACT REPRODUCTION CLAIM. All three local "
             "seeds completed with 1,000 retained raw rows and passed independent count, "
             "checkpoint, configuration, and artifact-hash validation."
+        ),
+        callout(
+            payload["udlm_prior_interpretation"]["causal_claim_boundary"],
+            caution=checkpoint["diffusion_type"] == "udlm",
         ),
         Spacer(1, 7 * mm),
         Paragraph("Headline comparison", styles["h1"]),
@@ -3040,6 +3368,23 @@ def render_pdf(payload: Mapping[str, Any], pdf_path: Path) -> None:
                 else "not applicable"
             ),
         ],
+        [
+            "UDLM prior variant",
+            checkpoint.get("udlm_prior_variant") or "not applicable",
+        ],
+        [
+            "UDLM prior metadata SHA-256",
+            checkpoint.get("udlm_prior_metadata_sha256") or "not applicable",
+        ],
+        [
+            "UDLM comparison role",
+            payload["udlm_prior_interpretation"]["comparison_role"],
+        ],
+        [
+            "UDLM objective scope",
+            payload["udlm_prior_interpretation"]["objective_scope"]
+            or "not applicable",
+        ],
         ["Config SHA-256", payload["config"]["sha256"]],
         ["Effective-config SHA-256", payload["config"]["effective_sha256"]],
         ["Sampling-config SHA-256", payload["config"]["sampling_sha256"]],
@@ -3051,6 +3396,14 @@ def render_pdf(payload: Mapping[str, Any], pdf_path: Path) -> None:
         [
             "Model source SHA-256",
             payload["implementation_inputs"]["model_source"]["sha256"],
+        ],
+        [
+            "EMA source SHA-256",
+            payload["implementation_inputs"]["ema_source"]["sha256"],
+        ],
+        [
+            "Checkpoint I/O source SHA-256",
+            payload["implementation_inputs"]["checkpoint_io_source"]["sha256"],
         ],
         [
             "Diffusion source SHA-256",
@@ -3067,6 +3420,14 @@ def render_pdf(payload: Mapping[str, Any], pdf_path: Path) -> None:
         [
             "Data utilities SHA-256",
             payload["implementation_inputs"]["data_utils_source"]["sha256"],
+        ],
+        [
+            "MoCo utilities SHA-256",
+            payload["implementation_inputs"]["moco_utils_source"]["sha256"],
+        ],
+        [
+            "Checkpoint-save utilities SHA-256",
+            payload["implementation_inputs"]["save_utils_source"]["sha256"],
         ],
         [
             "Bracket converter SHA-256",
@@ -3103,6 +3464,11 @@ def render_pdf(payload: Mapping[str, Any], pdf_path: Path) -> None:
         ["Runs / seeds", "3 independent invocations; explicit seeds 0, 1, 2"],
         ["Samples", "1,000 per seed; one generation batch; 3,000 requested total"],
         ["Diffusion backend", sampling["diffusion_type"].upper()],
+        ["Prior variant", sampling["prior_variant"] or "not applicable"],
+        [
+            "Prior metadata SHA-256",
+            sampling["prior_metadata_sha256"] or "not applicable",
+        ],
         ["Softmax temperature", sampling["softmax_temp"]],
         ["Randomness", sampling["randomness"]],
         [
@@ -3164,6 +3530,9 @@ def render_pdf(payload: Mapping[str, Any], pdf_path: Path) -> None:
     story.extend(
         [
             table(protocol_rows, [50 * mm, 124 * mm]),
+            callout(
+                payload["udlm_prior_interpretation"]["causal_claim_boundary"]
+            ),
             Paragraph("Loaded tokenizer provenance", styles["h2"]),
             table(tokenizer_rows, [50 * mm, 124 * mm]),
             PageBreak(),

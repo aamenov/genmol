@@ -1,0 +1,14 @@
+# Smoothed empirical-prior treatment. Interpret only against the matched
+# schedule_uniform checkpoint/config; comparison against release_uniform or
+# MDLM also changes the process schedule and cannot isolate prior benefit.
+model_path: model.ckpt
+num_samples: 1000
+diffusion_type: udlm
+softmax_temp: 1.0
+randomness: 0.0
+min_add_len: 40
+num_steps: 128
+inference_eps: 1.0e-5
+exclude_special_tokens: false
+prior_variant: empirical_frequency
+prior_metadata_sha256: 21cc62825086fa381e7918c6feb81ee6b4f8bcabd0857e26b3d32fc701540bbe

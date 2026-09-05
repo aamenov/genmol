@@ -4,6 +4,7 @@ import csv
 import hashlib
 import json
 import pickle
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -29,6 +30,124 @@ def _sa(values):
 
 def _diversity(values):
     return len(values) / 10
+
+
+def _categorical_checkpoint_parts(
+    variant: str,
+    *,
+    exclude_special_tokens: bool = False,
+    mixture_weight: float = 0.01,
+):
+    torch = pytest.importorskip("torch")
+    full_vocab_size = 1880
+    excluded = (
+        list(benchmark.SAFE_GPT_SPECIAL_TOKEN_IDS)
+        if exclude_special_tokens
+        else []
+    )
+    active_ids = [
+        token_id for token_id in range(full_vocab_size) if token_id not in excluded
+    ]
+    if variant == "schedule_uniform":
+        probabilities = torch.full(
+            (len(active_ids),), 1.0 / len(active_ids), dtype=torch.float64
+        )
+        probabilities /= probabilities.sum()
+        frequency = {field: None for field in (
+            "frequency_artifact_path",
+            "frequency_artifact_sha256",
+            "frequency_artifact_schema_version",
+            "frequency_example_count",
+            "frequency_content_token_count",
+            "frequency_active_token_count",
+            "frequency_dataset_repo_id",
+            "frequency_dataset_revision",
+            "frequency_dataset_split",
+            "frequency_dataset_selection",
+            "frequency_ordered_text_sha256",
+            "frequency_implementation_git_sha",
+        )}
+        recorded_mix = None
+    else:
+        artifact, counts = benchmark._load_empirical_frequency_counts()
+        active_count = sum(counts[token_id] for token_id in active_ids)
+        empirical = [counts[token_id] / active_count for token_id in active_ids]
+        values = [
+            (1.0 - mixture_weight) * value + mixture_weight / len(active_ids)
+            for value in empirical
+        ]
+        probabilities = torch.tensor(values, dtype=torch.float64)
+        probabilities /= probabilities.sum()
+        frequency = {
+            "frequency_artifact_path": (
+                benchmark.EMPIRICAL_FREQUENCY_RELATIVE_PATH.as_posix()
+            ),
+            "frequency_artifact_sha256": benchmark.EMPIRICAL_FREQUENCY_SHA256,
+            "frequency_artifact_schema_version": 1,
+            "frequency_example_count": 10_000,
+            "frequency_content_token_count": 517_090,
+            "frequency_active_token_count": active_count,
+            "frequency_dataset_repo_id": benchmark.TOKENIZER_REQUESTED_IDENTIFIER,
+            "frequency_dataset_revision": benchmark.SAFE_GPT_DATASET_REVISION,
+            "frequency_dataset_split": "train",
+            "frequency_dataset_selection": "first 10000 streaming rows",
+            "frequency_ordered_text_sha256": (
+                benchmark.EMPIRICAL_FREQUENCY_ORDERED_TEXT_SHA256
+            ),
+            "frequency_implementation_git_sha": (
+                benchmark.EMPIRICAL_FREQUENCY_IMPLEMENTATION_GIT_SHA
+            ),
+        }
+        recorded_mix = mixture_weight
+        assert artifact["content_token_count"] == active_count
+
+    identity = benchmark.UDLM_PRIOR_VARIANT_IDENTITIES[variant]
+    metadata = {
+        "schema_version": 1,
+        "variant": variant,
+        **identity,
+        "full_vocab_size": full_vocab_size,
+        "active_vocab_size": len(active_ids),
+        "excluded_token_ids": excluded,
+        "sampling_eps": 1e-3,
+        "noise_eps": 1e-3,
+        "antithetic_sampling": True,
+        "active_token_ids_sha256": benchmark._canonical_numeric_sequence_sha256(
+            active_ids
+        ),
+        "stationary_probs_sha256": benchmark._canonical_numeric_sequence_sha256(
+            probabilities.tolist()
+        ),
+        "uniform_mixture_weight": recorded_mix,
+        **frequency,
+        "tokenizer_repo_id": benchmark.TOKENIZER_REQUESTED_IDENTIFIER,
+        "tokenizer_revision": benchmark.SAFE_GPT_TOKENIZER_REVISION,
+        "tokenizer_json_sha256": benchmark.SAFE_GPT_TOKENIZER_SHA256,
+    }
+    diffusion_ids = torch.tensor(active_ids, dtype=torch.long)
+    mapping = torch.full((full_vocab_size,), -1, dtype=torch.long)
+    mapping[diffusion_ids] = torch.arange(len(active_ids), dtype=torch.long)
+    state = {
+        "mdlm.diffusion_token_ids": diffusion_ids,
+        "mdlm.token_to_diffusion_index": mapping,
+        "mdlm.stationary_probs": probabilities,
+    }
+    config = {
+        "model": {"vocab_size": full_vocab_size},
+        "training": {
+            "diffusion": "udlm",
+            "sampling_eps": 1e-3,
+            "antithetic_sampling": True,
+            "udlm": {
+                "inference_eps": 1e-5,
+                "noise_eps": 1e-3,
+                "exclude_special_tokens": exclude_special_tokens,
+                "prior_variant": variant,
+                "empirical_uniform_mix": mixture_weight,
+            },
+        },
+    }
+    return metadata, state, config
 
 
 def test_decode_and_metrics_keep_strict_and_released_funnels() -> None:
@@ -211,6 +330,8 @@ def test_generate_raw_model_text_uses_shared_raw_token_api(diffusion_type: str) 
         num_steps=8 if diffusion_type == "udlm" else None,
         inference_eps=1e-5 if diffusion_type == "udlm" else None,
         exclude_special_tokens=False if diffusion_type == "udlm" else None,
+        prior_variant="release_uniform" if diffusion_type == "udlm" else None,
+        prior_metadata_sha256=None,
     )
 
     assert sampler.insert_call[1:] == (3, 40)
@@ -224,6 +345,40 @@ def test_generate_raw_model_text_uses_shared_raw_token_api(diffusion_type: str) 
     assert protocol["diffusion_type"] == diffusion_type
     assert protocol["nfe"] == (8 if diffusion_type == "udlm" else 2)
     assert protocol["randomness_used_by_sampler"] is (diffusion_type == "mdlm")
+
+
+def test_loaded_categorical_model_must_match_explicit_sampling_prior_digest() -> None:
+    metadata, _, _ = _categorical_checkpoint_parts("schedule_uniform")
+
+    class PriorMetadata:
+        def to_dict(self):
+            return dict(metadata)
+
+    class Model:
+        config = type(
+            "Config",
+            (),
+            {"training": {"udlm": {"prior_variant": "schedule_uniform"}}},
+        )()
+        udlm_prior_metadata = PriorMetadata()
+
+    sampler = type("Sampler", (), {"model": Model()})()
+    digest = benchmark._canonical_json_sha256(metadata)
+
+    benchmark._validate_loaded_udlm_prior_identity(
+        sampler,
+        prior_variant="schedule_uniform",
+        prior_metadata_sha256=digest,
+    )
+    with pytest.raises(
+        benchmark.BenchmarkConfigurationError,
+        match="prior_metadata_sha256",
+    ):
+        benchmark._validate_loaded_udlm_prior_identity(
+            sampler,
+            prior_variant="schedule_uniform",
+            prior_metadata_sha256="0" * 64,
+        )
 
 
 def test_atomic_outputs_and_default_no_overwrite(tmp_path: Path) -> None:
@@ -273,6 +428,8 @@ def test_config_validation_and_fingerprints(tmp_path: Path) -> None:
         "num_steps": None,
         "inference_eps": None,
         "exclude_special_tokens": None,
+        "prior_variant": None,
+        "prior_metadata_sha256": None,
     }
     assert benchmark._canonical_json_sha256(sampling) == benchmark._canonical_json_sha256(
         dict(reversed(list(sampling.items())))
@@ -298,6 +455,44 @@ def test_config_validation_and_fingerprints(tmp_path: Path) -> None:
     )
     assert udlm["num_steps"] == 32
     assert udlm["inference_eps"] == pytest.approx(1e-5)
+    assert udlm["prior_variant"] == "release_uniform"
+    assert udlm["prior_metadata_sha256"] is None
+    categorical = benchmark.validate_sampling_config(
+        {
+            **{
+                key: value
+                for key, value in udlm.items()
+                if key not in {"prior_variant", "prior_metadata_sha256"}
+            },
+            "prior_variant": "schedule_uniform",
+            "prior_metadata_sha256": "a" * 64,
+        }
+    )
+    assert categorical["prior_variant"] == "schedule_uniform"
+    assert categorical["prior_metadata_sha256"] == "a" * 64
+    with pytest.raises(
+        benchmark.BenchmarkConfigurationError,
+        match="explicitly declare",
+    ):
+        benchmark.validate_sampling_config(
+            {
+                "diffusion_type": "udlm",
+                "softmax_temp": 1.0,
+                "randomness": 0.0,
+                "min_add_len": 12,
+                "num_steps": 32,
+                "inference_eps": 1e-5,
+                "exclude_special_tokens": False,
+                "prior_variant": "schedule_uniform",
+            }
+        )
+    with pytest.raises(benchmark.BenchmarkConfigurationError, match="64 lowercase"):
+        benchmark.validate_sampling_config(
+            {
+                **categorical,
+                "prior_metadata_sha256": "NOT-A-DIGEST",
+            }
+        )
     with pytest.raises(benchmark.BenchmarkConfigurationError, match="num_steps"):
         benchmark.validate_sampling_config(
             {
@@ -311,6 +506,28 @@ def test_config_validation_and_fingerprints(tmp_path: Path) -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("filename", "variant"),
+    [
+        ("hparams_udlm_schedule_uniform.yaml", "schedule_uniform"),
+        ("hparams_udlm_categorical.yaml", "empirical_frequency"),
+    ],
+)
+def test_categorical_inference_configs_pin_exact_default_metadata_digest(
+    filename: str,
+    variant: str,
+) -> None:
+    metadata, _, _ = _categorical_checkpoint_parts(variant)
+    path = benchmark.REPO_ROOT / "scripts/exps/denovo" / filename
+
+    sampling = benchmark.validate_sampling_config(benchmark.load_yaml_config(path))
+
+    assert sampling["prior_variant"] == variant
+    assert sampling["prior_metadata_sha256"] == benchmark._canonical_json_sha256(
+        metadata
+    )
+
+
 def test_checkpoint_metadata_records_step_and_digest(tmp_path: Path) -> None:
     torch = pytest.importorskip("torch")
     checkpoint_path = tmp_path / "tiny.ckpt"
@@ -322,8 +539,27 @@ def test_checkpoint_metadata_records_step_and_digest(tmp_path: Path) -> None:
     assert metadata["epoch"] == 4
     assert metadata["size_bytes"] == checkpoint_path.stat().st_size
     assert len(metadata["sha256"]) == 64
+    assert metadata["byte_identity_verified_before_and_after_load"] is True
     assert metadata["diffusion_type"] == "mdlm"
     assert metadata["udlm_exclude_special_tokens"] is None
+    assert metadata["udlm_prior_variant"] is None
+    assert metadata["udlm_prior_metadata"] is None
+    assert metadata["udlm_prior_metadata_sha256"] is None
+
+
+def test_mdlm_checkpoint_cannot_hide_categorical_prior_state(tmp_path: Path) -> None:
+    torch = pytest.importorskip("torch")
+    checkpoint_path = tmp_path / "mislabeled-mdlm.ckpt"
+    torch.save(
+        {
+            "global_step": 1,
+            "state_dict": {"mdlm.stationary_probs": torch.ones(2) / 2},
+        },
+        checkpoint_path,
+    )
+
+    with pytest.raises(RuntimeError, match="categorical UDLM prior"):
+        benchmark.checkpoint_metadata(checkpoint_path)
 
 
 def test_checkpoint_metadata_records_udlm_backend_and_endpoint(tmp_path: Path) -> None:
@@ -356,6 +592,149 @@ def test_checkpoint_metadata_records_udlm_backend_and_endpoint(tmp_path: Path) -
     assert metadata["diffusion_type"] == "udlm"
     assert metadata["udlm_inference_eps"] == pytest.approx(2e-5)
     assert metadata["udlm_exclude_special_tokens"] is True
+    assert metadata["udlm_prior_variant"] == "release_uniform"
+    assert metadata["udlm_prior_metadata"] is None
+
+
+@pytest.mark.parametrize(
+    ("variant", "exclude_special_tokens"),
+    [("schedule_uniform", False), ("empirical_frequency", True)],
+)
+def test_checkpoint_metadata_validates_full_categorical_prior_identity(
+    tmp_path: Path,
+    variant: str,
+    exclude_special_tokens: bool,
+) -> None:
+    torch = pytest.importorskip("torch")
+    metadata, state, config = _categorical_checkpoint_parts(
+        variant,
+        exclude_special_tokens=exclude_special_tokens,
+    )
+    checkpoint_path = tmp_path / f"{variant}.ckpt"
+    torch.save(
+        {
+            "global_step": 12,
+            "epoch": 0,
+            "state_dict": state,
+            "hyper_parameters": {"config": config},
+            benchmark.UDLM_PRIOR_CHECKPOINT_KEY: metadata,
+        },
+        checkpoint_path,
+    )
+
+    observed = benchmark.checkpoint_metadata(checkpoint_path)
+
+    assert observed["udlm_prior_variant"] == variant
+    assert observed["udlm_prior_metadata"] == metadata
+    assert observed["udlm_prior_metadata_sha256"] == (
+        benchmark._canonical_json_sha256(metadata)
+    )
+    assert observed["udlm_exclude_special_tokens"] is exclude_special_tokens
+
+
+@pytest.mark.parametrize(
+    "variant", ["schedule_uniform", "empirical_frequency"]
+)
+def test_prior_metadata_hash_is_validated_without_state(variant: str) -> None:
+    metadata, _, _ = _categorical_checkpoint_parts(variant)
+    benchmark.validate_udlm_prior_metadata_record(
+        metadata,
+        expected_variant=variant,
+    )
+    metadata["stationary_probs_sha256"] = "0" * 64
+
+    with pytest.raises(RuntimeError, match="configured prior law"):
+        benchmark.validate_udlm_prior_metadata_record(
+            metadata,
+            expected_variant=variant,
+        )
+
+
+def test_checkpoint_metadata_rejects_wrong_launch_pinned_digest(
+    tmp_path: Path,
+) -> None:
+    torch = pytest.importorskip("torch")
+    checkpoint_path = tmp_path / "tiny.ckpt"
+    torch.save({"global_step": 1, "state_dict": {}}, checkpoint_path)
+
+    with pytest.raises(RuntimeError, match="launch-pinned digest"):
+        benchmark.checkpoint_metadata(
+            checkpoint_path,
+            expected_sha256="0" * 64,
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("metadata_hash", "stationary prior disagrees"),
+        ("missing_state", "stationary_probs"),
+        ("config_variant", "must not declare categorical"),
+        ("config_noise", "noise_eps disagrees"),
+        ("config_exclusion", "exclusions disagree"),
+        ("bool_mix", "must be a real number"),
+    ],
+)
+def test_checkpoint_metadata_rejects_categorical_prior_mismatches(
+    tmp_path: Path,
+    mutation: str,
+    message: str,
+) -> None:
+    torch = pytest.importorskip("torch")
+    metadata, state, config = _categorical_checkpoint_parts("empirical_frequency")
+    if mutation == "metadata_hash":
+        metadata["stationary_probs_sha256"] = "0" * 64
+    elif mutation == "missing_state":
+        del state["mdlm.stationary_probs"]
+    elif mutation == "config_variant":
+        config["training"]["udlm"]["prior_variant"] = "release_uniform"
+    elif mutation == "config_noise":
+        config["training"]["udlm"]["noise_eps"] = 0.02
+    elif mutation == "config_exclusion":
+        config["training"]["udlm"]["exclude_special_tokens"] = True
+    else:
+        config["training"]["udlm"]["empirical_uniform_mix"] = True
+    checkpoint_path = tmp_path / f"bad-{mutation}.ckpt"
+    torch.save(
+        {
+            "global_step": 12,
+            "state_dict": state,
+            "hyper_parameters": {"config": config},
+            benchmark.UDLM_PRIOR_CHECKPOINT_KEY: metadata,
+        },
+        checkpoint_path,
+    )
+
+    with pytest.raises(RuntimeError, match=message):
+        benchmark.checkpoint_metadata(checkpoint_path)
+
+
+def test_checkpoint_metadata_rejects_tampered_empirical_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    torch = pytest.importorskip("torch")
+    metadata, state, config = _categorical_checkpoint_parts("empirical_frequency")
+    artifact = tmp_path / benchmark.EMPIRICAL_FREQUENCY_RELATIVE_PATH
+    artifact.parent.mkdir(parents=True)
+    source_artifact = (
+        benchmark.REPO_ROOT / benchmark.EMPIRICAL_FREQUENCY_RELATIVE_PATH
+    )
+    artifact.write_bytes(source_artifact.read_bytes() + b"\n")
+    monkeypatch.setattr(benchmark, "REPO_ROOT", tmp_path)
+    checkpoint_path = tmp_path / "tampered-artifact.ckpt"
+    torch.save(
+        {
+            "global_step": 12,
+            "state_dict": state,
+            "hyper_parameters": {"config": config},
+            benchmark.UDLM_PRIOR_CHECKPOINT_KEY: metadata,
+        },
+        checkpoint_path,
+    )
+
+    with pytest.raises(RuntimeError, match="artifact SHA-256 mismatch"):
+        benchmark.checkpoint_metadata(checkpoint_path)
 
 
 def test_implementation_inputs_include_length_distribution_statistics() -> None:
@@ -364,10 +743,14 @@ def test_implementation_inputs_include_length_distribution_statistics() -> None:
     assert set(inputs) == {
         "sampler_source",
         "model_source",
+        "ema_source",
+        "checkpoint_io_source",
         "diffusion_source",
         "backbone_source",
         "chemistry_utils_source",
         "data_utils_source",
+        "moco_utils_source",
+        "save_utils_source",
         "bracket_safe_converter_source",
         "length_distribution",
     }
@@ -497,6 +880,76 @@ def test_runtime_generation_modules_match_recorded_paths_and_hashes() -> None:
         benchmark.assert_runtime_module_provenance(tampered)
 
 
+def test_git_status_preflight_ignores_only_repository_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / ".gitignore").write_text("/output/\n", encoding="utf-8")
+    source = tmp_path / "source.py"
+    source.write_text("value = 1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.name=GenMol Test",
+            "-c",
+            "user.email=genmol@example.invalid",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+        check=True,
+    )
+    monkeypatch.setattr(benchmark, "REPO_ROOT", tmp_path)
+
+    output_file = tmp_path / "output" / "seed_0" / "summary.json"
+    output_file.parent.mkdir(parents=True)
+    output_file.write_text("{}\n", encoding="utf-8")
+    assert benchmark._git_status_outside_output() == []
+
+    source.write_text("value = 2\n", encoding="utf-8")
+    assert benchmark._git_status_outside_output()
+
+
+def test_child_source_preflight_binds_expected_head_and_upstream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    revision = "a" * 40
+    monkeypatch.setattr(benchmark, "_git_status_outside_output", lambda: [])
+    monkeypatch.setattr(
+        benchmark,
+        "_git_command",
+        lambda arguments: revision
+        if arguments in (["rev-parse", "HEAD"], ["rev-parse", "@{upstream}"])
+        else None,
+    )
+    assert benchmark.require_clean_pushed_source(revision) == {
+        "head": revision,
+        "upstream": revision,
+    }
+
+    monkeypatch.setattr(
+        benchmark, "_git_status_outside_output", lambda: [" M src/genmol/model.py"]
+    )
+    with pytest.raises(RuntimeError, match="dirty outside output"):
+        benchmark.require_clean_pushed_source(revision)
+
+    monkeypatch.setattr(benchmark, "_git_status_outside_output", lambda: [])
+    monkeypatch.setattr(
+        benchmark,
+        "_git_command",
+        lambda arguments: revision if arguments == ["rev-parse", "HEAD"] else None,
+    )
+    with pytest.raises(RuntimeError, match="no inspectable upstream"):
+        benchmark.require_clean_pushed_source(revision)
+    with pytest.raises(benchmark.BenchmarkConfigurationError, match="40 lowercase"):
+        benchmark.require_clean_pushed_source("A" * 40)
+
+
 def test_seed_sampling_repeats_python_numpy_and_torch_streams() -> None:
     import random
 
@@ -555,8 +1008,14 @@ def test_cli_requires_every_run_identity_field() -> None:
         [
             "--checkpoint",
             "model.ckpt",
+            "--expected-checkpoint-sha256",
+            "b" * 64,
+            "--expected-source-revision",
+            "a" * 40,
             "--config",
             "hparams.yaml",
+            "--expected-config-sha256",
+            "c" * 64,
             "--num-samples",
             "1000",
             "--seed",

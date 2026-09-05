@@ -744,11 +744,16 @@ def test_udlm_warm_start_uses_mdlm_ema_and_resets_new_ema(tmp_path):
         {"state_dict": source.state_dict(), "ema": source.ema.state_dict()},
         checkpoint_path,
     )
+    checkpoint_sha256 = hashlib.sha256(checkpoint_path.read_bytes()).hexdigest()
 
     target_config = _config(diffusion="udlm")
     target_config.training.ema = 0.9
     target = model_module.GenMol(target_config)
-    report = target.initialize_from_mdlm_checkpoint(checkpoint_path, use_ema=True)
+    report = target.initialize_from_mdlm_checkpoint(
+        checkpoint_path,
+        use_ema=True,
+        expected_sha256=checkpoint_sha256,
+    )
     base_parameters = [
         parameter
         for name, parameter in target.backbone.named_parameters()
@@ -757,7 +762,52 @@ def test_udlm_warm_start_uses_mdlm_ema_and_resets_new_ema(tmp_path):
 
     assert report["weights"] == "ema"
     assert report["parameter_tensors"] == len(source.ema.shadow_params)
+    assert report["source_path"] == str(checkpoint_path)
+    assert report["source_resolved_path"] == str(checkpoint_path.resolve())
+    assert report["source_sha256"] == checkpoint_sha256
+    assert report["source_size_bytes"] == checkpoint_path.stat().st_size
+    assert report["expected_source_sha256"] == checkpoint_sha256
+    assert report["byte_identity_verified_before_and_after_load"] is True
     assert torch.allclose(base_parameters[0], source.ema.shadow_params[0])
     assert len(target.ema.shadow_params) == len(list(target.backbone.parameters()))
     assert torch.allclose(target.ema.shadow_params[0], base_parameters[0])
     assert torch.count_nonzero(target.backbone.time_conditioner.mlp[-1].weight) == 0
+
+
+def test_udlm_warm_start_wrong_digest_does_not_mutate_parameters(tmp_path):
+    source_config = _config()
+    source_config.training.ema = 0.9
+    source = model_module.GenMol(source_config)
+    checkpoint_path = tmp_path / "mdlm.ckpt"
+    torch.save(
+        {"state_dict": source.state_dict(), "ema": source.ema.state_dict()},
+        checkpoint_path,
+    )
+
+    target_config = _config(diffusion="udlm")
+    target_config.training.ema = 0.9
+    target = model_module.GenMol(target_config)
+    state_before = {
+        name: value.detach().clone()
+        for name, value in target.state_dict().items()
+    }
+    ema_object = target.ema
+    ema_before = [parameter.clone() for parameter in target.ema.shadow_params]
+    checkpoint_sha256 = hashlib.sha256(checkpoint_path.read_bytes()).hexdigest()
+    wrong_sha256 = (
+        ("0" if checkpoint_sha256[0] != "0" else "1") + checkpoint_sha256[1:]
+    )
+
+    with pytest.raises(RuntimeError, match="launch-pinned digest"):
+        target.initialize_from_mdlm_checkpoint(
+            checkpoint_path,
+            use_ema=True,
+            expected_sha256=wrong_sha256,
+        )
+
+    assert state_before.keys() == target.state_dict().keys()
+    for name, value in target.state_dict().items():
+        assert torch.equal(value, state_before[name])
+    assert target.ema is ema_object
+    for parameter, expected in zip(target.ema.shadow_params, ema_before, strict=True):
+        assert torch.equal(parameter, expected)

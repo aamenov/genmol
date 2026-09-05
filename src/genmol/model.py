@@ -40,6 +40,7 @@ from genmol.diffusion import (
     ContinuousCategoricalDiffusion,
     ContinuousUniformDiffusion,
 )
+from genmol.utils.checkpoint_io import verified_checkpoint_file
 from genmol.utils.ema import ExponentialMovingAverage
 from genmol.utils.utils_data import (
     SAFE_GPT_DATASET_REVISION,
@@ -771,7 +772,12 @@ class GenMol(L.LightningModule):
         self._validate_runtime_udlm_prior_identity()
         return result
 
-    def initialize_from_mdlm_checkpoint(self, checkpoint_path, use_ema=True):
+    def initialize_from_mdlm_checkpoint(
+        self,
+        checkpoint_path,
+        use_ema=True,
+        expected_sha256=None,
+    ):
         """Warm-start UDLM's BERT only, resetting all training state.
 
         This is intentionally not a Lightning resume: the optimizer, learning
@@ -782,7 +788,15 @@ class GenMol(L.LightningModule):
 
         if self.diffusion_type != 'udlm':
             raise ValueError('MDLM backbone initialization is only valid for UDLM')
-        checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+        with verified_checkpoint_file(
+            checkpoint_path,
+            expected_sha256=expected_sha256,
+        ) as (checkpoint_file, source_identity):
+            checkpoint = torch.load(
+                checkpoint_file,
+                map_location='cpu',
+                weights_only=False,
+            )
         source_state = checkpoint.get('state_dict', checkpoint)
         backbone_state = {
             key.removeprefix('backbone.'): value
@@ -831,6 +845,11 @@ class GenMol(L.LightningModule):
             )
         return {
             'source_path': str(checkpoint_path),
+            'source_resolved_path': source_identity.resolved_path,
+            'source_sha256': source_identity.sha256,
+            'source_size_bytes': source_identity.size_bytes,
+            'expected_source_sha256': expected_sha256,
+            'byte_identity_verified_before_and_after_load': True,
             'weights': weights,
             'parameter_tensors': len(base_parameters),
         }

@@ -28,14 +28,19 @@ import safe as sf
 from rdkit import Chem
 from genmol.utils.utils_chem import safe_to_smiles, filter_by_substructure, mix_sequences, Slicer
 from genmol.utils.bracket_safe_converter import BracketSAFEConverter, bracketsafe2safe
+from genmol.utils.checkpoint_io import verified_checkpoint_file  # noqa: E402
 from genmol.model import GenMol
 
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 
-def load_model_from_path(path):
-    model = GenMol.load_from_checkpoint(path)
+def load_model_from_path(path, expected_checkpoint_sha256=None):
+    with verified_checkpoint_file(
+        path,
+        expected_sha256=expected_checkpoint_sha256,
+    ) as (checkpoint_file, _identity):
+        model = GenMol.load_from_checkpoint(checkpoint_file)
     model.backbone.eval()
     if model.ema:
         model.ema.store(itertools.chain(model.backbone.parameters()))
@@ -44,8 +49,8 @@ def load_model_from_path(path):
 
 
 class Sampler:
-    def __init__(self, path):
-        self.model = load_model_from_path(path)
+    def __init__(self, path, expected_checkpoint_sha256=None):
+        self.model = load_model_from_path(path, expected_checkpoint_sha256)
         self.slicer = Slicer()
         self.dot_index = self.model.tokenizer('.')['input_ids'][1]
         self.pad_index = self.model.tokenizer.pad_token_id

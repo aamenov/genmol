@@ -38,6 +38,7 @@ def test_gpu_request_accepts_only_a_count_capped_at_two():
         ["--run-name", "count_only", "--gpu-count", "2", "--scratch"]
     )
     assert parsed.gpu_count == 2
+    assert parsed.training_variant == "udlm"
     assert not hasattr(parsed, "gpu_indices")
     with pytest.raises(SystemExit):
         launcher._parse_args(
@@ -48,6 +49,18 @@ def test_gpu_request_accepts_only_a_count_capped_at_two():
                 "1",
                 "--gpu-indices",
                 "3",
+                "--scratch",
+            ]
+        )
+    with pytest.raises(SystemExit):
+        launcher._parse_args(
+            [
+                "--run-name",
+                "arbitrary_config_forbidden",
+                "--gpu-count",
+                "1",
+                "--config-name",
+                "anything",
                 "--scratch",
             ]
         )
@@ -230,6 +243,7 @@ def test_training_command_records_bounded_pilot_controls(monkeypatch, tmp_path):
         num_workers=1,
         seed=7,
         checkpoint=Path("/project/50000.ckpt"),
+        checkpoint_sha256="a" * 64,
         exclude_special_tokens=True,
     )
     joined = " ".join(str(part) for part in command)
@@ -240,6 +254,7 @@ def test_training_command_records_bounded_pilot_controls(monkeypatch, tmp_path):
     assert "loader.global_batch_size=16" in joined
     assert "loader.batch_size=2" in joined
     assert "training.init_from_mdlm_checkpoint=/project/50000.ckpt" in joined
+    assert f"training.init_from_mdlm_checkpoint_sha256={'a' * 64}" in joined
     assert "training.udlm.exclude_special_tokens=true" in joined
     with pytest.raises(ValueError, match="must be 1 or 2"):
         launcher.build_training_command(
@@ -252,6 +267,96 @@ def test_training_command_records_bounded_pilot_controls(monkeypatch, tmp_path):
             seed=7,
             checkpoint=None,
             exclude_special_tokens=False,
+        )
+
+
+def test_training_command_checkpoint_digest_validation(monkeypatch, tmp_path):
+    monkeypatch.setattr(launcher, "_python_executable", lambda: Path("/venv/python"))
+    common = {
+        "gpu_count": 1,
+        "run_dir": tmp_path / "pilot",
+        "max_steps": 3,
+        "global_batch_size": 4,
+        "micro_batch_size": 2,
+        "num_workers": 0,
+        "seed": 1,
+        "exclude_special_tokens": False,
+    }
+
+    legacy = launcher.build_training_command(
+        **common,
+        checkpoint=Path("/project/50000.ckpt"),
+    )
+    assert not any("checkpoint_sha256" in value for value in legacy)
+
+    with pytest.raises(ValueError, match="requires a checkpoint"):
+        launcher.build_training_command(
+            **common,
+            checkpoint=None,
+            checkpoint_sha256="a" * 64,
+        )
+    with pytest.raises(ValueError, match="64 lowercase"):
+        launcher.build_training_command(
+            **common,
+            checkpoint=Path("/project/50000.ckpt"),
+            checkpoint_sha256="INVALID",
+        )
+
+
+@pytest.mark.parametrize(
+    ("training_variant", "config_name", "fixed_prior_override"),
+    [
+        ("udlm", "udlm", None),
+        (
+            "schedule_uniform",
+            "udlm",
+            "training.udlm.prior_variant=schedule_uniform",
+        ),
+        ("udlm_categorical", "udlm_categorical", None),
+    ],
+)
+def test_training_command_allows_only_reviewed_prior_variants(
+    monkeypatch,
+    tmp_path,
+    training_variant,
+    config_name,
+    fixed_prior_override,
+):
+    monkeypatch.setattr(launcher, "_python_executable", lambda: Path("/venv/python"))
+    command = launcher.build_training_command(
+        gpu_count=1,
+        run_dir=tmp_path / "pilot",
+        max_steps=3,
+        global_batch_size=4,
+        micro_batch_size=2,
+        num_workers=0,
+        seed=1,
+        checkpoint=None,
+        exclude_special_tokens=False,
+        training_variant=training_variant,
+    )
+
+    assert command[command.index("--config-name") + 1] == config_name
+    if fixed_prior_override is None:
+        assert not any(
+            value.startswith("training.udlm.prior_variant=") for value in command
+        )
+    else:
+        assert fixed_prior_override in command
+    assert "trainer.max_steps=3" in command
+
+    with pytest.raises(ValueError, match="training-variant"):
+        launcher.build_training_command(
+            gpu_count=1,
+            run_dir=tmp_path / "pilot",
+            max_steps=3,
+            global_batch_size=4,
+            micro_batch_size=2,
+            num_workers=0,
+            seed=1,
+            checkpoint=None,
+            exclude_special_tokens=False,
+            training_variant="../../arbitrary.yaml",
         )
 
 

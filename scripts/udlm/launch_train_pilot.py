@@ -14,8 +14,10 @@ import csv
 import hashlib
 import io
 import json
+import os
 import re
 import shlex
+import stat
 import subprocess
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -27,6 +29,26 @@ PROJECT_ROOT = REPOSITORY_ROOT.parents[1]
 RUN_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}\Z")
 MAX_SAFE_UTILIZATION_PERCENT = 10
 MIN_SAFE_FREE_MEMORY_MIB = 30_000
+TRAINING_VARIANTS = {
+    "udlm": {
+        "config_name": "udlm",
+        "prior_variant": "release_uniform",
+        "comparison_role": "faithful_release_control",
+        "fixed_overrides": (),
+    },
+    "schedule_uniform": {
+        "config_name": "udlm",
+        "prior_variant": "schedule_uniform",
+        "comparison_role": "schedule_repair_uniform_control",
+        "fixed_overrides": ("training.udlm.prior_variant=schedule_uniform",),
+    },
+    "udlm_categorical": {
+        "config_name": "udlm_categorical",
+        "prior_variant": "empirical_frequency",
+        "comparison_role": "empirical_prior_treatment",
+        "fixed_overrides": (),
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -74,6 +96,15 @@ def validate_gpu_count(gpu_count: int) -> int:
     if type(gpu_count) is not int or gpu_count not in (1, 2):
         raise ValueError("gpu-count must be 1 or 2")
     return gpu_count
+
+
+def validate_training_variant(training_variant: str) -> str:
+    """Allow only the three reviewed Hydra configurations."""
+
+    if training_variant not in TRAINING_VARIANTS:
+        allowed = ", ".join(TRAINING_VARIANTS)
+        raise ValueError(f"training-variant must be one of: {allowed}")
+    return training_variant
 
 
 def exact_accumulation_steps(
@@ -419,11 +450,51 @@ def require_pushed_commit() -> str:
 
 
 def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+    """Hash one stable regular-file descriptor and retain its path binding."""
+
+    resolved = path.resolve(strict=True)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(resolved, flags)
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise RuntimeError(f"checkpoint is not a regular file: {resolved}")
+        state = (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_nlink,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        )
+        digest = hashlib.sha256()
+        offset = 0
+        while True:
+            chunk = os.pread(descriptor, 8 * 1024 * 1024, offset)
+            if not chunk:
+                break
             digest.update(chunk)
-    return digest.hexdigest()
+            offset += len(chunk)
+        after = os.fstat(descriptor)
+        path_state = os.stat(resolved, follow_symlinks=False)
+        observed_states = [
+            (
+                observed.st_dev,
+                observed.st_ino,
+                observed.st_mode,
+                observed.st_nlink,
+                observed.st_size,
+                observed.st_mtime_ns,
+                observed.st_ctime_ns,
+            )
+            for observed in (after, path_state)
+        ]
+        if any(observed != state for observed in observed_states):
+            raise RuntimeError(f"checkpoint changed while it was hashed: {resolved}")
+        return digest.hexdigest()
+    finally:
+        os.close(descriptor)
 
 
 def build_training_command(
@@ -436,15 +507,27 @@ def build_training_command(
     num_workers: int,
     seed: int,
     checkpoint: Path | None,
+    checkpoint_sha256: str | None = None,
     exclude_special_tokens: bool,
+    training_variant: str = "udlm",
 ) -> list[str]:
     gpu_count = validate_gpu_count(gpu_count)
+    training_variant = validate_training_variant(training_variant)
+    if checkpoint is None and checkpoint_sha256 is not None:
+        raise ValueError("checkpoint_sha256 requires a checkpoint")
+    if checkpoint_sha256 is not None and (
+        not isinstance(checkpoint_sha256, str)
+        or len(checkpoint_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in checkpoint_sha256)
+    ):
+        raise ValueError("checkpoint_sha256 must be 64 lowercase hexadecimal digits")
+    variant = TRAINING_VARIANTS[training_variant]
     command = [
         str(_python_executable()),
         "-u",
         str(REPOSITORY_ROOT / "scripts" / "train.py"),
         "--config-name",
-        "udlm",
+        str(variant["config_name"]),
         f"seed={seed}",
         f"trainer.devices={gpu_count}",
         f"trainer.max_steps={max_steps}",
@@ -455,9 +538,14 @@ def build_training_command(
         f"callback.dirpath={run_dir / 'checkpoints'}",
         f"hydra.run.dir={run_dir / 'hydra'}",
         f"training.udlm.exclude_special_tokens={str(exclude_special_tokens).lower()}",
+        *variant["fixed_overrides"],
     ]
     if checkpoint is not None:
         command.append(f"training.init_from_mdlm_checkpoint={checkpoint}")
+        if checkpoint_sha256 is not None:
+            command.append(
+                "training.init_from_mdlm_checkpoint_sha256=" + checkpoint_sha256
+            )
         command.append("training.init_from_mdlm_ema=true")
     return command
 
@@ -465,6 +553,15 @@ def build_training_command(
 def _parse_args(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-name", required=True)
+    parser.add_argument(
+        "--training-variant",
+        choices=tuple(TRAINING_VARIANTS),
+        default="udlm",
+        help=(
+            "Reviewed pilot only: faithful udlm, matched schedule_uniform control, "
+            "or empirical-prior udlm_categorical."
+        ),
+    )
     parser.add_argument(
         "--gpu-count",
         type=int,
@@ -507,6 +604,8 @@ def main():
     if not RUN_NAME_PATTERN.fullmatch(args.run_name):
         raise ValueError("run-name must contain only letters, digits, '.', '_', or '-'")
     gpu_count = validate_gpu_count(args.gpu_count)
+    training_variant = validate_training_variant(args.training_variant)
+    variant = TRAINING_VARIANTS[training_variant]
     if not 1 <= args.max_steps <= 1_000:
         raise ValueError("pilot max-steps must be in [1, 1000]")
     if min(args.global_batch_size, args.micro_batch_size) <= 0:
@@ -536,6 +635,7 @@ def main():
         raise FileExistsError(
             f"refusing to overwrite an existing pilot: {run_dir} or {log_path}"
         )
+    checkpoint_sha256 = None if checkpoint is None else sha256_file(checkpoint)
     command = build_training_command(
         gpu_count=gpu_count,
         run_dir=run_dir,
@@ -545,10 +645,12 @@ def main():
         num_workers=args.num_workers,
         seed=args.seed,
         checkpoint=checkpoint,
+        checkpoint_sha256=checkpoint_sha256,
         exclude_special_tokens=args.exclude_special_tokens,
+        training_variant=training_variant,
     )
 
-    session_name = f"genmol_udlm_{args.run_name}"
+    session_name = f"genmol_{training_variant}_{args.run_name}"
     if subprocess.run(
         ["tmux", "has-session", "-t", session_name],
         stdout=subprocess.DEVNULL,
@@ -556,8 +658,6 @@ def main():
         check=False,
     ).returncode == 0:
         raise RuntimeError(f"tmux session already exists: {session_name}")
-
-    checkpoint_sha256 = None if checkpoint is None else sha256_file(checkpoint)
 
     # Inventory every NVIDIA GPU only after all potentially expensive source and
     # checkpoint checks. Select from that point-in-time snapshot, then address
@@ -593,6 +693,10 @@ def main():
         "gpu_selection_schema_version": 2,
         "git_sha": git_sha,
         "run_name": args.run_name,
+        "training_variant": training_variant,
+        "hydra_config_name": variant["config_name"],
+        "udlm_prior_variant": variant["prior_variant"],
+        "udlm_comparison_role": variant["comparison_role"],
         "tmux_session": session_name,
         "user_requested_gpu_count": gpu_count,
         "gpu_selection_method": "dynamic_idle_discovery",

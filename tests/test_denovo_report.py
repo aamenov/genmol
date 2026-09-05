@@ -41,6 +41,78 @@ class DenovoReportTests(unittest.TestCase):
         }
 
     @staticmethod
+    def _categorical_prior_metadata(variant: str) -> tuple[dict, str]:
+        identity = benchmark.UDLM_PRIOR_VARIANT_IDENTITIES[variant]
+        active_ids = list(range(1880))
+        frequency = {
+            field: None
+            for field in (
+                "frequency_artifact_path",
+                "frequency_artifact_sha256",
+                "frequency_artifact_schema_version",
+                "frequency_example_count",
+                "frequency_content_token_count",
+                "frequency_active_token_count",
+                "frequency_dataset_repo_id",
+                "frequency_dataset_revision",
+                "frequency_dataset_split",
+                "frequency_dataset_selection",
+                "frequency_ordered_text_sha256",
+                "frequency_implementation_git_sha",
+            )
+        }
+        stationary_hash = (
+            "f68daa266251f5ec4b2b735f3955a3a1c529425bf46fa5a11ef285c8b640cf1b"
+        )
+        mixture = None
+        if variant == "empirical_frequency":
+            stationary_hash = (
+                "51aa38acaf5cf4d5642c30dbdf14246e9540d4711917265cd1961e0df1902c97"
+            )
+            mixture = 0.01
+            frequency = {
+                "frequency_artifact_path": (
+                    benchmark.EMPIRICAL_FREQUENCY_RELATIVE_PATH.as_posix()
+                ),
+                "frequency_artifact_sha256": benchmark.EMPIRICAL_FREQUENCY_SHA256,
+                "frequency_artifact_schema_version": 1,
+                "frequency_example_count": 10_000,
+                "frequency_content_token_count": 517_090,
+                "frequency_active_token_count": 517_090,
+                "frequency_dataset_repo_id": benchmark.TOKENIZER_REQUESTED_IDENTIFIER,
+                "frequency_dataset_revision": benchmark.SAFE_GPT_DATASET_REVISION,
+                "frequency_dataset_split": "train",
+                "frequency_dataset_selection": "first 10000 streaming rows",
+                "frequency_ordered_text_sha256": (
+                    benchmark.EMPIRICAL_FREQUENCY_ORDERED_TEXT_SHA256
+                ),
+                "frequency_implementation_git_sha": (
+                    benchmark.EMPIRICAL_FREQUENCY_IMPLEMENTATION_GIT_SHA
+                ),
+            }
+        metadata = {
+            "schema_version": 1,
+            "variant": variant,
+            **identity,
+            "full_vocab_size": 1880,
+            "active_vocab_size": 1880,
+            "excluded_token_ids": [],
+            "sampling_eps": 1e-3,
+            "noise_eps": 1e-3,
+            "antithetic_sampling": True,
+            "active_token_ids_sha256": (
+                benchmark._canonical_numeric_sequence_sha256(active_ids)
+            ),
+            "stationary_probs_sha256": stationary_hash,
+            "uniform_mixture_weight": mixture,
+            **frequency,
+            "tokenizer_repo_id": benchmark.TOKENIZER_REQUESTED_IDENTIFIER,
+            "tokenizer_revision": benchmark.SAFE_GPT_TOKENIZER_REVISION,
+            "tokenizer_json_sha256": benchmark.SAFE_GPT_TOKENIZER_SHA256,
+        }
+        return metadata, report._sha256_json(metadata)
+
+    @staticmethod
     def _records(
         seed: int,
         *,
@@ -196,6 +268,18 @@ class DenovoReportTests(unittest.TestCase):
                 "sha256": "6" * 64,
                 "size_bytes": 234,
             },
+            "ema_source": {
+                "path": str(report.REPOSITORY_ROOT / "src/genmol/utils/ema.py"),
+                "sha256": "e" * 64,
+                "size_bytes": 198,
+            },
+            "checkpoint_io_source": {
+                "path": str(
+                    report.REPOSITORY_ROOT / "src/genmol/utils/checkpoint_io.py"
+                ),
+                "sha256": "9" * 64,
+                "size_bytes": 210,
+            },
             "diffusion_source": {
                 "path": str(report.REPOSITORY_ROOT / "src/genmol/diffusion.py"),
                 "sha256": "b" * 64,
@@ -210,6 +294,16 @@ class DenovoReportTests(unittest.TestCase):
                 "path": str(report.REPOSITORY_ROOT / "src/genmol/utils/utils_data.py"),
                 "sha256": "7" * 64,
                 "size_bytes": 345,
+            },
+            "moco_utils_source": {
+                "path": str(report.REPOSITORY_ROOT / "src/genmol/utils/utils_moco.py"),
+                "sha256": "a" * 64,
+                "size_bytes": 346,
+            },
+            "save_utils_source": {
+                "path": str(report.REPOSITORY_ROOT / "src/genmol/utils/utils_save.py"),
+                "sha256": "d" * 64,
+                "size_bytes": 347,
             },
             "bracket_safe_converter_source": {
                 "path": str(
@@ -279,13 +373,25 @@ class DenovoReportTests(unittest.TestCase):
                 "metrics.released_comparable.quality",
             ],
         }
+        project_root = (
+            report.REPOSITORY_ROOT.parent.parent
+            if report.REPOSITORY_ROOT.parent.name == "run_sources"
+            else report.REPOSITORY_ROOT
+        )
+        project_python = str(project_root / ".venv/bin/python")
         run_command = [
-            ".venv/bin/python",
+            project_python,
             "scripts/exps/denovo/benchmark.py",
             "--checkpoint",
             str(report.REPOSITORY_ROOT / "outputs/paper_v1/checkpoints/50000.ckpt"),
+            "--expected-checkpoint-sha256",
+            report.EXPECTED_CHECKPOINT_SHA256,
+            "--expected-source-revision",
+            "4" * 40,
             "--config",
             str(report.REPOSITORY_ROOT / "scripts/exps/denovo/hparams.yaml"),
+            "--expected-config-sha256",
+            "3" * 64,
             "--num-samples",
             "1000",
             "--seed",
@@ -299,9 +405,12 @@ class DenovoReportTests(unittest.TestCase):
         gpu_uuid = f"GPU-synthetic-{physical_index}"
         selection = {
             "event": "launch",
+            "gpu_selection_schema_version": 2,
             "timestamp_utc": "2026-09-05T00:00:00+00:00",
+            "inventory_snapshot_completed_at_utc": "2026-09-04T23:59:59+00:00",
+            "final_uuid_probe_completed_at_utc": "2026-09-05T00:00:00+00:00",
             "source_revision": {"head": "4" * 40, "upstream": "4" * 40},
-            "physical_gpu": {
+            "physical_gpu_at_final_uuid_probe": {
                 "index": physical_index,
                 "uuid": gpu_uuid,
                 "name": "NVIDIA RTX A6000",
@@ -311,12 +420,27 @@ class DenovoReportTests(unittest.TestCase):
                 "compute_mode": "Default",
                 "compute_processes": [],
             },
+            "gpu_inventory_at_selection": [
+                {
+                    "index": physical_index,
+                    "uuid": gpu_uuid,
+                    "name": "NVIDIA RTX A6000",
+                    "memory_used_mib": 8 + seed,
+                    "memory_total_mib": 49_140,
+                    "utilization_percent": seed,
+                    "compute_mode": "Default",
+                    "compute_processes": [],
+                }
+            ],
+            "running_physical_indices_at_selection": [],
             "policy": {
+                "selection_method": "dynamic_idle_discovery",
+                "inventory_scope": "all_nvidia_gpus",
+                "requested_gpu_count": 2,
                 "max_utilization_percent": 10,
                 "utilization_comparison": "strictly_less_than",
                 "min_free_memory_mib": 40_000,
                 "active_compute_processes_allowed": False,
-                "selected_physical_indices": [1, 2],
             },
             "command": run_command,
         }
@@ -353,11 +477,15 @@ class DenovoReportTests(unittest.TestCase):
                 "sha256": report.EXPECTED_CHECKPOINT_SHA256,
                 "size_bytes": report.EXPECTED_CHECKPOINT_SIZE_BYTES,
                 "mtime_utc": "2026-09-05T00:00:00+00:00",
+                "byte_identity_verified_before_and_after_load": True,
                 "global_step": 50_000,
                 "epoch": 0,
                 "diffusion_type": "mdlm",
                 "udlm_inference_eps": None,
                 "udlm_exclude_special_tokens": None,
+                "udlm_prior_variant": None,
+                "udlm_prior_metadata": None,
+                "udlm_prior_metadata_sha256": None,
             },
             "config": {
                 "path": str(report.REPOSITORY_ROOT / "scripts/exps/denovo/hparams.yaml"),
@@ -384,7 +512,7 @@ class DenovoReportTests(unittest.TestCase):
             "environment": {
                 "python": "3.10.0 synthetic",
                 "platform": "Linux-synthetic",
-                "executable": ".venv/bin/python",
+                "executable": project_python,
                 "working_directory": str(report.REPOSITORY_ROOT),
                 "versions": {
                     "torch": "2.6.0",
@@ -425,8 +553,11 @@ class DenovoReportTests(unittest.TestCase):
             },
             "git": {
                 "commit": "4" * 40,
+                "upstream": "4" * 40,
+                "expected_source_revision": "4" * 40,
                 "branch": "test",
-                "dirty": True,
+                "dirty": False,
+                "clean_pushed_source_verified_before_and_after_run": True,
                 "runner_sha256": "5" * 64,
             },
             "implementation_inputs": implementation_inputs,
@@ -477,10 +608,21 @@ class DenovoReportTests(unittest.TestCase):
                 released_diversity=(0.817, 0.819, 0.818)[seed],
             )
 
-    def _three_udlm_runs(self, root: Path) -> None:
+    def _three_udlm_runs(
+        self,
+        root: Path,
+        *,
+        prior_variant: str = "release_uniform",
+    ) -> None:
         self._three_runs(root)
         checkpoint_path = report.REPOSITORY_ROOT / "output/udlm/checkpoints/100.ckpt"
         checkpoint_sha = "d" * 64
+        prior_metadata = None
+        prior_digest = None
+        if prior_variant != "release_uniform":
+            prior_metadata, prior_digest = self._categorical_prior_metadata(
+                prior_variant
+            )
         sampling = {
             "diffusion_type": "udlm",
             "softmax_temp": 1.0,
@@ -489,6 +631,8 @@ class DenovoReportTests(unittest.TestCase):
             "num_steps": 32,
             "inference_eps": 1e-5,
             "exclude_special_tokens": False,
+            "prior_variant": prior_variant,
+            "prior_metadata_sha256": prior_digest,
         }
         for seed in report.EXPECTED_SEEDS:
             summary_path = root / f"seed_{seed}" / "summary.json"
@@ -501,11 +645,31 @@ class DenovoReportTests(unittest.TestCase):
                     "diffusion_type": "udlm",
                     "udlm_inference_eps": 1e-5,
                     "udlm_exclude_special_tokens": False,
+                    "udlm_prior_variant": prior_variant,
+                    "udlm_prior_metadata": prior_metadata,
+                    "udlm_prior_metadata_sha256": prior_digest,
                 }
             )
+            config_name = {
+                "release_uniform": "hparams_udlm.yaml",
+                "schedule_uniform": "hparams_udlm_schedule_uniform.yaml",
+                "empirical_frequency": "hparams_udlm_categorical.yaml",
+            }[prior_variant]
             summary["config"]["path"] = str(
-                report.REPOSITORY_ROOT / "scripts/exps/denovo/hparams_udlm.yaml"
+                report.REPOSITORY_ROOT / "scripts/exps/denovo" / config_name
             )
+            command = summary["run"]["command"]
+            command[command.index("--checkpoint") + 1] = str(checkpoint_path)
+            command[command.index("--expected-checkpoint-sha256") + 1] = (
+                checkpoint_sha
+            )
+            command[command.index("--config") + 1] = summary["config"]["path"]
+            launch = summary["environment"]["launch_environment"]
+            snapshot = json.loads(
+                launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"]
+            )
+            snapshot["command"] = command
+            launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"] = json.dumps(snapshot)
             summary["config"]["sampling"] = sampling
             summary["config"]["sampling_sha256"] = report._sha256_json(sampling)
             summary["config"]["source"].update(sampling)
@@ -527,6 +691,8 @@ class DenovoReportTests(unittest.TestCase):
                     "randomness": 0.0,
                     "randomness_used_by_sampler": False,
                     "exclude_special_tokens": False,
+                    "prior_variant": prior_variant,
+                    "prior_metadata_sha256": prior_digest,
                 }
             )
             run_label = report.benchmark_run_label(100, checkpoint_sha, seed)
@@ -555,6 +721,18 @@ class DenovoReportTests(unittest.TestCase):
             self.assertEqual(funnel["strict_valid"], 2_730)
             self.assertEqual(funnel["released_recovered_strict_failure"], 267)
             self.assertIn("ddof=1", payload["metric_definitions"]["aggregation"])
+            self.assertEqual(
+                payload["udlm_prior_interpretation"]["label"],
+                "audited_local_mdlm_evaluation",
+            )
+            self.assertEqual(
+                payload["udlm_prior_interpretation"]["comparison_role"],
+                "local_mdlm_control",
+            )
+            self.assertIn(
+                "not the published GenMol run",
+                payload["udlm_prior_interpretation"]["causal_claim_boundary"],
+            )
             self.assertEqual(
                 payload["metric_inputs"]["sa_fragment_scores"]["sha256"],
                 report.SA_FRAGMENT_SCORES_SHA256,
@@ -642,6 +820,86 @@ class DenovoReportTests(unittest.TestCase):
                 "UDLM ignores randomness",
             ):
                 report.collect_report(runs)
+
+    def test_empirical_report_requires_exact_prior_identity_and_labels_causal_scope(self):
+        with self._workspace() as directory:
+            runs = Path(directory) / "runs"
+            self._three_udlm_runs(runs, prior_variant="empirical_frequency")
+
+            payload = report.collect_report(runs)
+
+            identity = payload["udlm_prior_interpretation"]
+            self.assertEqual(identity["label"], "smoothed_empirical_prior_treatment")
+            self.assertEqual(
+                identity["matched_prior_effect_control"],
+                "schedule_uniform with the same categorical process and schedule",
+            )
+            self.assertIn("not prior-benefit evidence", identity["causal_claim_boundary"])
+            self.assertEqual(
+                identity["objective_scope"],
+                "model_dependent_ct_integrand_without_parameter_independent_endpoint_kl",
+            )
+            self.assertIn("endpoint KL", identity["causal_claim_boundary"])
+            self.assertEqual(
+                payload["checkpoint"]["udlm_prior_metadata_sha256"],
+                payload["config"]["sampling"]["prior_metadata_sha256"],
+            )
+            csv_rows = report.aggregate_csv_rows(payload)
+            self.assertTrue(
+                all(
+                    row["udlm_prior_variant"] == "empirical_frequency"
+                    and row["udlm_comparison_role"] == "empirical_prior_treatment"
+                    and row["udlm_objective_scope"]
+                    == "model_dependent_ct_integrand_without_parameter_independent_endpoint_kl"
+                    for row in csv_rows
+                )
+            )
+            outputs = report.write_report_bundle(
+                payload,
+                output_dir=Path(directory) / "empirical-aggregate",
+                pdf_path=Path(directory) / "empirical-report.pdf",
+            )
+            from pypdf import PdfReader
+
+            pdf_text = "\n".join(
+                page.extract_text() or "" for page in PdfReader(outputs["pdf"]).pages
+            )
+            self.assertIn("UDLM objective scope", pdf_text)
+            self.assertIn(
+                "model_dependent_ct_integrand_without_parameter_independent_endpoint_kl",
+                pdf_text,
+            )
+
+            summary_path = runs / "seed_1" / "summary.json"
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            summary["checkpoint"]["udlm_prior_metadata"]["noise_eps"] = 0.02
+            summary_path.write_text(json.dumps(summary), encoding="utf-8")
+            with self.assertRaisesRegex(
+                report.ReportValidationError,
+                "metadata digest is invalid",
+            ):
+                report.collect_report(runs)
+
+    def test_schedule_and_empirical_labels_do_not_conflate_prior_and_schedule(self):
+        schedule = report._prior_interpretation(
+            {
+                "diffusion_type": "udlm",
+                "udlm_prior_variant": "schedule_uniform",
+                "udlm_prior_metadata_sha256": "a" * 64,
+            }
+        )
+        empirical = report._prior_interpretation(
+            {
+                "diffusion_type": "udlm",
+                "udlm_prior_variant": "empirical_frequency",
+                "udlm_prior_metadata_sha256": "b" * 64,
+            }
+        )
+
+        self.assertEqual(schedule["process_family"], empirical["process_family"])
+        self.assertEqual(schedule["schedule_variant"], empirical["schedule_variant"])
+        self.assertIn("not evidence of empirical-prior benefit", schedule["causal_claim_boundary"])
+        self.assertIn("Only empirical_frequency minus", empirical["causal_claim_boundary"])
 
     def test_full_bundle_writes_machine_outputs_and_valid_pdf(self):
         with self._workspace() as directory:
@@ -820,6 +1078,111 @@ class DenovoReportTests(unittest.TestCase):
             ):
                 report.collect_report(runs)
 
+    def test_legacy_gpu_snapshot_cannot_downgrade_current_command_binding(self):
+        with self._workspace() as directory:
+            runs = Path(directory) / "runs"
+            self._three_runs(runs)
+            summary_path = runs / "seed_0" / "summary.json"
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            launch = summary["environment"]["launch_environment"]
+            snapshot = json.loads(
+                launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"]
+            )
+            snapshot.pop("gpu_selection_schema_version")
+            launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"] = json.dumps(snapshot)
+            summary_path.write_text(json.dumps(summary), encoding="utf-8")
+            with self.assertRaisesRegex(
+                report.ReportValidationError,
+                "require.*gpu_selection_schema_version 2",
+            ):
+                report.collect_report(runs)
+
+    def test_child_expected_source_revision_is_bound_in_command(self):
+        with self._workspace() as directory:
+            runs = Path(directory) / "runs"
+            self._three_runs(runs)
+            summary_path = runs / "seed_0" / "summary.json"
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            command = summary["run"]["command"]
+            command[command.index("--expected-source-revision") + 1] = "f" * 40
+            launch = summary["environment"]["launch_environment"]
+            snapshot = json.loads(
+                launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"]
+            )
+            snapshot["command"] = command
+            launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"] = json.dumps(snapshot)
+            summary_path.write_text(json.dumps(summary), encoding="utf-8")
+            with self.assertRaisesRegex(
+                report.ReportValidationError,
+                "--expected-source-revision",
+            ):
+                report.collect_report(runs)
+
+    def test_child_expected_config_digest_is_bound_in_command(self):
+        with self._workspace() as directory:
+            runs = Path(directory) / "runs"
+            self._three_runs(runs)
+            summary_path = runs / "seed_0" / "summary.json"
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            command = summary["run"]["command"]
+            command[command.index("--expected-config-sha256") + 1] = "0" * 64
+            launch = summary["environment"]["launch_environment"]
+            snapshot = json.loads(
+                launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"]
+            )
+            snapshot["command"] = command
+            launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"] = json.dumps(snapshot)
+            summary_path.write_text(json.dumps(summary), encoding="utf-8")
+            with self.assertRaisesRegex(
+                report.ReportValidationError,
+                "--expected-config-sha256",
+            ):
+                report.collect_report(runs)
+
+    def test_report_requires_child_pre_and_post_source_verification(self):
+        with self._workspace() as directory:
+            runs = Path(directory) / "runs"
+            self._three_runs(runs)
+            summary_path = runs / "seed_0" / "summary.json"
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            summary["git"][
+                "clean_pushed_source_verified_before_and_after_run"
+            ] = False
+            summary_path.write_text(json.dumps(summary), encoding="utf-8")
+            with self.assertRaisesRegex(
+                report.ReportValidationError,
+                "child-side pre/post",
+            ):
+                report.collect_report(runs)
+
+    def test_arbitrary_mdlm_checkpoint_cannot_inherit_baseline_training_context(self):
+        with self._workspace() as directory:
+            runs = Path(directory) / "runs"
+            self._three_runs(runs)
+            summary_path = runs / "seed_0" / "summary.json"
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            summary["checkpoint"]["global_step"] = 49_999
+            summary_path.write_text(json.dumps(summary), encoding="utf-8")
+            with self.assertRaisesRegex(
+                report.ReportValidationError,
+                "restricted to the audited 50k baseline",
+            ):
+                report.collect_report(runs)
+
+    def test_run_completion_timestamp_cannot_precede_start(self):
+        with self._workspace() as directory:
+            runs = Path(directory) / "runs"
+            self._three_runs(runs)
+            summary_path = runs / "seed_0" / "summary.json"
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            summary["run"]["completed_at_utc"] = "2026-09-04T23:59:59+00:00"
+            summary_path.write_text(json.dumps(summary), encoding="utf-8")
+            with self.assertRaisesRegex(
+                report.ReportValidationError,
+                "predates run.started_at_utc",
+            ):
+                report.collect_report(runs)
+
     def test_dependency_version_mismatch_is_rejected(self):
         with self._workspace() as directory:
             runs = Path(directory) / "runs"
@@ -841,10 +1204,10 @@ class DenovoReportTests(unittest.TestCase):
             snapshot = json.loads(
                 launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"]
             )
-            snapshot["physical_gpu"]["compute_processes"] = [
+            snapshot["physical_gpu_at_final_uuid_probe"]["compute_processes"] = [
                 {"pid": 123, "process_name": "other", "used_memory_mib": 4}
             ]
-            snapshot["physical_gpu"]["utilization_percent"] = 14
+            snapshot["physical_gpu_at_final_uuid_probe"]["utilization_percent"] = 14
             launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"] = json.dumps(snapshot)
             summary_path.write_text(json.dumps(summary), encoding="utf-8")
             with self.assertRaisesRegex(
@@ -863,7 +1226,7 @@ class DenovoReportTests(unittest.TestCase):
             snapshot = json.loads(
                 launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"]
             )
-            snapshot["physical_gpu"]["utilization_percent"] = 10
+            snapshot["physical_gpu_at_final_uuid_probe"]["utilization_percent"] = 10
             launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"] = json.dumps(snapshot)
             summary_path.write_text(json.dumps(summary), encoding="utf-8")
             with self.assertRaisesRegex(
@@ -872,7 +1235,7 @@ class DenovoReportTests(unittest.TestCase):
             ):
                 report.collect_report(runs)
 
-    def test_gpu_outside_user_selected_physical_ids_is_rejected(self):
+    def test_selected_gpu_absent_from_full_inventory_is_rejected(self):
         with self._workspace() as directory:
             runs = Path(directory) / "runs"
             self._three_runs(runs)
@@ -882,12 +1245,12 @@ class DenovoReportTests(unittest.TestCase):
             snapshot = json.loads(
                 launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"]
             )
-            snapshot["policy"]["selected_physical_indices"] = [2, 3]
+            snapshot["gpu_inventory_at_selection"][0]["uuid"] = "GPU-not-selected"
             launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"] = json.dumps(snapshot)
             summary_path.write_text(json.dumps(summary), encoding="utf-8")
             with self.assertRaisesRegex(
                 report.ReportValidationError,
-                "not explicitly chosen by the user",
+                "absent from the full inventory",
             ):
                 report.collect_report(runs)
 
@@ -895,39 +1258,6 @@ class DenovoReportTests(unittest.TestCase):
         with self._workspace() as directory:
             runs = Path(directory) / "runs"
             self._three_runs(runs)
-            for seed in report.EXPECTED_SEEDS:
-                summary_path = runs / f"seed_{seed}" / "summary.json"
-                summary = json.loads(summary_path.read_text(encoding="utf-8"))
-                launch = summary["environment"]["launch_environment"]
-                snapshot = json.loads(
-                    launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"]
-                )
-                final_probe = snapshot.pop("physical_gpu")
-                snapshot["gpu_selection_schema_version"] = 2
-                snapshot["inventory_snapshot_completed_at_utc"] = (
-                    "2026-09-04T23:59:59+00:00"
-                )
-                snapshot["final_uuid_probe_completed_at_utc"] = snapshot[
-                    "timestamp_utc"
-                ]
-                snapshot["physical_gpu_at_final_uuid_probe"] = final_probe
-                snapshot["policy"] = {
-                    "selection_method": "dynamic_idle_discovery",
-                    "inventory_scope": "all_nvidia_gpus",
-                    "requested_gpu_count": 2,
-                    "max_utilization_percent": 10,
-                    "utilization_comparison": "strictly_less_than",
-                    "min_free_memory_mib": 40_000,
-                    "active_compute_processes_allowed": False,
-                }
-                snapshot["gpu_inventory_at_selection"] = [
-                    dict(final_probe)
-                ]
-                snapshot["running_physical_indices_at_selection"] = []
-                launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"] = json.dumps(
-                    snapshot
-                )
-                summary_path.write_text(json.dumps(summary), encoding="utf-8")
 
             payload = report.collect_report(runs)
 
@@ -945,6 +1275,24 @@ class DenovoReportTests(unittest.TestCase):
                     "final_exact_uuid_probe",
                 )
 
+            summary_path = runs / "seed_1" / "summary.json"
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            command = summary["run"]["command"]
+            digest_index = command.index("--expected-checkpoint-sha256") + 1
+            command[digest_index] = "0" * 64
+            launch = summary["environment"]["launch_environment"]
+            snapshot = json.loads(
+                launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"]
+            )
+            snapshot["command"] = command
+            launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"] = json.dumps(snapshot)
+            summary_path.write_text(json.dumps(summary), encoding="utf-8")
+            with self.assertRaisesRegex(
+                report.ReportValidationError,
+                "expected-checkpoint-sha256",
+            ):
+                report.collect_report(runs)
+
     def test_duplicate_process_telemetry_is_rejected_in_final_or_inventory_snapshot(self):
         process = {"pid": 123, "process_name": "other", "used_memory_mib": 4}
         with self._workspace() as directory:
@@ -956,7 +1304,10 @@ class DenovoReportTests(unittest.TestCase):
             snapshot = json.loads(
                 launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"]
             )
-            snapshot["physical_gpu"]["compute_processes"] = [process, process]
+            snapshot["physical_gpu_at_final_uuid_probe"]["compute_processes"] = [
+                process,
+                process,
+            ]
             launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"] = json.dumps(snapshot)
             summary_path.write_text(json.dumps(summary), encoding="utf-8")
             with self.assertRaisesRegex(
@@ -974,33 +1325,10 @@ class DenovoReportTests(unittest.TestCase):
             snapshot = json.loads(
                 launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"]
             )
-            final_probe = snapshot.pop("physical_gpu")
-            snapshot.update(
-                {
-                    "gpu_selection_schema_version": 2,
-                    "inventory_snapshot_completed_at_utc": (
-                        "2026-09-04T23:59:59+00:00"
-                    ),
-                    "final_uuid_probe_completed_at_utc": snapshot["timestamp_utc"],
-                    "physical_gpu_at_final_uuid_probe": final_probe,
-                    "gpu_inventory_at_selection": [
-                        {
-                            **final_probe,
-                            "compute_processes": [process, process],
-                        }
-                    ],
-                    "running_physical_indices_at_selection": [],
-                }
-            )
-            snapshot["policy"] = {
-                "selection_method": "dynamic_idle_discovery",
-                "inventory_scope": "all_nvidia_gpus",
-                "requested_gpu_count": 1,
-                "max_utilization_percent": 10,
-                "utilization_comparison": "strictly_less_than",
-                "min_free_memory_mib": 40_000,
-                "active_compute_processes_allowed": False,
-            }
+            snapshot["gpu_inventory_at_selection"][0]["compute_processes"] = [
+                process,
+                process,
+            ]
             launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"] = json.dumps(snapshot)
             summary_path.write_text(json.dumps(summary), encoding="utf-8")
             with self.assertRaisesRegex(

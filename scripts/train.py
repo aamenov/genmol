@@ -63,11 +63,15 @@ def train(config):
         report = model.initialize_from_mdlm_checkpoint(
             source_path,
             use_ema=bool(config.training.get('init_from_mdlm_ema', True)),
+            expected_sha256=config.training.get(
+                'init_from_mdlm_checkpoint_sha256'
+            ),
         )
         print(
             'Initialized UDLM backbone from MDLM: '
             f"{report['source_path']} (weights={report['weights']}, "
-            f"parameters={report['parameter_tensors']})"
+            f"parameters={report['parameter_tensors']}, "
+            f"sha256={report['source_sha256']})"
         )
     elif startup_mode == 'resume':
         print(

@@ -60,6 +60,8 @@ def _expected(tmp_path: Path, *, num_samples: int = 3) -> launcher.ExpectedRunId
         "num_steps": None,
         "inference_eps": None,
         "exclude_special_tokens": None,
+        "prior_variant": None,
+        "prior_metadata_sha256": None,
     }
     effective = dict(source)
     effective.update(
@@ -101,6 +103,9 @@ def _expected(tmp_path: Path, *, num_samples: int = 3) -> launcher.ExpectedRunId
         checkpoint_diffusion_type="mdlm",
         checkpoint_udlm_inference_eps=None,
         checkpoint_udlm_exclude_special_tokens=None,
+        checkpoint_udlm_prior_variant=None,
+        checkpoint_udlm_prior_metadata=None,
+        checkpoint_udlm_prior_metadata_sha256=None,
         config_path=config,
         source_config=source,
         source_config_sha256=launcher._sha256_file(config),
@@ -112,6 +117,7 @@ def _expected(tmp_path: Path, *, num_samples: int = 3) -> launcher.ExpectedRunId
         implementation_inputs=implementation_inputs,
         metric_inputs=metric_inputs,
         num_samples=num_samples,
+        source_revision="e" * 40,
     )
 
 
@@ -136,6 +142,24 @@ def _write_matching_artifacts(
     raw_path = run_dir / launcher.benchmark_runner.RAW_SAMPLES_FILENAME
     summary_path = run_dir / launcher.benchmark_runner.SUMMARY_FILENAME
     _write_raw_csv(raw_path, expected.num_samples)
+    command = launcher._command(
+        checkpoint=expected.checkpoint_path,
+        expected_checkpoint_sha256=expected.checkpoint_sha256,
+        expected_source_revision=expected.source_revision,
+        config=expected.config_path,
+        expected_config_sha256=expected.source_config_sha256,
+        num_samples=expected.num_samples,
+        seed=seed,
+        output_dir=run_dir.resolve(),
+    )
+    selection = {
+        "event": "launch",
+        "source_revision": {
+            "head": expected.source_revision,
+            "upstream": expected.source_revision,
+        },
+        "command": command,
+    }
     summary = {
         "schema_version": launcher.benchmark_runner.SCHEMA_VERSION,
         "status": "completed",
@@ -148,6 +172,20 @@ def _write_matching_artifacts(
                 "final" if expected.num_samples == 1_000 else "pilot"
             ),
             "final_protocol_eligible": expected.num_samples == 1_000,
+            "started_at_utc": "2026-09-05T00:00:00+00:00",
+            "completed_at_utc": "2026-09-05T00:01:00+00:00",
+            "one_seed_per_invocation": True,
+            "single_generation_batch": True,
+            "command": command,
+            "seed_configuration": {
+                "seed": seed,
+                "seed_applied_immediately_before_generation": True,
+                "python_random": True,
+                "numpy": True,
+                "torch_cpu": True,
+                "torch_cuda_all": True,
+                "python_hash_seed": str(seed),
+            },
             "generation_protocol": {
                 "diffusion_type": expected.sampling_config["diffusion_type"],
                 "nfe": expected.sampling_config["num_steps"] or 2,
@@ -155,6 +193,10 @@ def _write_matching_artifacts(
                 "inference_eps": expected.sampling_config["inference_eps"],
                 "exclude_special_tokens": expected.sampling_config[
                     "exclude_special_tokens"
+                ],
+                "prior_variant": expected.sampling_config["prior_variant"],
+                "prior_metadata_sha256": expected.sampling_config[
+                    "prior_metadata_sha256"
                 ],
                 "temperature": expected.sampling_config["softmax_temp"],
                 "randomness": expected.sampling_config["randomness"],
@@ -168,10 +210,16 @@ def _write_matching_artifacts(
             "sha256": expected.checkpoint_sha256,
             "global_step": expected.checkpoint_global_step,
             "size_bytes": expected.checkpoint_size_bytes,
+            "byte_identity_verified_before_and_after_load": True,
             "diffusion_type": expected.checkpoint_diffusion_type,
             "udlm_inference_eps": expected.checkpoint_udlm_inference_eps,
             "udlm_exclude_special_tokens": (
                 expected.checkpoint_udlm_exclude_special_tokens
+            ),
+            "udlm_prior_variant": expected.checkpoint_udlm_prior_variant,
+            "udlm_prior_metadata": expected.checkpoint_udlm_prior_metadata,
+            "udlm_prior_metadata_sha256": (
+                expected.checkpoint_udlm_prior_metadata_sha256
             ),
         },
         "config": {
@@ -183,9 +231,47 @@ def _write_matching_artifacts(
             "effective": expected.effective_config,
             "effective_sha256": expected.effective_config_sha256,
         },
-        "git": {"runner_sha256": expected.benchmark_runner_sha256},
+        "metrics": {
+            "released_comparable": {"validity": 1.0},
+            "strict": {"validity": 1.0},
+        },
+        "failure_counts": {
+            "raw_safe_conversion_failed": 0,
+            "strict_decode_failed": 0,
+            "released_decode_failed": 0,
+            "released_recovered_strict_failure": 0,
+            "strict_valid_but_released_failed": 0,
+            "released_largest_component_applied": 0,
+            "strict_duplicates": 0,
+            "released_duplicates": 0,
+        },
+        "runtime_seconds": {
+            "model_load_and_device_move": 1.0,
+            "model_sampling_and_tokenizer": 1.0,
+            "released_postprocessing": 0.0,
+            "generation": 1.0,
+            "decode_and_metrics": 1.0,
+            "total_before_summary_write": 3.0,
+        },
+        "environment": {
+            "requested_device": "cuda:0",
+            "resolved_model_device": "cuda:0",
+            "torch_cuda_available": True,
+            "launch_environment": {
+                "GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT": json.dumps(selection)
+            },
+        },
+        "git": {
+            "commit": expected.source_revision,
+            "upstream": expected.source_revision,
+            "expected_source_revision": expected.source_revision,
+            "dirty": False,
+            "clean_pushed_source_verified_before_and_after_run": True,
+            "runner_sha256": expected.benchmark_runner_sha256,
+        },
         "implementation_inputs": expected.implementation_inputs,
         "metric_inputs": expected.metric_inputs,
+        "tokenizer": {"effective_size": 1_880},
         "artifacts": {
             "raw_samples_csv": {
                 "path": str(raw_path.resolve()),
@@ -525,12 +611,18 @@ def test_child_environment_maps_uuid_and_uses_logical_cuda_zero(
     assert json.loads(environment["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"]) == selection
     command = launcher._command(
         checkpoint=tmp_path / "model.ckpt",
+        expected_checkpoint_sha256="a" * 64,
+        expected_source_revision="b" * 40,
         config=tmp_path / "config.yaml",
+        expected_config_sha256="c" * 64,
         num_samples=1_000,
         seed=17,
         output_dir=tmp_path / "seed_17",
     )
     assert command[command.index("--device") + 1] == "cuda:0"
+    assert command[command.index("--expected-checkpoint-sha256") + 1] == "a" * 64
+    assert command[command.index("--expected-source-revision") + 1] == "b" * 40
+    assert command[command.index("--expected-config-sha256") + 1] == "c" * 64
     assert "GPU-test-uuid" not in command
 
 
@@ -558,6 +650,51 @@ def test_matching_artifacts_are_the_only_skippable_state(tmp_path: Path) -> None
     assert launcher._completed(output_root, 7, expected) is False
     _write_matching_artifacts(output_root, 7, expected)
     assert launcher._completed(output_root, 7, expected) is True
+
+
+def test_skeletal_current_schema_summary_is_not_skippable(tmp_path: Path) -> None:
+    expected = _expected(tmp_path)
+    output_root = tmp_path / "runs"
+    _, summary_path = _write_matching_artifacts(output_root, 7, expected)
+    summary = _read_summary(summary_path)
+    for field in ("metrics", "runtime_seconds", "environment", "tokenizer"):
+        summary.pop(field)
+    _write_summary(summary_path, summary)
+
+    with pytest.raises(
+        launcher.CompletionArtifactError,
+        match="top-level fields differ from the current child contract",
+    ):
+        launcher._completed(output_root, 7, expected)
+
+
+def test_final_completion_delegates_to_report_consumability_validator(
+    tmp_path: Path,
+) -> None:
+    from scripts.exps.denovo import report
+
+    expected = _expected(tmp_path, num_samples=1_000)
+    output_root = tmp_path / "runs"
+    _write_matching_artifacts(output_root, 7, expected)
+
+    with mock.patch.object(
+        report,
+        "_validate_summary_and_rows",
+        return_value={"validated": True},
+    ) as validate:
+        assert launcher._completed(output_root, 7, expected) is True
+    validate.assert_called_once_with(output_root / "seed_7", 7)
+
+    with mock.patch.object(
+        report,
+        "_validate_summary_and_rows",
+        side_effect=report.ReportValidationError("synthetic report rejection"),
+    ):
+        with pytest.raises(
+            launcher.CompletionArtifactError,
+            match="fail final report validation.*synthetic report rejection",
+        ):
+            launcher._completed(output_root, 7, expected)
 
 
 def test_expected_identity_uses_checkpoint_metadata_and_normalized_sampling(
@@ -611,6 +748,8 @@ def test_expected_identity_uses_checkpoint_metadata_and_normalized_sampling(
         "num_steps": None,
         "inference_eps": None,
         "exclude_special_tokens": None,
+        "prior_variant": None,
+        "prior_metadata_sha256": None,
     }
     assert expected.sampling_config_sha256 == launcher._canonical_json_sha256(
         expected.sampling_config
@@ -681,6 +820,69 @@ def test_expected_identity_supports_udlm_and_rejects_endpoint_mismatch(
             )
 
 
+def test_expected_identity_pins_full_categorical_prior_metadata(
+    tmp_path: Path,
+) -> None:
+    expected_fixture = _expected(tmp_path)
+    prior_metadata = {"variant": "schedule_uniform", "immutable": True}
+    prior_digest = "a" * 64
+    expected_fixture.config_path.write_text(
+        "diffusion_type: udlm\n"
+        "softmax_temp: 1.0\n"
+        "randomness: 0.0\n"
+        "min_add_len: 40\n"
+        "num_steps: 32\n"
+        "inference_eps: 1.0e-5\n"
+        "exclude_special_tokens: false\n"
+        "prior_variant: schedule_uniform\n"
+        f"prior_metadata_sha256: {prior_digest}\n",
+        encoding="utf-8",
+    )
+    metadata = {
+        "sha256": expected_fixture.checkpoint_sha256,
+        "global_step": 100,
+        "size_bytes": expected_fixture.checkpoint_size_bytes,
+        "diffusion_type": "udlm",
+        "udlm_inference_eps": 1e-5,
+        "udlm_exclude_special_tokens": False,
+        "udlm_prior_variant": "schedule_uniform",
+        "udlm_prior_metadata": prior_metadata,
+        "udlm_prior_metadata_sha256": prior_digest,
+    }
+    with (
+        mock.patch.object(
+            launcher.benchmark_runner,
+            "checkpoint_metadata",
+            return_value=metadata,
+        ),
+        mock.patch.object(
+            launcher.benchmark_runner,
+            "implementation_input_provenance",
+            return_value=expected_fixture.implementation_inputs,
+        ),
+        mock.patch.object(
+            launcher.benchmark_runner,
+            "metric_input_provenance",
+            return_value=expected_fixture.metric_inputs,
+        ),
+    ):
+        expected = launcher._build_expected_run_identity(
+            expected_fixture.checkpoint_path,
+            expected_fixture.config_path,
+            32,
+        )
+        assert expected.checkpoint_udlm_prior_metadata == prior_metadata
+        assert expected.checkpoint_udlm_prior_metadata_sha256 == prior_digest
+
+        metadata["udlm_prior_metadata_sha256"] = "b" * 64
+        with pytest.raises(ValueError, match="prior_metadata_sha256"):
+            launcher._build_expected_run_identity(
+                expected_fixture.checkpoint_path,
+                expected_fixture.config_path,
+                32,
+            )
+
+
 def test_completed_artifacts_reject_checkpoint_and_sampling_mismatches(
     tmp_path: Path,
 ) -> None:
@@ -691,6 +893,8 @@ def test_completed_artifacts_reject_checkpoint_and_sampling_mismatches(
     summary["checkpoint"]["sha256"] = "0" * 64
     summary["checkpoint"]["global_step"] = 40_000
     summary["config"]["sampling"]["randomness"] = 2.0
+    summary["checkpoint"]["udlm_prior_metadata"] = {"forged": True}
+    summary["checkpoint"]["udlm_prior_metadata_sha256"] = "f" * 64
     summary["config"]["sampling_sha256"] = launcher._canonical_json_sha256(
         summary["config"]["sampling"]
     )
@@ -703,6 +907,8 @@ def test_completed_artifacts_reject_checkpoint_and_sampling_mismatches(
     assert "checkpoint.global_step" in message
     assert "config.sampling" in message
     assert "config.sampling_sha256" in message
+    assert "checkpoint.udlm_prior_metadata" in message
+    assert "checkpoint.udlm_prior_metadata_sha256" in message
     assert "Refusing to skip or relaunch" in message
 
 
@@ -783,20 +989,28 @@ def test_main_skips_matching_run_without_probing_gpus(
 ) -> None:
     expected = _expected(tmp_path)
     output_root = tmp_path / "runs"
-    _write_matching_artifacts(output_root, 4, expected)
     monkeypatch.setattr(launcher, "REPOSITORY_ROOT", tmp_path)
+    monkeypatch.setattr(
+        launcher,
+        "_require_project_virtual_environment",
+        lambda: tmp_path / ".venv/bin/python",
+    )
+    _write_matching_artifacts(output_root, 4, expected)
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     monkeypatch.delenv("TMUX", raising=False)
     monkeypatch.setattr(
         launcher,
         "_require_clean_pushed_source",
-        lambda: {"head": "a" * 40, "upstream": "a" * 40},
+        lambda: {
+            "head": expected.source_revision,
+            "upstream": expected.source_revision,
+        },
     )
     monkeypatch.setattr(
         launcher,
         "_build_expected_run_identity",
-        lambda checkpoint, config, num_samples: expected,
+        lambda checkpoint, config, num_samples, **_kwargs: expected,
     )
     monkeypatch.setattr(
         launcher,
@@ -834,18 +1048,26 @@ def test_main_requires_tmux_only_for_real_execution(
 ) -> None:
     expected = _expected(tmp_path)
     monkeypatch.setattr(launcher, "REPOSITORY_ROOT", tmp_path)
+    monkeypatch.setattr(
+        launcher,
+        "_require_project_virtual_environment",
+        lambda: tmp_path / ".venv/bin/python",
+    )
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     monkeypatch.delenv("TMUX", raising=False)
     monkeypatch.setattr(
         launcher,
         "_require_clean_pushed_source",
-        lambda: {"head": "a" * 40, "upstream": "a" * 40},
+        lambda: {
+            "head": expected.source_revision,
+            "upstream": expected.source_revision,
+        },
     )
     monkeypatch.setattr(
         launcher,
         "_build_expected_run_identity",
-        lambda checkpoint, config, num_samples: expected,
+        lambda checkpoint, config, num_samples, **_kwargs: expected,
     )
     monkeypatch.setattr(launcher, "_snapshot", lambda: [_gpu()])
     common = [
@@ -890,17 +1112,25 @@ def test_main_rejects_partial_output_before_probing_gpus(
     summary_path.unlink()
     assert raw_path.exists()
     monkeypatch.setattr(launcher, "REPOSITORY_ROOT", tmp_path)
+    monkeypatch.setattr(
+        launcher,
+        "_require_project_virtual_environment",
+        lambda: tmp_path / ".venv/bin/python",
+    )
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     monkeypatch.setattr(
         launcher,
         "_require_clean_pushed_source",
-        lambda: {"head": "a" * 40, "upstream": "a" * 40},
+        lambda: {
+            "head": expected.source_revision,
+            "upstream": expected.source_revision,
+        },
     )
     monkeypatch.setattr(
         launcher,
         "_build_expected_run_identity",
-        lambda checkpoint, config, num_samples: expected,
+        lambda checkpoint, config, num_samples, **_kwargs: expected,
     )
     monkeypatch.setattr(
         launcher,
@@ -941,17 +1171,25 @@ def test_main_rejects_mismatched_completion_before_probing_gpus(
     summary["checkpoint"]["global_step"] = 45_000
     _write_summary(summary_path, summary)
     monkeypatch.setattr(launcher, "REPOSITORY_ROOT", tmp_path)
+    monkeypatch.setattr(
+        launcher,
+        "_require_project_virtual_environment",
+        lambda: tmp_path / ".venv/bin/python",
+    )
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     monkeypatch.setattr(
         launcher,
         "_require_clean_pushed_source",
-        lambda: {"head": "a" * 40, "upstream": "a" * 40},
+        lambda: {
+            "head": expected.source_revision,
+            "upstream": expected.source_revision,
+        },
     )
     monkeypatch.setattr(
         launcher,
         "_build_expected_run_identity",
-        lambda checkpoint, config, num_samples: expected,
+        lambda checkpoint, config, num_samples, **_kwargs: expected,
     )
     monkeypatch.setattr(
         launcher,

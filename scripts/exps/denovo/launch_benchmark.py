@@ -110,6 +110,9 @@ class ExpectedRunIdentity:
     checkpoint_diffusion_type: str
     checkpoint_udlm_inference_eps: float | None
     checkpoint_udlm_exclude_special_tokens: bool | None
+    checkpoint_udlm_prior_variant: str | None
+    checkpoint_udlm_prior_metadata: Mapping[str, Any] | None
+    checkpoint_udlm_prior_metadata_sha256: str | None
     config_path: Path
     source_config: Mapping[str, Any]
     source_config_sha256: str
@@ -121,6 +124,7 @@ class ExpectedRunIdentity:
     implementation_inputs: Mapping[str, Any]
     metric_inputs: Mapping[str, Any]
     num_samples: int
+    source_revision: str | None = None
     device: str = "cuda:0"
 
 
@@ -216,14 +220,36 @@ def _resolve_checkpoint(path: Path) -> Path:
 
     resolved = path if path.is_absolute() else REPOSITORY_ROOT / path
     resolved = resolved.resolve()
-    project_root = (
+    project_root = _project_root()
+    if resolved != project_root and project_root not in resolved.parents:
+        raise ValueError(f"checkpoint escapes project root: {resolved}")
+    return resolved
+
+
+def _project_root() -> Path:
+    return (
         REPOSITORY_ROOT.parent.parent
         if REPOSITORY_ROOT.parent.name == "run_sources"
         else REPOSITORY_ROOT
     )
-    if resolved != project_root and project_root not in resolved.parents:
-        raise ValueError(f"checkpoint escapes project root: {resolved}")
-    return resolved
+
+
+def _project_venv_python() -> Path:
+    return _project_root() / ".venv/bin/python"
+
+
+def _require_project_virtual_environment() -> Path:
+    """Require the shared project ``.venv`` for controller and child execution."""
+
+    expected_python = _project_venv_python()
+    if not expected_python.is_file():
+        raise RuntimeError(f"project virtual-environment Python is missing: {expected_python}")
+    if Path(sys.executable).resolve() != expected_python.resolve():
+        raise RuntimeError(
+            "benchmark launcher must run with the project virtual environment: "
+            f"{expected_python}"
+        )
+    return expected_python
 
 
 def _run_nvidia_smi(
@@ -507,6 +533,8 @@ def _build_expected_run_identity(
     checkpoint: Path,
     config: Path,
     num_samples: int,
+    *,
+    source_revision: str | None = None,
 ) -> ExpectedRunIdentity:
     """Resolve and fingerprint the exact inputs passed to every child run."""
 
@@ -514,7 +542,10 @@ def _build_expected_run_identity(
     # checkpoint inspection and well before any GPU selection/model startup.
     metric_inputs = benchmark_runner.metric_input_provenance()
     checkpoint_info = benchmark_runner.checkpoint_metadata(checkpoint)
+    source_config_sha256 = _sha256_file(config)
     source_config = benchmark_runner.load_yaml_config(config)
+    if _sha256_file(config) != source_config_sha256:
+        raise RuntimeError(f"Inference config changed while being inspected: {config}")
     sampling_config = benchmark_runner.validate_sampling_config(source_config)
     checkpoint_diffusion_type = str(
         checkpoint_info.get("diffusion_type", "mdlm")
@@ -527,6 +558,14 @@ def _build_expected_run_identity(
     checkpoint_udlm_inference_eps = checkpoint_info.get("udlm_inference_eps")
     checkpoint_udlm_exclude_special_tokens = checkpoint_info.get(
         "udlm_exclude_special_tokens"
+    )
+    checkpoint_udlm_prior_variant = checkpoint_info.get(
+        "udlm_prior_variant",
+        "release_uniform" if checkpoint_diffusion_type == "udlm" else None,
+    )
+    checkpoint_udlm_prior_metadata = checkpoint_info.get("udlm_prior_metadata")
+    checkpoint_udlm_prior_metadata_sha256 = checkpoint_info.get(
+        "udlm_prior_metadata_sha256"
     )
     if checkpoint_diffusion_type == "udlm":
         if checkpoint_udlm_inference_eps is None or not math.isclose(
@@ -546,6 +585,26 @@ def _build_expected_run_identity(
         ):
             raise ValueError(
                 "config exclude_special_tokens does not match checkpoint metadata"
+            )
+        if checkpoint_udlm_prior_variant != sampling_config["prior_variant"]:
+            raise ValueError(
+                "config prior_variant does not match checkpoint metadata: "
+                f"{sampling_config['prior_variant']!r} != "
+                f"{checkpoint_udlm_prior_variant!r}"
+            )
+        if (
+            checkpoint_udlm_prior_metadata_sha256
+            != sampling_config["prior_metadata_sha256"]
+        ):
+            raise ValueError(
+                "config prior_metadata_sha256 does not match checkpoint metadata"
+            )
+        if checkpoint_udlm_prior_variant in (
+            benchmark_runner.UDLM_CATEGORICAL_PRIOR_VARIANTS
+        ) and not isinstance(checkpoint_udlm_prior_metadata, Mapping):
+            raise ValueError(
+                "categorical checkpoint metadata inspection did not return the full "
+                "immutable prior record"
             )
     implementation_inputs = benchmark_runner.implementation_input_provenance()
     benchmark_runner_path = Path(benchmark_runner.__file__).resolve()
@@ -573,9 +632,24 @@ def _build_expected_run_identity(
             if checkpoint_udlm_exclude_special_tokens is not None
             else None
         ),
+        checkpoint_udlm_prior_variant=(
+            str(checkpoint_udlm_prior_variant)
+            if checkpoint_udlm_prior_variant is not None
+            else None
+        ),
+        checkpoint_udlm_prior_metadata=(
+            dict(checkpoint_udlm_prior_metadata)
+            if isinstance(checkpoint_udlm_prior_metadata, Mapping)
+            else None
+        ),
+        checkpoint_udlm_prior_metadata_sha256=(
+            str(checkpoint_udlm_prior_metadata_sha256)
+            if checkpoint_udlm_prior_metadata_sha256 is not None
+            else None
+        ),
         config_path=config,
         source_config=source_config,
-        source_config_sha256=_sha256_file(config),
+        source_config_sha256=source_config_sha256,
         sampling_config=sampling_config,
         sampling_config_sha256=_canonical_json_sha256(sampling_config),
         effective_config=effective_config,
@@ -584,6 +658,7 @@ def _build_expected_run_identity(
         implementation_inputs=implementation_inputs,
         metric_inputs=metric_inputs,
         num_samples=num_samples,
+        source_revision=source_revision,
     )
 
 
@@ -728,6 +803,30 @@ def _completed(
         if actual != wanted:
             errors.append(f"{label}={actual!r}; expected {wanted!r}")
 
+    expected_top_level = {
+        "schema_version",
+        "status",
+        "seed",
+        "num_samples",
+        "run",
+        "checkpoint",
+        "config",
+        "metrics",
+        "failure_counts",
+        "runtime_seconds",
+        "environment",
+        "git",
+        "implementation_inputs",
+        "metric_inputs",
+        "tokenizer",
+        "artifacts",
+    }
+    if set(summary) != expected_top_level:
+        errors.append(
+            "summary top-level fields differ from the current child contract: "
+            f"found {sorted(summary)}, expected {sorted(expected_top_level)}"
+        )
+
     expect("schema_version", summary.get("schema_version"), benchmark_runner.SCHEMA_VERSION)
     expect("status", summary.get("status"), "completed")
     expect("seed", summary.get("seed"), seed)
@@ -750,6 +849,44 @@ def _completed(
         run.get("final_protocol_eligible"),
         expected.num_samples == 1_000,
     )
+    expect("run.one_seed_per_invocation", run.get("one_seed_per_invocation"), True)
+    expect("run.single_generation_batch", run.get("single_generation_batch"), True)
+    expected_seed_configuration = {
+        "seed": seed,
+        "seed_applied_immediately_before_generation": True,
+        "python_random": True,
+        "numpy": True,
+        "torch_cpu": True,
+        "torch_cuda_all": True,
+        "python_hash_seed": str(seed),
+    }
+    expect(
+        "run.seed_configuration",
+        run.get("seed_configuration"),
+        expected_seed_configuration,
+    )
+    for timestamp_field in ("started_at_utc", "completed_at_utc"):
+        timestamp = run.get(timestamp_field)
+        try:
+            parsed = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+        except ValueError:
+            errors.append(f"run.{timestamp_field} is not an ISO-8601 timestamp")
+        else:
+            if parsed.tzinfo is None:
+                errors.append(f"run.{timestamp_field} lacks a timezone")
+
+    if expected.source_revision is not None:
+        expected_command = _command(
+            checkpoint=expected.checkpoint_path,
+            expected_checkpoint_sha256=expected.checkpoint_sha256,
+            expected_source_revision=expected.source_revision,
+            config=expected.config_path,
+            expected_config_sha256=expected.source_config_sha256,
+            num_samples=expected.num_samples,
+            seed=seed,
+            output_dir=run_dir.resolve(),
+        )
+        expect("run.command", run.get("command"), expected_command)
     protocol = _mapping(run.get("generation_protocol"))
     sampling = expected.sampling_config
     for key, wanted in {
@@ -757,6 +894,8 @@ def _completed(
         "num_steps": sampling["num_steps"],
         "inference_eps": sampling["inference_eps"],
         "exclude_special_tokens": sampling["exclude_special_tokens"],
+        "prior_variant": sampling["prior_variant"],
+        "prior_metadata_sha256": sampling["prior_metadata_sha256"],
         "temperature": sampling["softmax_temp"],
         "randomness": sampling["randomness"],
         "randomness_used_by_sampler": sampling["diffusion_type"] == "mdlm",
@@ -790,6 +929,11 @@ def _completed(
         expected.checkpoint_size_bytes,
     )
     expect(
+        "checkpoint.byte_identity_verified_before_and_after_load",
+        checkpoint.get("byte_identity_verified_before_and_after_load"),
+        True,
+    )
+    expect(
         "checkpoint.diffusion_type",
         checkpoint.get("diffusion_type"),
         expected.checkpoint_diffusion_type,
@@ -803,6 +947,21 @@ def _completed(
         "checkpoint.udlm_exclude_special_tokens",
         checkpoint.get("udlm_exclude_special_tokens"),
         expected.checkpoint_udlm_exclude_special_tokens,
+    )
+    expect(
+        "checkpoint.udlm_prior_variant",
+        checkpoint.get("udlm_prior_variant"),
+        expected.checkpoint_udlm_prior_variant,
+    )
+    expect(
+        "checkpoint.udlm_prior_metadata",
+        checkpoint.get("udlm_prior_metadata"),
+        expected.checkpoint_udlm_prior_metadata,
+    )
+    expect(
+        "checkpoint.udlm_prior_metadata_sha256",
+        checkpoint.get("udlm_prior_metadata_sha256"),
+        expected.checkpoint_udlm_prior_metadata_sha256,
     )
 
     config = _mapping(summary.get("config"))
@@ -828,6 +987,20 @@ def _completed(
         git.get("runner_sha256"),
         expected.benchmark_runner_sha256,
     )
+    if expected.source_revision is not None:
+        expect("git.commit", git.get("commit"), expected.source_revision)
+        expect("git.upstream", git.get("upstream"), expected.source_revision)
+        expect(
+            "git.expected_source_revision",
+            git.get("expected_source_revision"),
+            expected.source_revision,
+        )
+        expect("git.dirty", git.get("dirty"), False)
+        expect(
+            "git.clean_pushed_source_verified_before_and_after_run",
+            git.get("clean_pushed_source_verified_before_and_after_run"),
+            True,
+        )
     expect(
         "implementation_inputs",
         summary.get("implementation_inputs"),
@@ -838,6 +1011,83 @@ def _completed(
         summary.get("metric_inputs"),
         expected.metric_inputs,
     )
+
+    metrics = _mapping(summary.get("metrics"))
+    if set(metrics) != {"released_comparable", "strict"} or any(
+        not isinstance(metrics.get(branch), Mapping)
+        or not metrics.get(branch)
+        for branch in ("released_comparable", "strict")
+    ):
+        errors.append("metrics must contain non-empty released_comparable and strict branches")
+    expected_failure_fields = {
+        "raw_safe_conversion_failed",
+        "strict_decode_failed",
+        "released_decode_failed",
+        "released_recovered_strict_failure",
+        "strict_valid_but_released_failed",
+        "released_largest_component_applied",
+        "strict_duplicates",
+        "released_duplicates",
+    }
+    failure_counts = _mapping(summary.get("failure_counts"))
+    if set(failure_counts) != expected_failure_fields or any(
+        isinstance(value, bool) or not isinstance(value, int) or value < 0
+        for value in failure_counts.values()
+    ):
+        errors.append("failure_counts does not match the current nonnegative count schema")
+    expected_runtime_fields = {
+        "model_load_and_device_move",
+        "model_sampling_and_tokenizer",
+        "released_postprocessing",
+        "generation",
+        "decode_and_metrics",
+        "total_before_summary_write",
+    }
+    runtime = _mapping(summary.get("runtime_seconds"))
+    if set(runtime) != expected_runtime_fields or any(
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or value < 0
+        for value in runtime.values()
+    ):
+        errors.append("runtime_seconds does not match the current finite timing schema")
+    environment = _mapping(summary.get("environment"))
+    expect("environment.requested_device", environment.get("requested_device"), "cuda:0")
+    expect(
+        "environment.resolved_model_device",
+        environment.get("resolved_model_device"),
+        "cuda:0",
+    )
+    expect("environment.torch_cuda_available", environment.get("torch_cuda_available"), True)
+    if not _mapping(summary.get("tokenizer")):
+        errors.append("tokenizer provenance must be a non-empty mapping")
+    if expected.source_revision is not None:
+        launch_environment = _mapping(environment.get("launch_environment"))
+        snapshot_text = launch_environment.get(
+            "GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"
+        )
+        try:
+            snapshot = json.loads(snapshot_text)
+        except (TypeError, json.JSONDecodeError):
+            errors.append("launch environment lacks a valid GPU selection snapshot")
+        else:
+            snapshot_mapping = _mapping(snapshot)
+            if not snapshot_mapping:
+                errors.append("launch GPU selection snapshot must be a JSON object")
+            expect(
+                "launch snapshot.command",
+                snapshot_mapping.get("command"),
+                expected_command,
+            )
+            expect(
+                "launch snapshot.source_revision",
+                snapshot_mapping.get("source_revision"),
+                {
+                    "head": expected.source_revision,
+                    "upstream": expected.source_revision,
+                },
+            )
 
     artifacts = _mapping(summary.get("artifacts"))
     raw_artifact = _mapping(artifacts.get("raw_samples_csv"))
@@ -882,24 +1132,47 @@ def _completed(
             "relaunch into the existing directory. Inspect the artifacts or choose "
             "a fresh output root."
         )
+    if expected.num_samples == 1_000:
+        # The final tier must be consumable by the actual report validator, not
+        # merely resemble a child summary structurally.  This shares the strict
+        # raw-row arithmetic, metric, tokenizer, CUDA, and provenance contract
+        # without imposing the final-report-only 1,000-row rules on pilot runs.
+        from scripts.exps.denovo import report as benchmark_report
+
+        try:
+            benchmark_report._validate_summary_and_rows(run_dir, seed)
+        except benchmark_report.ReportValidationError as error:
+            raise CompletionArtifactError(
+                f"Seed {seed} artifacts fail final report validation: {error}. "
+                "Refusing to skip or relaunch into the existing directory."
+            ) from error
     return True
 
 
 def _command(
     *,
     checkpoint: Path,
+    expected_checkpoint_sha256: str,
+    expected_source_revision: str,
     config: Path,
+    expected_config_sha256: str,
     num_samples: int,
     seed: int,
     output_dir: Path,
 ) -> list[str]:
     return [
-        sys.executable,
+        str(_project_venv_python()),
         str(REPOSITORY_ROOT / "scripts/exps/denovo/benchmark.py"),
         "--checkpoint",
         str(checkpoint),
+        "--expected-checkpoint-sha256",
+        expected_checkpoint_sha256,
+        "--expected-source-revision",
+        expected_source_revision,
         "--config",
         str(config),
+        "--expected-config-sha256",
+        expected_config_sha256,
         "--num-samples",
         str(num_samples),
         "--seed",
@@ -993,6 +1266,7 @@ def main(argv: Optional[list[str]] = None) -> None:
             "controller inherited CUDA_VISIBLE_DEVICES; start it from a shell without "
             "a pre-existing GPU visibility mask"
         )
+    _require_project_virtual_environment()
     source_revision = _require_clean_pushed_source()
     evaluation_tier = _validate_sample_tier(args.num_samples, pilot=args.pilot)
     gpu_count = _validate_gpu_count(args.gpu_count)
@@ -1017,7 +1291,12 @@ def main(argv: Optional[list[str]] = None) -> None:
     if not checkpoint.is_file() or not config.is_file():
         raise FileNotFoundError("checkpoint and config must both exist")
 
-    expected = _build_expected_run_identity(checkpoint, config, args.num_samples)
+    expected = _build_expected_run_identity(
+        checkpoint,
+        config,
+        args.num_samples,
+        source_revision=source_revision["head"],
+    )
     pending = []
     completed_at_start = []
     for seed in args.seeds:
@@ -1033,6 +1312,15 @@ def main(argv: Optional[list[str]] = None) -> None:
                 "checkpoint": str(checkpoint),
                 "checkpoint_sha256": expected.checkpoint_sha256,
                 "checkpoint_global_step": expected.checkpoint_global_step,
+                "checkpoint_udlm_prior_variant": (
+                    expected.checkpoint_udlm_prior_variant
+                ),
+                "checkpoint_udlm_prior_metadata": (
+                    expected.checkpoint_udlm_prior_metadata
+                ),
+                "checkpoint_udlm_prior_metadata_sha256": (
+                    expected.checkpoint_udlm_prior_metadata_sha256
+                ),
                 "config": str(config),
                 "config_sha256": expected.source_config_sha256,
                 "sampling_config": expected.sampling_config,
@@ -1098,7 +1386,10 @@ def main(argv: Optional[list[str]] = None) -> None:
                 "DRY RUN",
                 _command(
                     checkpoint=checkpoint,
+                    expected_checkpoint_sha256=expected.checkpoint_sha256,
+                    expected_source_revision=source_revision["head"],
                     config=config,
+                    expected_config_sha256=expected.source_config_sha256,
                     num_samples=args.num_samples,
                     seed=seed,
                     output_dir=output_root / f"seed_{seed}",
@@ -1216,7 +1507,10 @@ def main(argv: Optional[list[str]] = None) -> None:
             output_dir = output_root / f"seed_{seed}"
             command = _command(
                 checkpoint=checkpoint,
+                expected_checkpoint_sha256=expected.checkpoint_sha256,
+                expected_source_revision=source_revision["head"],
                 config=config,
+                expected_config_sha256=expected.source_config_sha256,
                 num_samples=args.num_samples,
                 seed=seed,
                 output_dir=output_dir,

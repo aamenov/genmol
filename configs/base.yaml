@@ -75,6 +75,10 @@ training:
   # Explicit initialization is distinct from Lightning checkpoint resume.
   # Set only for a UDLM warm-start experiment.
   init_from_mdlm_checkpoint: null
+  # Launchers pin this digest so the warm-start loader can prove that it read
+  # the same bytes selected before shared-GPU scheduling began. Legacy/manual
+  # runs may leave it null; stable before/after descriptor checks still apply.
+  init_from_mdlm_checkpoint_sha256: null
   init_from_mdlm_ema: True
   udlm:
     # The released UDLM uses all vocabulary entries. Excluding tokenizer

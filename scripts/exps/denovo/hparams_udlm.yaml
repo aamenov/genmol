@@ -9,3 +9,7 @@ min_add_len: 40
 num_steps: 128
 inference_eps: 1.0e-5
 exclude_special_tokens: false
+# Backward-compatible released process. Older configs may omit these two keys;
+# the benchmark normalizes that omission to this exact identity.
+prior_variant: release_uniform
+prior_metadata_sha256: null

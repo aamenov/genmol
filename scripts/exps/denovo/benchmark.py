@@ -47,11 +47,99 @@ for import_root in (REPO_ROOT, REPO_SRC):
         sys.path.remove(str(import_root))
     sys.path.insert(0, str(import_root))
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 TOKENIZER_REQUESTED_IDENTIFIER = "datamol-io/safe-gpt"
 RAW_SAMPLES_FILENAME = "raw_samples.csv"
 SUMMARY_FILENAME = "summary.json"
 LOCK_FILENAME = ".benchmark.lock"
+
+UDLM_PRIOR_CHECKPOINT_KEY = "udlm_prior_metadata"
+UDLM_PRIOR_VARIANTS = frozenset(
+    {"release_uniform", "schedule_uniform", "empirical_frequency"}
+)
+UDLM_CATEGORICAL_PRIOR_VARIANTS = frozenset(
+    {"schedule_uniform", "empirical_frequency"}
+)
+UDLM_PRIOR_VARIANT_IDENTITIES = {
+    "release_uniform": {
+        "comparison_role": "faithful_release_control",
+        "process_family": "released_continuous_uniform",
+        "schedule_variant": "released_ideal_loss_residual_forward",
+        "objective_scope": "released_model_dependent_ct_integrand",
+        "prior_source": "uniform",
+    },
+    "schedule_uniform": {
+        "comparison_role": "schedule_repair_uniform_control",
+        "process_family": "rank_one_continuous_categorical",
+        "schedule_variant": "schedule_consistent_residual_forward_and_loss",
+        "objective_scope": (
+            "model_dependent_ct_integrand_without_parameter_independent_endpoint_kl"
+        ),
+        "prior_source": "uniform",
+    },
+    "empirical_frequency": {
+        "comparison_role": "empirical_prior_treatment",
+        "process_family": "rank_one_continuous_categorical",
+        "schedule_variant": "schedule_consistent_residual_forward_and_loss",
+        "objective_scope": (
+            "model_dependent_ct_integrand_without_parameter_independent_endpoint_kl"
+        ),
+        "prior_source": "pinned_frequency_artifact_uniform_mixture",
+    },
+}
+UDLM_PRIOR_METADATA_FIELDS = frozenset(
+    {
+        "schema_version",
+        "variant",
+        "comparison_role",
+        "process_family",
+        "schedule_variant",
+        "objective_scope",
+        "prior_source",
+        "full_vocab_size",
+        "active_vocab_size",
+        "excluded_token_ids",
+        "sampling_eps",
+        "noise_eps",
+        "antithetic_sampling",
+        "active_token_ids_sha256",
+        "stationary_probs_sha256",
+        "uniform_mixture_weight",
+        "frequency_artifact_path",
+        "frequency_artifact_sha256",
+        "frequency_artifact_schema_version",
+        "frequency_example_count",
+        "frequency_content_token_count",
+        "frequency_active_token_count",
+        "frequency_dataset_repo_id",
+        "frequency_dataset_revision",
+        "frequency_dataset_split",
+        "frequency_dataset_selection",
+        "frequency_ordered_text_sha256",
+        "frequency_implementation_git_sha",
+        "tokenizer_repo_id",
+        "tokenizer_revision",
+        "tokenizer_json_sha256",
+    }
+)
+EMPIRICAL_FREQUENCY_RELATIVE_PATH = Path(
+    "experiments/udlm/token_frequency/train_first_10000.json"
+)
+EMPIRICAL_FREQUENCY_SHA256 = (
+    "088c78e75611f3cc42c4011e1da6f65a377e673b9cba07a28b126b0fc62f06ed"
+)
+EMPIRICAL_FREQUENCY_ORDERED_TEXT_SHA256 = (
+    "53aee8e5592fc96159788e86519abbbcc9f1ab7c6348a1cb59a939bd57051d8f"
+)
+SAFE_GPT_DATASET_REVISION = "b83175cd7394e7a4027478a35b2f9d1dda3ac62f"
+SAFE_GPT_TOKENIZER_REVISION = "3d5fa0988383e898d5ac5db7cd52bf715bc37061"
+SAFE_GPT_TOKENIZER_SHA256 = (
+    "0db5f4dbdc7e8ff759e98483759611a426e187ee7f3f0a91edc8800abe7bf140"
+)
+SAFE_GPT_SPECIAL_TOKEN_IDS = (0, 1, 2, 3, 4)
+EMPIRICAL_FREQUENCY_IMPLEMENTATION_GIT_SHA = (
+    "56a96b2cd02f9be648a641c51c3d2d8b1ff3033b"
+)
 
 METRIC_INPUT_SCHEMA_VERSION = 1
 SA_FRAGMENT_SCORES_RELATIVE_PATH = Path("oracle/fpscores.pkl")
@@ -92,10 +180,14 @@ LAUNCH_ENVIRONMENT_KEYS = (
 IMPLEMENTATION_INPUT_PATHS = {
     "sampler_source": REPO_ROOT / "src/genmol/sampler.py",
     "model_source": REPO_ROOT / "src/genmol/model.py",
+    "ema_source": REPO_ROOT / "src/genmol/utils/ema.py",
+    "checkpoint_io_source": REPO_ROOT / "src/genmol/utils/checkpoint_io.py",
     "diffusion_source": REPO_ROOT / "src/genmol/diffusion.py",
     "backbone_source": REPO_ROOT / "src/genmol/backbone.py",
     "chemistry_utils_source": REPO_ROOT / "src/genmol/utils/utils_chem.py",
     "data_utils_source": REPO_ROOT / "src/genmol/utils/utils_data.py",
+    "moco_utils_source": REPO_ROOT / "src/genmol/utils/utils_moco.py",
+    "save_utils_source": REPO_ROOT / "src/genmol/utils/utils_save.py",
     "bracket_safe_converter_source": (
         REPO_ROOT / "src/genmol/utils/bracket_safe_converter.py"
     ),
@@ -165,6 +257,391 @@ def _canonical_json_sha256(payload: Any) -> str:
         allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _canonical_numeric_sequence_sha256(values: Sequence[Any]) -> str:
+    """Match the model's platform-independent ordered numeric-sequence hash."""
+
+    canonical: list[int | str] = []
+    for value in values:
+        if hasattr(value, "item"):
+            value = value.item()
+        if type(value) is int:
+            canonical.append(value)
+        elif type(value) is float and math.isfinite(value):
+            canonical.append(value.hex())
+        else:
+            raise RuntimeError("prior sequence contains a non-finite or nonnumeric value")
+    encoded = json.dumps(canonical, separators=(",", ":")).encode("ascii")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _sha256_identity(value: Any, name: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise RuntimeError(f"{name} must be 64 lowercase hexadecimal digits")
+    return value
+
+
+def _strict_integer(value: Any, name: str, *, minimum: int | None = None) -> int:
+    if type(value) is not int:
+        raise RuntimeError(f"{name} must be an integer")
+    if minimum is not None and value < minimum:
+        raise RuntimeError(f"{name} must be at least {minimum}")
+    return value
+
+
+def _strict_probability(value: Any, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise RuntimeError(f"{name} must be a real number")
+    result = float(value)
+    if not math.isfinite(result) or not 0.0 < result < 1.0:
+        raise RuntimeError(f"{name} must be finite and lie strictly between 0 and 1")
+    return result
+
+
+def _load_empirical_frequency_counts() -> tuple[dict[str, Any], list[int]]:
+    """Read and validate the exact committed empirical-frequency artifact."""
+
+    path = REPO_ROOT / EMPIRICAL_FREQUENCY_RELATIVE_PATH
+    try:
+        payload = path.read_bytes()
+    except OSError as error:
+        raise RuntimeError(f"cannot read pinned frequency artifact: {path}") from error
+    digest = hashlib.sha256(payload).hexdigest()
+    if digest != EMPIRICAL_FREQUENCY_SHA256:
+        raise RuntimeError(
+            "pinned frequency artifact SHA-256 mismatch: "
+            f"{digest} != {EMPIRICAL_FREQUENCY_SHA256}"
+        )
+
+    def reject_nonfinite(value: str) -> Any:
+        raise RuntimeError(f"frequency artifact contains non-finite JSON value {value}")
+
+    try:
+        artifact = json.loads(payload, parse_constant=reject_nonfinite)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError("pinned frequency artifact is not valid JSON") from error
+    if not isinstance(artifact, dict) or artifact.get("schema_version") != 1:
+        raise RuntimeError("pinned frequency artifact schema_version must be 1")
+    if artifact.get("example_count") != 10_000:
+        raise RuntimeError("pinned frequency artifact example_count must be 10000")
+    if artifact.get("content_token_count") != 517_090:
+        raise RuntimeError("pinned frequency artifact content_token_count is invalid")
+    if artifact.get("git_sha") != EMPIRICAL_FREQUENCY_IMPLEMENTATION_GIT_SHA:
+        raise RuntimeError("pinned frequency artifact implementation git SHA is invalid")
+    dataset = artifact.get("dataset")
+    expected_dataset = {
+        "repo_id": TOKENIZER_REQUESTED_IDENTIFIER,
+        "revision": SAFE_GPT_DATASET_REVISION,
+        "split": "train",
+        "selection": "first 10000 streaming rows",
+        "ordered_safe_text_sha256": EMPIRICAL_FREQUENCY_ORDERED_TEXT_SHA256,
+    }
+    if not isinstance(dataset, Mapping) or any(
+        dataset.get(key) != expected for key, expected in expected_dataset.items()
+    ):
+        raise RuntimeError("pinned frequency artifact dataset identity is invalid")
+    tokenizer = artifact.get("tokenizer")
+    expected_tokenizer = {
+        "base_vocab_size": 1880,
+        "repo_id": TOKENIZER_REQUESTED_IDENTIFIER,
+        "revision": SAFE_GPT_TOKENIZER_REVISION,
+        "special_token_ids": list(SAFE_GPT_SPECIAL_TOKEN_IDS),
+        "tokenizer_json_sha256": SAFE_GPT_TOKENIZER_SHA256,
+    }
+    if not isinstance(tokenizer, Mapping) or any(
+        tokenizer.get(key) != expected for key, expected in expected_tokenizer.items()
+    ):
+        raise RuntimeError("pinned frequency artifact tokenizer identity is invalid")
+    counts = artifact.get("counts_by_token_id")
+    if (
+        not isinstance(counts, list)
+        or len(counts) != 1880
+        or any(type(count) is not int or count < 0 for count in counts)
+    ):
+        raise RuntimeError(
+            "pinned frequency artifact counts must be 1880 non-negative integers"
+        )
+    if sum(counts) != artifact["content_token_count"]:
+        raise RuntimeError("pinned frequency artifact counts do not sum to their total")
+    if any(counts[token_id] != 0 for token_id in SAFE_GPT_SPECIAL_TOKEN_IDS):
+        raise RuntimeError("pinned frequency artifact includes special-token counts")
+    return artifact, counts
+
+
+def validate_udlm_prior_metadata_record(
+    value: Any,
+    *,
+    expected_variant: str | None = None,
+    expected_full_vocab_size: int | None = None,
+    expected_exclude_special_tokens: bool | None = None,
+    expected_sampling_eps: float | None = None,
+    expected_noise_eps: float | None = None,
+    expected_antithetic_sampling: bool | None = None,
+    expected_uniform_mixture_weight: float | None = None,
+    state_dict: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Validate a categorical UDLM's immutable metadata and optional state.
+
+    ``release_uniform`` checkpoints intentionally predate and omit this record.
+    The two categorical variants must carry the complete record, and their
+    state buffers are checked against its compact-alphabet hashes when a
+    checkpoint state dictionary is available.
+    """
+
+    if not isinstance(value, Mapping):
+        raise RuntimeError("categorical UDLM checkpoint prior metadata must be a mapping")
+    metadata = dict(value)
+    if set(metadata) != UDLM_PRIOR_METADATA_FIELDS:
+        missing = sorted(UDLM_PRIOR_METADATA_FIELDS - metadata.keys())
+        extra = sorted(metadata.keys() - UDLM_PRIOR_METADATA_FIELDS)
+        raise RuntimeError(
+            "categorical UDLM prior metadata fields are invalid: "
+            f"missing={missing}, extra={extra}"
+        )
+    if type(metadata["schema_version"]) is not int or metadata["schema_version"] != 1:
+        raise RuntimeError("categorical UDLM prior metadata schema_version must be 1")
+    variant = metadata["variant"]
+    if variant not in UDLM_CATEGORICAL_PRIOR_VARIANTS:
+        raise RuntimeError(
+            "checkpoint prior metadata variant must be schedule_uniform or "
+            "empirical_frequency"
+        )
+    if expected_variant is not None and variant != expected_variant:
+        raise RuntimeError(
+            "checkpoint prior metadata variant disagrees with hyperparameter config: "
+            f"{variant!r} != {expected_variant!r}"
+        )
+    identity = UDLM_PRIOR_VARIANT_IDENTITIES[variant]
+    for field, expected in identity.items():
+        if metadata[field] != expected:
+            raise RuntimeError(
+                f"checkpoint prior metadata {field} is invalid for {variant}"
+            )
+
+    full_vocab_size = _strict_integer(
+        metadata["full_vocab_size"], "prior metadata full_vocab_size", minimum=2
+    )
+    active_vocab_size = _strict_integer(
+        metadata["active_vocab_size"], "prior metadata active_vocab_size", minimum=2
+    )
+    excluded = metadata["excluded_token_ids"]
+    if (
+        not isinstance(excluded, list)
+        or any(type(token_id) is not int for token_id in excluded)
+        or excluded != sorted(set(excluded))
+        or any(not 0 <= token_id < full_vocab_size for token_id in excluded)
+    ):
+        raise RuntimeError(
+            "prior metadata excluded_token_ids must be sorted unique in-vocabulary integers"
+        )
+    expected_excluded = (
+        list(SAFE_GPT_SPECIAL_TOKEN_IDS)
+        if expected_exclude_special_tokens is True
+        else []
+        if expected_exclude_special_tokens is False
+        else None
+    )
+    if expected_excluded is not None and excluded != expected_excluded:
+        raise RuntimeError(
+            "checkpoint prior metadata exclusions disagree with hyperparameter config"
+        )
+    excluded_set = set(excluded)
+    active_token_ids = [
+        token_id for token_id in range(full_vocab_size) if token_id not in excluded_set
+    ]
+    if active_vocab_size != len(active_token_ids):
+        raise RuntimeError("prior metadata active_vocab_size is inconsistent")
+    if expected_full_vocab_size is not None and full_vocab_size != expected_full_vocab_size:
+        raise RuntimeError(
+            "checkpoint prior metadata vocab size disagrees with hyperparameter config"
+        )
+    active_hash = _sha256_identity(
+        metadata["active_token_ids_sha256"], "prior metadata active_token_ids_sha256"
+    )
+    if active_hash != _canonical_numeric_sequence_sha256(active_token_ids):
+        raise RuntimeError("prior metadata active-token ordering hash is invalid")
+    stationary_hash = _sha256_identity(
+        metadata["stationary_probs_sha256"], "prior metadata stationary_probs_sha256"
+    )
+    sampling_eps = _strict_probability(metadata["sampling_eps"], "prior sampling_eps")
+    noise_eps = _strict_probability(metadata["noise_eps"], "prior noise_eps")
+    if type(metadata["antithetic_sampling"]) is not bool:
+        raise RuntimeError("prior metadata antithetic_sampling must be a boolean")
+    exact_config_values = {
+        "sampling_eps": (sampling_eps, expected_sampling_eps),
+        "noise_eps": (noise_eps, expected_noise_eps),
+        "antithetic_sampling": (
+            metadata["antithetic_sampling"],
+            expected_antithetic_sampling,
+        ),
+    }
+    for field, (actual, expected) in exact_config_values.items():
+        if expected is not None and actual != expected:
+            raise RuntimeError(
+                f"checkpoint prior metadata {field} disagrees with hyperparameter config"
+            )
+    if metadata["tokenizer_repo_id"] != TOKENIZER_REQUESTED_IDENTIFIER:
+        raise RuntimeError("prior metadata tokenizer repository is invalid")
+    if metadata["tokenizer_revision"] != SAFE_GPT_TOKENIZER_REVISION:
+        raise RuntimeError("prior metadata tokenizer revision is invalid")
+    if metadata["tokenizer_json_sha256"] != SAFE_GPT_TOKENIZER_SHA256:
+        raise RuntimeError("prior metadata tokenizer hash is invalid")
+
+    frequency_fields = {
+        "frequency_artifact_path",
+        "frequency_artifact_sha256",
+        "frequency_artifact_schema_version",
+        "frequency_example_count",
+        "frequency_content_token_count",
+        "frequency_active_token_count",
+        "frequency_dataset_repo_id",
+        "frequency_dataset_revision",
+        "frequency_dataset_split",
+        "frequency_dataset_selection",
+        "frequency_ordered_text_sha256",
+        "frequency_implementation_git_sha",
+    }
+    expected_probs: list[float]
+    if variant == "schedule_uniform":
+        if metadata["uniform_mixture_weight"] is not None or any(
+            metadata[field] is not None for field in frequency_fields
+        ):
+            raise RuntimeError(
+                "schedule_uniform metadata must not declare empirical-frequency inputs"
+            )
+        if expected_uniform_mixture_weight is not None:
+            raise RuntimeError(
+                "schedule_uniform hyperparameter config unexpectedly declares a mixture"
+            )
+        expected_probs = [1.0 / active_vocab_size] * active_vocab_size
+    else:
+        mixture_weight = _strict_probability(
+            metadata["uniform_mixture_weight"], "prior uniform_mixture_weight"
+        )
+        if (
+            expected_uniform_mixture_weight is not None
+            and mixture_weight != expected_uniform_mixture_weight
+        ):
+            raise RuntimeError(
+                "checkpoint prior mixture weight disagrees with hyperparameter config"
+            )
+        artifact, counts = _load_empirical_frequency_counts()
+        expected_frequency = {
+            "frequency_artifact_path": EMPIRICAL_FREQUENCY_RELATIVE_PATH.as_posix(),
+            "frequency_artifact_sha256": EMPIRICAL_FREQUENCY_SHA256,
+            "frequency_artifact_schema_version": 1,
+            "frequency_example_count": 10_000,
+            "frequency_content_token_count": 517_090,
+            "frequency_dataset_repo_id": TOKENIZER_REQUESTED_IDENTIFIER,
+            "frequency_dataset_revision": SAFE_GPT_DATASET_REVISION,
+            "frequency_dataset_split": "train",
+            "frequency_dataset_selection": "first 10000 streaming rows",
+            "frequency_ordered_text_sha256": EMPIRICAL_FREQUENCY_ORDERED_TEXT_SHA256,
+            "frequency_implementation_git_sha": (
+                EMPIRICAL_FREQUENCY_IMPLEMENTATION_GIT_SHA
+            ),
+        }
+        for field in (
+            "frequency_artifact_schema_version",
+            "frequency_example_count",
+            "frequency_content_token_count",
+            "frequency_active_token_count",
+        ):
+            if type(metadata[field]) is not int:
+                raise RuntimeError(f"empirical prior metadata {field} must be an integer")
+        for field, expected in expected_frequency.items():
+            if metadata[field] != expected:
+                raise RuntimeError(f"empirical prior metadata {field} is invalid")
+        if full_vocab_size != len(counts):
+            raise RuntimeError("empirical prior vocabulary disagrees with pinned counts")
+        active_count = sum(counts[token_id] for token_id in active_token_ids)
+        if active_count <= 0 or metadata["frequency_active_token_count"] != active_count:
+            raise RuntimeError("empirical prior active-token count is invalid")
+        del artifact
+        empirical = [counts[token_id] / active_count for token_id in active_token_ids]
+        expected_probs = [
+            (1.0 - mixture_weight) * value + mixture_weight / active_vocab_size
+            for value in empirical
+        ]
+
+    import torch
+
+    expected_tensor = torch.tensor(expected_probs, dtype=torch.float64)
+    expected_tensor /= expected_tensor.sum()
+    expected_stationary_hash = _canonical_numeric_sequence_sha256(
+        [float(value) for value in expected_tensor.tolist()]
+    )
+    if stationary_hash != expected_stationary_hash:
+        raise RuntimeError(
+            "prior metadata stationary prior disagrees with the configured prior law"
+        )
+
+    if state_dict is not None:
+        if not isinstance(state_dict, Mapping):
+            raise RuntimeError("categorical UDLM checkpoint state_dict must be a mapping")
+        expected_ids = torch.tensor(active_token_ids, dtype=torch.long)
+        ids = state_dict.get("mdlm.diffusion_token_ids")
+        if (
+            not isinstance(ids, torch.Tensor)
+            or ids.device.type == "meta"
+            or ids.dtype != torch.long
+            or not torch.equal(ids.detach().cpu(), expected_ids)
+        ):
+            raise RuntimeError(
+                "checkpoint mdlm.diffusion_token_ids disagrees with prior metadata"
+            )
+        expected_mapping = torch.full((full_vocab_size,), -1, dtype=torch.long)
+        expected_mapping[expected_ids] = torch.arange(active_vocab_size, dtype=torch.long)
+        mapping = state_dict.get("mdlm.token_to_diffusion_index")
+        if (
+            not isinstance(mapping, torch.Tensor)
+            or mapping.device.type == "meta"
+            or mapping.dtype != torch.long
+            or not torch.equal(mapping.detach().cpu(), expected_mapping)
+        ):
+            raise RuntimeError(
+                "checkpoint mdlm.token_to_diffusion_index disagrees with prior metadata"
+            )
+        probabilities = state_dict.get("mdlm.stationary_probs")
+        if (
+            not isinstance(probabilities, torch.Tensor)
+            or probabilities.device.type == "meta"
+            or probabilities.dtype != torch.float64
+            or probabilities.shape != (active_vocab_size,)
+        ):
+            raise RuntimeError(
+                "categorical checkpoint mdlm.stationary_probs must be a float64 vector"
+            )
+        probabilities = probabilities.detach().cpu()
+        if (
+            not torch.isfinite(probabilities).all()
+            or torch.any(probabilities <= 0)
+            or not torch.isclose(
+                probabilities.sum(),
+                torch.tensor(1.0, dtype=torch.float64),
+                rtol=1e-12,
+                atol=1e-12,
+            )
+        ):
+            raise RuntimeError(
+                "categorical checkpoint stationary prior must be normalized with full support"
+            )
+        probability_values = [float(value) for value in probabilities.tolist()]
+        if _canonical_numeric_sequence_sha256(probability_values) != stationary_hash:
+            raise RuntimeError(
+                "checkpoint stationary prior disagrees with its metadata hash"
+            )
+        if not torch.equal(probabilities, expected_tensor):
+            raise RuntimeError(
+                "checkpoint stationary prior does not equal the configured prior law"
+            )
+
+    return metadata
 
 
 def _read_pinned_regular_file(
@@ -553,6 +1030,63 @@ def _sampler_udlm_inference_eps(sampler: Any) -> float:
     return inference_eps
 
 
+def _validate_loaded_udlm_prior_identity(
+    sampler: Any,
+    *,
+    prior_variant: str,
+    prior_metadata_sha256: str | None,
+) -> None:
+    """Fail if the instantiated process differs from the sampling contract."""
+
+    training = sampler.model.config.training
+    udlm_config = training.get("udlm", {})
+    loaded_variant = str(udlm_config.get("prior_variant", "release_uniform")).lower()
+    if loaded_variant != prior_variant:
+        raise BenchmarkConfigurationError(
+            "Inference config prior_variant does not match the loaded UDLM model "
+            f"({prior_variant!r} != {loaded_variant!r})"
+        )
+    metadata_value = getattr(sampler.model, "udlm_prior_metadata", None)
+    if prior_variant == "release_uniform":
+        if prior_metadata_sha256 is not None:
+            raise BenchmarkConfigurationError(
+                "release_uniform sampling must not declare categorical metadata hash"
+            )
+        if metadata_value is not None:
+            loaded_metadata_variant = getattr(metadata_value, "variant", None)
+            if hasattr(metadata_value, "to_dict"):
+                loaded_metadata_variant = metadata_value.to_dict().get("variant")
+            elif isinstance(metadata_value, Mapping):
+                loaded_metadata_variant = metadata_value.get("variant")
+            if loaded_metadata_variant != "release_uniform":
+                raise BenchmarkConfigurationError(
+                    "loaded release_uniform model exposes contradictory prior metadata"
+                )
+        return
+
+    if metadata_value is None:
+        raise BenchmarkConfigurationError(
+            "loaded categorical UDLM model is missing immutable prior metadata"
+        )
+    if hasattr(metadata_value, "to_dict"):
+        metadata_value = metadata_value.to_dict()
+    try:
+        metadata = validate_udlm_prior_metadata_record(
+            metadata_value,
+            expected_variant=prior_variant,
+        )
+    except RuntimeError as error:
+        raise BenchmarkConfigurationError(
+            f"loaded categorical UDLM prior metadata is invalid: {error}"
+        ) from error
+    loaded_digest = _canonical_json_sha256(metadata)
+    if loaded_digest != prior_metadata_sha256:
+        raise BenchmarkConfigurationError(
+            "Inference config prior_metadata_sha256 does not match the loaded UDLM "
+            f"model ({prior_metadata_sha256} != {loaded_digest})"
+        )
+
+
 def generate_raw_model_text(
     sampler: Any,
     num_samples: int,
@@ -564,6 +1098,8 @@ def generate_raw_model_text(
     num_steps: int | None,
     inference_eps: float | None,
     exclude_special_tokens: bool | None,
+    prior_variant: str | None,
+    prior_metadata_sha256: str | None,
 ) -> tuple[list[str], dict[str, Any]]:
     """Run either diffusion backend through the shared raw-token sampler API.
 
@@ -596,6 +1132,7 @@ def generate_raw_model_text(
 
         if diffusion_type == "udlm":
             assert num_steps is not None
+            assert prior_variant is not None
             loaded_inference_eps = _sampler_udlm_inference_eps(sampler)
             if not math.isclose(
                 loaded_inference_eps,
@@ -618,6 +1155,11 @@ def generate_raw_model_text(
                     f"loaded UDLM checkpoint ({exclude_special_tokens} != "
                     f"{loaded_exclusion})"
                 )
+            _validate_loaded_udlm_prior_identity(
+                sampler,
+                prior_variant=prior_variant,
+                prior_metadata_sha256=prior_metadata_sha256,
+            )
             nfe = num_steps
             num_steps_source = "explicit UDLM reverse-transition count"
         else:
@@ -649,6 +1191,8 @@ def generate_raw_model_text(
         "num_steps_source": num_steps_source,
         "inference_eps": inference_eps,
         "exclude_special_tokens": exclude_special_tokens,
+        "prior_variant": prior_variant,
+        "prior_metadata_sha256": prior_metadata_sha256,
         "temperature": softmax_temp,
         "randomness": randomness,
         "randomness_used_by_sampler": diffusion_type == "mdlm",
@@ -1097,6 +1641,8 @@ def validate_sampling_config(config: Mapping[str, Any]) -> dict[str, Any]:
 
     num_steps: int | None = None
     inference_eps: float | None = None
+    prior_variant: str | None = None
+    prior_metadata_sha256: str | None = None
     if diffusion_type == "udlm":
         missing_udlm = [
             key
@@ -1130,10 +1676,38 @@ def validate_sampling_config(config: Mapping[str, Any]) -> dict[str, Any]:
                 "exclude_special_tokens must be a boolean"
             )
         exclude_special_tokens: bool | None = config["exclude_special_tokens"]
+        raw_prior_variant = config.get("prior_variant", "release_uniform")
+        if not isinstance(raw_prior_variant, str):
+            raise BenchmarkConfigurationError("prior_variant must be a string")
+        prior_variant = raw_prior_variant.lower()
+        if prior_variant not in UDLM_PRIOR_VARIANTS:
+            allowed = ", ".join(sorted(UDLM_PRIOR_VARIANTS))
+            raise BenchmarkConfigurationError(
+                f"prior_variant must be one of: {allowed}"
+            )
+        raw_prior_digest = config.get("prior_metadata_sha256")
+        if prior_variant in UDLM_CATEGORICAL_PRIOR_VARIANTS:
+            if "prior_variant" not in config or "prior_metadata_sha256" not in config:
+                raise BenchmarkConfigurationError(
+                    "categorical UDLM inference config must explicitly declare "
+                    "prior_variant and prior_metadata_sha256"
+                )
+            try:
+                prior_metadata_sha256 = _sha256_identity(
+                    raw_prior_digest, "prior_metadata_sha256"
+                )
+            except RuntimeError as error:
+                raise BenchmarkConfigurationError(str(error)) from error
+        elif raw_prior_digest is not None:
+            raise BenchmarkConfigurationError(
+                "release_uniform config must leave prior_metadata_sha256 null"
+            )
     elif (
         config.get("num_steps") is not None
         or config.get("inference_eps") is not None
         or config.get("exclude_special_tokens") is not None
+        or config.get("prior_variant") is not None
+        or config.get("prior_metadata_sha256") is not None
     ):
         raise BenchmarkConfigurationError(
             "MDLM inference config must leave UDLM-only settings null"
@@ -1148,6 +1722,8 @@ def validate_sampling_config(config: Mapping[str, Any]) -> dict[str, Any]:
         "num_steps": num_steps,
         "inference_eps": inference_eps,
         "exclude_special_tokens": exclude_special_tokens,
+        "prior_variant": prior_variant,
+        "prior_metadata_sha256": prior_metadata_sha256,
     }
 
 
@@ -1172,18 +1748,25 @@ def validate_device(device: str) -> None:
             )
 
 
-def checkpoint_metadata(path: Path) -> dict[str, Any]:
+def checkpoint_metadata(
+    path: Path,
+    *,
+    expected_sha256: str | None = None,
+) -> dict[str, Any]:
     import torch
+    from genmol.utils.checkpoint_io import verified_checkpoint_file
 
-    load_kwargs: dict[str, Any] = {
-        "map_location": "cpu",
-        # Lightning checkpoints contain trusted config objects in addition to tensors.
-        "weights_only": False,
-    }
-    try:
-        checkpoint = torch.load(path, mmap=True, **load_kwargs)
-    except (TypeError, RuntimeError):
-        checkpoint = torch.load(path, **load_kwargs)
+    with verified_checkpoint_file(
+        path,
+        expected_sha256=expected_sha256,
+    ) as (checkpoint_file, checkpoint_identity):
+        checkpoint = torch.load(
+            checkpoint_file,
+            map_location="cpu",
+            # Lightning checkpoints contain trusted config objects in addition
+            # to tensors. The launch-pinned digest is checked before unpickling.
+            weights_only=False,
+        )
     if not isinstance(checkpoint, Mapping):
         raise RuntimeError("Checkpoint root is not a mapping")
     global_step = checkpoint.get("global_step")
@@ -1205,40 +1788,119 @@ def checkpoint_metadata(path: Path) -> dict[str, Any]:
         if isinstance(checkpoint_config, Mapping)
         else {}
     )
+    if not isinstance(checkpoint_training, Mapping):
+        raise RuntimeError("Checkpoint training config must be a mapping")
     diffusion_type = str(checkpoint_training.get("diffusion", "mdlm")).lower()
     if diffusion_type not in {"mdlm", "udlm"}:
         raise RuntimeError(
             f"Checkpoint declares unsupported diffusion type {diffusion_type!r}"
         )
-    checkpoint_udlm = (
-        checkpoint_training.get("udlm", {})
-        if isinstance(checkpoint_training, Mapping)
-        else {}
-    )
-    udlm_inference_eps = (
-        float(checkpoint_udlm.get("inference_eps", 1e-5))
-        if diffusion_type == "udlm"
-        else None
-    )
-    if udlm_inference_eps is not None and not 0 < udlm_inference_eps < 1:
-        raise RuntimeError("Checkpoint UDLM inference_eps must lie in (0, 1)")
-    udlm_exclude_special_tokens = (
-        bool(checkpoint_udlm.get("exclude_special_tokens", False))
-        if diffusion_type == "udlm"
-        else None
-    )
+    checkpoint_udlm = checkpoint_training.get("udlm", {})
+    if not isinstance(checkpoint_udlm, Mapping):
+        raise RuntimeError("Checkpoint training.udlm config must be a mapping")
+    checkpoint_prior_metadata = checkpoint.get(UDLM_PRIOR_CHECKPOINT_KEY)
+    state_dict = checkpoint.get("state_dict", {})
+    if not isinstance(state_dict, Mapping):
+        raise RuntimeError("Checkpoint state_dict must be a mapping")
+
+    udlm_inference_eps: float | None = None
+    udlm_exclude_special_tokens: bool | None = None
+    udlm_prior_variant: str | None = None
+    udlm_prior_metadata: dict[str, Any] | None = None
+    udlm_prior_metadata_sha256: str | None = None
+    if diffusion_type == "mdlm":
+        if checkpoint_prior_metadata is not None:
+            raise RuntimeError("MDLM checkpoint unexpectedly declares UDLM prior metadata")
+        if "mdlm.stationary_probs" in state_dict:
+            raise RuntimeError(
+                "MDLM checkpoint unexpectedly contains a categorical UDLM prior"
+            )
+    else:
+        udlm_inference_eps = _strict_probability(
+            checkpoint_udlm.get("inference_eps", 1e-5),
+            "Checkpoint UDLM inference_eps",
+        )
+        raw_exclusion = checkpoint_udlm.get("exclude_special_tokens", False)
+        if type(raw_exclusion) is not bool:
+            raise RuntimeError(
+                "Checkpoint UDLM exclude_special_tokens must be a boolean"
+            )
+        udlm_exclude_special_tokens = raw_exclusion
+        raw_variant = checkpoint_udlm.get("prior_variant", "release_uniform")
+        if not isinstance(raw_variant, str):
+            raise RuntimeError("Checkpoint UDLM prior_variant must be a string")
+        udlm_prior_variant = raw_variant.lower()
+        if udlm_prior_variant not in UDLM_PRIOR_VARIANTS:
+            raise RuntimeError(
+                f"Checkpoint declares unsupported UDLM prior {udlm_prior_variant!r}"
+            )
+        if udlm_prior_variant == "release_uniform":
+            if checkpoint_prior_metadata is not None:
+                raise RuntimeError(
+                    "release_uniform checkpoint must not declare categorical prior metadata"
+                )
+            if "mdlm.stationary_probs" in state_dict:
+                raise RuntimeError(
+                    "release_uniform checkpoint unexpectedly contains a categorical prior"
+                )
+        else:
+            checkpoint_model = checkpoint_config.get("model", {})
+            if not isinstance(checkpoint_model, Mapping):
+                raise RuntimeError("Checkpoint model config must be a mapping")
+            full_vocab_size = _strict_integer(
+                checkpoint_model.get("vocab_size"),
+                "Checkpoint model.vocab_size",
+                minimum=2,
+            )
+            sampling_eps = _strict_probability(
+                checkpoint_training.get("sampling_eps"),
+                "Checkpoint training.sampling_eps",
+            )
+            noise_eps = _strict_probability(
+                checkpoint_udlm.get("noise_eps", 1e-3),
+                "Checkpoint training.udlm.noise_eps",
+            )
+            antithetic_sampling = checkpoint_training.get("antithetic_sampling")
+            if type(antithetic_sampling) is not bool:
+                raise RuntimeError(
+                    "Checkpoint training.antithetic_sampling must be a boolean"
+                )
+            expected_mix = None
+            if udlm_prior_variant == "empirical_frequency":
+                expected_mix = _strict_probability(
+                    checkpoint_udlm.get("empirical_uniform_mix"),
+                    "Checkpoint training.udlm.empirical_uniform_mix",
+                )
+            udlm_prior_metadata = validate_udlm_prior_metadata_record(
+                checkpoint_prior_metadata,
+                expected_variant=udlm_prior_variant,
+                expected_full_vocab_size=full_vocab_size,
+                expected_exclude_special_tokens=udlm_exclude_special_tokens,
+                expected_sampling_eps=sampling_eps,
+                expected_noise_eps=noise_eps,
+                expected_antithetic_sampling=antithetic_sampling,
+                expected_uniform_mixture_weight=expected_mix,
+                state_dict=state_dict,
+            )
+            udlm_prior_metadata_sha256 = _canonical_json_sha256(
+                udlm_prior_metadata
+            )
     metadata = {
-        "path": str(path.resolve()),
-        "sha256": _sha256(path),
-        "size_bytes": path.stat().st_size,
+        "path": checkpoint_identity.resolved_path,
+        "sha256": checkpoint_identity.sha256,
+        "size_bytes": checkpoint_identity.size_bytes,
         "mtime_utc": datetime.fromtimestamp(
-            path.stat().st_mtime, timezone.utc
+            checkpoint_identity.mtime_ns / 1_000_000_000, timezone.utc
         ).isoformat(),
+        "byte_identity_verified_before_and_after_load": True,
         "global_step": int(global_step),
         "epoch": int(epoch) if epoch is not None else None,
         "diffusion_type": diffusion_type,
         "udlm_inference_eps": udlm_inference_eps,
         "udlm_exclude_special_tokens": udlm_exclude_special_tokens,
+        "udlm_prior_variant": udlm_prior_variant,
+        "udlm_prior_metadata": udlm_prior_metadata,
+        "udlm_prior_metadata_sha256": udlm_prior_metadata_sha256,
     }
     del checkpoint
     return metadata
@@ -1255,6 +1917,74 @@ def _git_command(arguments: Sequence[str]) -> str | None:
     except (FileNotFoundError, subprocess.CalledProcessError):
         return None
     return result.stdout.strip()
+
+
+def _git_status_outside_output() -> list[str]:
+    """Return exact porcelain records for changes outside ignored run output.
+
+    ``-z`` avoids interpreting quoted, whitespace-containing, or newline-containing
+    paths.  The pathspec excludes only the repository-root ``output/`` tree; any
+    tracked, staged, untracked, renamed, or deleted source/config input elsewhere
+    remains disqualifying.
+    """
+
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(REPO_ROOT),
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+                "-z",
+                "--",
+                ".",
+                ":(exclude)output",
+                ":(exclude)output/**",
+            ],
+            check=True,
+            capture_output=True,
+            text=False,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError) as error:
+        raise RuntimeError("Could not inspect benchmark source worktree") from error
+    return [
+        record.decode("utf-8", errors="surrogateescape")
+        for record in result.stdout.split(b"\0")
+        if record
+    ]
+
+
+def require_clean_pushed_source(expected_revision: str) -> dict[str, str]:
+    """Bind this child to one clean, pushed, controller-selected Git commit."""
+
+    if (
+        not isinstance(expected_revision, str)
+        or len(expected_revision) != 40
+        or any(character not in "0123456789abcdef" for character in expected_revision)
+    ):
+        raise BenchmarkConfigurationError(
+            "expected_source_revision must be 40 lowercase hexadecimal digits"
+        )
+    disallowed = _git_status_outside_output()
+    if disallowed:
+        raise RuntimeError(
+            "benchmark source worktree is dirty outside output/: "
+            + "; ".join(repr(record) for record in disallowed)
+        )
+    head = _git_command(["rev-parse", "HEAD"])
+    upstream = _git_command(["rev-parse", "@{upstream}"])
+    if head is None or upstream is None:
+        raise RuntimeError(
+            "benchmark branch has no inspectable upstream; commit and push it before run"
+        )
+    if head != expected_revision or upstream != expected_revision:
+        raise RuntimeError(
+            "benchmark source revision mismatch: "
+            f"HEAD={head}, upstream={upstream}, expected={expected_revision}"
+        )
+    return {"head": head, "upstream": upstream}
 
 
 def git_provenance() -> dict[str, Any]:
@@ -1439,12 +2169,26 @@ def assert_runtime_module_provenance(
     import genmol.diffusion as diffusion_module
     import genmol.model as model_module
     import genmol.sampler as sampler_module
+    import genmol.utils.bracket_safe_converter as bracket_safe_converter_module
+    import genmol.utils.checkpoint_io as checkpoint_io_module
+    import genmol.utils.ema as ema_module
+    import genmol.utils.utils_chem as chemistry_utils_module
+    import genmol.utils.utils_data as data_utils_module
+    import genmol.utils.utils_moco as moco_utils_module
+    import genmol.utils.utils_save as save_utils_module
 
     modules = {
         "sampler_source": sampler_module,
         "model_source": model_module,
+        "ema_source": ema_module,
+        "checkpoint_io_source": checkpoint_io_module,
         "diffusion_source": diffusion_module,
         "backbone_source": backbone_module,
+        "chemistry_utils_source": chemistry_utils_module,
+        "data_utils_source": data_utils_module,
+        "moco_utils_source": moco_utils_module,
+        "save_utils_source": save_utils_module,
+        "bracket_safe_converter_source": bracket_safe_converter_module,
     }
     for source_name, module in modules.items():
         module_path = Path(module.__file__).resolve()
@@ -1557,6 +2301,16 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     if args.seed < 0 or args.seed > 2**32 - 1:
         raise BenchmarkConfigurationError("seed must be in [0, 2**32 - 1]")
 
+    # This is deliberately the first content/provenance preflight.  A controller
+    # may remain alive while its worktree changes, so every child independently
+    # requires the exact pushed revision embedded in its command.
+    source_revision_before = require_clean_pushed_source(
+        args.expected_source_revision
+    )
+    expected_config_sha256 = _sha256_identity(
+        args.expected_config_sha256, "expected config SHA-256"
+    )
+
     started_at = _utc_now()
     total_start = time.perf_counter()
     validate_device(args.device)
@@ -1565,8 +2319,13 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     sa_metric_snapshot = load_pinned_sa_metric_input()
     metric_inputs = dict(sa_metric_snapshot.provenance)
     source_config_sha256 = _sha256(config_path)
+    if source_config_sha256 != expected_config_sha256:
+        raise BenchmarkConfigurationError(
+            "Config SHA-256 disagrees with the controller-pinned digest: "
+            f"{source_config_sha256} != {expected_config_sha256}"
+        )
     source_config = load_yaml_config(config_path)
-    if _sha256(config_path) != source_config_sha256:
+    if _sha256(config_path) != expected_config_sha256:
         raise RuntimeError(f"Config changed while it was being read: {config_path}")
     sampling_config = validate_sampling_config(source_config)
     effective_config = dict(source_config)
@@ -1579,10 +2338,16 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     )
     sampling_config_sha256 = _canonical_json_sha256(sampling_config)
     effective_config_sha256 = _canonical_json_sha256(effective_config)
+    # Capture every direct generation implementation before checkpoint metadata
+    # imports the stable-descriptor helper or the sampler imports model code.
+    implementation_inputs = implementation_input_provenance()
 
     with output_lock(output_dir):
         validate_output_target(output_dir, overwrite=args.overwrite)
-        checkpoint_info = checkpoint_metadata(checkpoint_path)
+        checkpoint_info = checkpoint_metadata(
+            checkpoint_path,
+            expected_sha256=getattr(args, "expected_checkpoint_sha256", None),
+        )
         if checkpoint_info["diffusion_type"] != sampling_config["diffusion_type"]:
             raise BenchmarkConfigurationError(
                 "Inference config diffusion_type does not match checkpoint metadata: "
@@ -1609,9 +2374,23 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                 "Inference config exclude_special_tokens does not match checkpoint "
                 "metadata"
             )
-        implementation_inputs = implementation_input_provenance()
-        git_info = git_provenance()
-
+        if (
+            checkpoint_info["udlm_prior_variant"]
+            != sampling_config["prior_variant"]
+        ):
+            raise BenchmarkConfigurationError(
+                "Inference config prior_variant does not match checkpoint metadata: "
+                f"{sampling_config['prior_variant']!r} != "
+                f"{checkpoint_info['udlm_prior_variant']!r}"
+            )
+        if (
+            checkpoint_info["udlm_prior_metadata_sha256"]
+            != sampling_config["prior_metadata_sha256"]
+        ):
+            raise BenchmarkConfigurationError(
+                "Inference config prior_metadata_sha256 does not match checkpoint "
+                "metadata"
+            )
         # Heavy imports are intentionally below argument/output validation.
         assert_local_genmol_import()
         from tdc import Evaluator, Oracle
@@ -1621,7 +2400,10 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         assert_runtime_module_provenance(implementation_inputs)
 
         model_load_start = time.perf_counter()
-        sampler = Sampler(str(checkpoint_path))
+        sampler = Sampler(
+            str(checkpoint_path),
+            expected_checkpoint_sha256=checkpoint_info["sha256"],
+        )
         sampler.model.to(args.device)
         sampler.mdlm.to_device(sampler.model.device)
         model_load_seconds = time.perf_counter() - model_load_start
@@ -1662,6 +2444,29 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         # includes tokenizer decoding (already in model_sampling_seconds), SAFE
         # repair, failed-row removal, and largest-component selection.
         generation_seconds = model_sampling_seconds + released_postprocessing_seconds
+
+        # Recheck after all model generation and metric work, before either
+        # evidence artifact is committed to disk.  ``output/`` remains the sole
+        # allowed changing tree, so benchmark logs/locks do not invalidate a run.
+        source_revision_after = require_clean_pushed_source(
+            source_revision_before["head"]
+        )
+        if source_revision_after != source_revision_before:
+            raise RuntimeError("benchmark source revision changed during the run")
+        if _sha256(config_path) != expected_config_sha256:
+            raise RuntimeError("Inference config changed during the benchmark run")
+        git_info = git_provenance()
+        if git_info.get("commit") != source_revision_before["head"]:
+            raise RuntimeError("Git provenance disagrees with child source preflight")
+        if git_info.get("dirty") is not False:
+            raise RuntimeError("benchmark source worktree became dirty during the run")
+        git_info.update(
+            {
+                "upstream": source_revision_after["upstream"],
+                "expected_source_revision": args.expected_source_revision,
+                "clean_pushed_source_verified_before_and_after_run": True,
+            }
+        )
 
         raw_samples_path = output_dir / RAW_SAMPLES_FILENAME
         summary_path = output_dir / SUMMARY_FILENAME
@@ -1748,7 +2553,28 @@ def build_parser() -> argparse.ArgumentParser:
         )
     )
     parser.add_argument("--checkpoint", required=True, type=Path)
+    parser.add_argument(
+        "--expected-checkpoint-sha256",
+        required=True,
+        help=(
+            "Controller-pinned checkpoint digest. Independent stable-descriptor "
+            "checks bind both metadata inspection and model loading to these bytes."
+        ),
+    )
+    parser.add_argument(
+        "--expected-source-revision",
+        required=True,
+        help=(
+            "Controller-pinned 40-hex Git commit. The child requires it to equal "
+            "both HEAD and the branch upstream before and after generation."
+        ),
+    )
     parser.add_argument("--config", required=True, type=Path)
+    parser.add_argument(
+        "--expected-config-sha256",
+        required=True,
+        help="Controller-pinned SHA-256 of the exact inference YAML.",
+    )
     parser.add_argument("--num-samples", required=True, type=int)
     parser.add_argument("--seed", required=True, type=int)
     parser.add_argument("--device", required=True)
