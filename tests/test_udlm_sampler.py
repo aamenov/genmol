@@ -125,6 +125,25 @@ def test_udlm_sampling_uses_fixed_time_grid_and_clamps_context():
     assert process.steps[-1][2].item() == pytest.approx(1e-5)
 
 
+@pytest.mark.parametrize("diffusion_type", ["mdlm", "udlm"])
+def test_sampler_can_return_raw_token_ids_before_chemical_decoding(diffusion_type):
+    if diffusion_type == "udlm":
+        model, process = _UDLMModel(), _UDLMProcess()
+    else:
+        model, process = _MDLMModel(), _MDLMProcess()
+    sampler = _sampler(model, process, diffusion_type)
+    inputs = torch.tensor([[1, 4, 4, 2]])
+
+    token_ids = sampler.generate(inputs, return_token_ids=True)
+
+    assert isinstance(token_ids, torch.Tensor)
+    assert token_ids.shape == inputs.shape
+    if diffusion_type == "udlm":
+        assert torch.equal(token_ids, torch.tensor([[1, 7, 7, 2]]))
+    else:
+        assert torch.equal(token_ids, inputs)
+
+
 def test_udlm_rejects_mdlm_specific_molecular_context_guidance():
     sampler = _sampler(_UDLMModel(), _UDLMProcess(), "udlm")
 

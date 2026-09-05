@@ -14,9 +14,11 @@
 # limitations under the License.
 
 
+import hashlib
 import os
 import torch
 import datasets
+from huggingface_hub import hf_hub_download
 from safe.tokenizer import SAFETokenizer
 from rdkit import RDLogger
 from genmol.utils.bracket_safe_converter import safe2bracketsafe
@@ -24,6 +26,12 @@ RDLogger.DisableLog('rdApp.*')
 
 
 ROOT_DIR = os.getcwd()
+SAFE_GPT_REPO_ID = 'datamol-io/safe-gpt'
+SAFE_GPT_TOKENIZER_REVISION = '3d5fa0988383e898d5ac5db7cd52bf715bc37061'
+SAFE_GPT_TOKENIZER_SHA256 = (
+    '0db5f4dbdc7e8ff759e98483759611a426e187ee7f3f0a91edc8800abe7bf140'
+)
+SAFE_GPT_DATASET_REVISION = 'b83175cd7394e7a4027478a35b2f9d1dda3ac62f'
 
 
 def get_last_checkpoint(save_dir):
@@ -35,7 +43,19 @@ def get_last_checkpoint(save_dir):
     
 
 def get_tokenizer():
-    tk = SAFETokenizer.from_pretrained('datamol-io/safe-gpt').get_pretrained()
+    tokenizer_path = hf_hub_download(
+        SAFE_GPT_REPO_ID,
+        filename='tokenizer.json',
+        revision=SAFE_GPT_TOKENIZER_REVISION,
+    )
+    with open(tokenizer_path, 'rb') as handle:
+        digest = hashlib.sha256(handle.read()).hexdigest()
+    if digest != SAFE_GPT_TOKENIZER_SHA256:
+        raise RuntimeError(
+            f'Pinned SAFE tokenizer checksum mismatch: {digest} != '
+            f'{SAFE_GPT_TOKENIZER_SHA256}'
+        )
+    tk = SAFETokenizer.from_pretrained(tokenizer_path).get_pretrained()
     tk.add_tokens(['<', '>'])   # for bracket_safe
     return tk
 
@@ -93,7 +113,12 @@ class UserDataset(datasets.Dataset):
 def get_dataloader(config):
     if config.data == 'safe':
         return torch.utils.data.DataLoader(
-            datasets.load_dataset('datamol-io/safe-gpt', streaming=True, split='train'),
+            datasets.load_dataset(
+                SAFE_GPT_REPO_ID,
+                revision=SAFE_GPT_DATASET_REVISION,
+                streaming=True,
+                split='train',
+            ),
             batch_size=config.loader.batch_size,
             collate_fn=Collator(config),
             num_workers=config.loader.num_workers,

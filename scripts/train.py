@@ -30,6 +30,15 @@ omegaconf.OmegaConf.register_new_resolver('eval', eval)
 omegaconf.OmegaConf.register_new_resolver('div_up', lambda x, y: (x + y - 1) // y)
 
 
+def checkpoint_startup_mode(resume_checkpoint, initialization_checkpoint):
+    """Choose exactly one of Lightning resume, one-time warm-start, or scratch."""
+    if resume_checkpoint is not None:
+        return 'resume'
+    if initialization_checkpoint:
+        return 'warm_start'
+    return 'scratch'
+
+
 @hydra.main(version_base=None,
     config_path="../configs",
     config_name="base",
@@ -48,12 +57,8 @@ def train(config):
     model = GenMol(config)
     ckpt_path = get_last_checkpoint(config.callback.dirpath)
     init_from_mdlm = config.training.get('init_from_mdlm_checkpoint')
-    if ckpt_path is not None and init_from_mdlm:
-        raise ValueError(
-            'Cannot resume a training checkpoint and initialize from MDLM at '
-            'the same time; use a fresh callback.dirpath for warm-starting.'
-        )
-    if init_from_mdlm:
+    startup_mode = checkpoint_startup_mode(ckpt_path, init_from_mdlm)
+    if startup_mode == 'warm_start':
         source_path = hydra.utils.to_absolute_path(init_from_mdlm)
         report = model.initialize_from_mdlm_checkpoint(
             source_path,
@@ -63,6 +68,11 @@ def train(config):
             'Initialized UDLM backbone from MDLM: '
             f"{report['source_path']} (weights={report['weights']}, "
             f"parameters={report['parameter_tensors']})"
+        )
+    elif startup_mode == 'resume':
+        print(
+            f'Resuming {ckpt_path}; the configured MDLM initialization is '
+            'a one-time provenance field and will not be reapplied.'
         )
     
     train_dataloader = get_dataloader(config)

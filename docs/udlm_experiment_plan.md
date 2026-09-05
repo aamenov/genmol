@@ -5,7 +5,9 @@
 The target is not merely to make uniform diffusion run. The final UDLM system
 must beat the audited local GenMol MDLM control under a matched protocol.
 The primary de-novo criterion is a better quality–diversity trade-off at equal
-requested sample count, model size, training data, and evaluation definitions.
+requested sample count, BERT width/depth, training data, and evaluation definitions.
+The additive time conditioner adds 787,968 parameters (about 0.9%), so this is
+not literally an equal-parameter comparison.
 For a single operating point, success means:
 
 - repaired validity and uniqueness are not lower;
@@ -17,6 +19,12 @@ a 32- or 100-sample pilot is only a gate. Generation speed is reported but is
 hardware-dependent. A second, independent target is higher PMO top-10 AUC at
 the same oracle-call budget.
 
+The registered final decision uses one-sided 95% intervals: quality's lower
+bound must exceed the MDLM control, diversity's lower delta bound must exceed
+`-0.005`, and validity/uniqueness deltas must exceed `-0.005`. Means and sample
+standard deviations remain paper-compatible summaries; molecule-level
+bootstrap intervals preserve seed strata and recompute diversity per resample.
+
 ## Faithful baseline before hypotheses
 
 The first implementation follows UDLM at official revision `edb0f8c`:
@@ -27,7 +35,8 @@ The first implementation follows UDLM at official revision `edb0f8c`:
 3. Training uses continuous-time Eq. 18, evaluated with an algebraically exact
    non-negative form to avoid cancellation.
 4. Sampling starts from iid uniform tokens and resamples every editable token
-   through the exact reverse posterior on a fixed time grid.
+   through the exact reverse posterior on a fixed time grid. The official
+   128-step grid is the faithful control; 32/64-step grids are speed ablations.
 
 Two implementation differences are repairs, not hypotheses: the unused
 reconstruction forward pass is omitted, and the stable Eq. 18 identity replaces
@@ -58,6 +67,10 @@ order:
    that the 1,880-way uniform prior is the limiting factor. Candidate versions
    are a smaller SAFE tokenizer and token-type-restricted noise. These change
    the model/data representation and require their own MDLM controls.
+6. **Frequency-tempered categorical diffusion** — use a pinned training-prefix
+   frequency estimate with a uniform floor, but only after deriving and testing
+   its exact non-uniform posterior and objective. A diagnostic sampler is not a
+   valid UDLM result and must never be promoted as one.
 
 GenMol MCG is disabled for UDLM until posterior-space guidance is implemented.
 Combining clean logits would not equal the UDLM paper's D-CFG rule.
@@ -70,11 +83,15 @@ Combining clean logits would not equal the UDLM paper's D-CFG rule.
 3. One verified-idle GPU, full-size BERT, 10 optimizer steps; check memory,
    throughput, checkpoint save/load, and no NaNs.
 4. Warm-start pilots at 100, 500, then 1,000 steps. Evaluate 32 samples first,
-   then 100 samples at 16/32/64 reverse steps.
+   then 256 samples at 32/64 reverse steps. Retain a 128-step faithful control.
 5. Advance only a promising candidate to 2,000–5,000 steps. Use at most two
    user-selected, freshly verified idle GPUs.
 6. Run three 1,000-sample seeds and update the benchmark PDF only after a pilot
    clears the quality/diversity gate.
+
+The warm-start route is an operational sample-efficiency comparison: it uses
+the MDLM checkpoint's previous data exposure. A method-only claim additionally
+requires a from-scratch UDLM run and an equal-extra-step MDLM continuation.
 
 Every run records Git SHA, source checkpoint/hash, seed, physical-to-logical GPU
 mapping, configuration, sample count, step count, wall time, raw generations,

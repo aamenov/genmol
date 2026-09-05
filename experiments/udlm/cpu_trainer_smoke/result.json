@@ -1,0 +1,31 @@
+{
+  "checkpoint_reload": {
+    "diffusion_type": "udlm",
+    "ema_state_entries": 206,
+    "model_state_entries": 210,
+    "trainer_max_steps": 1
+  },
+  "device": "cpu",
+  "dataset_revision_enforced": false,
+  "effective_global_batch_size": 2,
+  "exclude_special_tokens": false,
+  "git_sha": "4205f6e12f18e50c050d085f88e6536bb23ee987",
+  "optimizer_steps": 1,
+  "output_checkpoint": {
+    "bytes": 1409632961,
+    "relative_path_not_committed": "output/udlm/cpu_trainer_smoke/checkpoints/1.ckpt",
+    "sha256": "5b513ba8b1f271187094bf11adb5429a86b1174e0b29d64417ffe82a7b50c07f"
+  },
+  "purpose": "full-production-stack integration smoke; not benchmark evidence",
+  "provenance_limitation": "the hosted SAFE stream was not revision-pinned in this historical smoke; later experiment code pins b83175cd7394e7a4027478a35b2f9d1dda3ac62f",
+  "runtime_seconds_approximately": 26,
+  "seed": 1,
+  "source_checkpoint": {
+    "relative_path": "outputs/paper_v1/checkpoints/50000.ckpt",
+    "sha256": "8d00aa47b02f64bf39ff6b0b2e786f213587366fc2c3d29712a00f3f84108dd6",
+    "weights": "ema",
+    "bert_parameter_tensors_loaded": 202
+  },
+  "train_loss_displayed": 1.49,
+  "visible_gpu_count": 0
+}

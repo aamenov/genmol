@@ -1,0 +1,35 @@
+data: safe
+seed: 1
+loader:
+  global_batch_size: 2
+  batch_size: 2
+  num_workers: 0
+  pin_memory: false
+trainer:
+  accelerator: cpu
+  devices: 1
+  precision: 32-true
+  accumulate_grad_batches: 1
+  max_steps: 1
+model:
+  hidden_size: 768
+  intermediate_size: 3072
+  num_attention_heads: 12
+  num_hidden_layers: 12
+  max_position_embeddings: 256
+  vocab_size: 1880
+training:
+  diffusion: udlm
+  ema: 0.9999
+  antithetic_sampling: true
+  sampling_eps: 0.001
+  global_mean_loss: true
+  init_from_mdlm_checkpoint: outputs/paper_v1/checkpoints/50000.ckpt
+  init_from_mdlm_ema: true
+  udlm:
+    exclude_special_tokens: false
+    noise_eps: 0.001
+    inference_eps: 0.00001
+    sampling_steps: 64
+    time_embedding_size: 256
+    zero_init_conditioning: true

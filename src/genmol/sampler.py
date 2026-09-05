@@ -63,6 +63,7 @@ class Sampler:
         gamma=0,
         w=2,
         num_steps=None,
+        return_token_ids=False,
         **kwargs,
     ):
         x = x.to(self.model.device)
@@ -131,7 +132,10 @@ class Sampler:
                     softmax_temp,
                     randomness,
                 )
-            
+
+        if return_token_ids:
+            return x
+
         # decode to SAFE strings
         samples = self.model.tokenizer.batch_decode(x, skip_special_tokens=True)
         # convert to SMILES strings
