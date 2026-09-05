@@ -35,6 +35,7 @@ VARIANT_SETTINGS: dict[str, dict[str, Any]] = {
     "shrink30": {"mode": "bayes", "prior_strength": 30.0},
     "delta": {"mode": "delta", "prior_strength": 0.0},
     "running_mean_parent_control": {"mode": "mean", "prior_strength": 0.0},
+    "running_mean_delta_control": {"mode": "mean", "prior_strength": 0.0},
 }
 
 

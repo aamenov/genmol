@@ -85,6 +85,26 @@ class LauncherTests(unittest.TestCase):
             self.assertEqual(command[command.index("--matrix-path") + 1], str(matrix_path))
             self.assertEqual(command[command.index("--matrix-sha256") + 1], digest)
 
+    def test_command_accepts_running_mean_delta_control(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            matrix_path = (root / "matrix.yaml").resolve()
+            matrix = self._matrix(root)
+            matrix["variants"] = ["running_mean_delta_control"]
+            matrix_path.write_text(yaml.safe_dump(matrix))
+            job = launcher._jobs(matrix)[0]
+
+            command = launcher._command(matrix_path, "a" * 64, matrix, job)
+
+            self.assertEqual(
+                command[command.index("--variant") + 1],
+                "running_mean_delta_control",
+            )
+            self.assertEqual(
+                launcher.VARIANT_SETTINGS["running_mean_delta_control"]["mode"],
+                "mean",
+            )
+
     def test_command_forwards_prior_for_every_bayesian_strength(self):
         expected_strengths = {
             "shrink1": 1.0,

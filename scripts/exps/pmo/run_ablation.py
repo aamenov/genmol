@@ -163,7 +163,15 @@ VARIANT_SETTINGS: dict[str, dict[str, Any]] = {
         "parent_control": True,
         "prior_strength": 0.0,
     },
+    "running_mean_delta_control": {
+        "mode": "mean",
+        "min_support": 1,
+        "parent_control": True,
+        "prior_strength": 0.0,
+    },
 }
+
+DELTA_MECHANICS_VARIANTS = frozenset({"delta", "running_mean_delta_control"})
 
 SAFE_EXPERIMENT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
@@ -434,6 +442,99 @@ def _largest_component(smiles: Optional[str]) -> Optional[str]:
     return max(smiles.split("."), key=len)
 
 
+def _protocol_metadata(variant: str, delta_attribution: str) -> dict[str, str]:
+    """Describe observation mechanics that materially affect an ablation arm."""
+
+    if variant in DELTA_MECHANICS_VARIANTS:
+        credit_fragment_policy = (
+            "deterministic_cut_all_child_minus_parent"
+            if delta_attribution == "novel_vs_parent"
+            else "deterministic_cut_all_child"
+        )
+        return {
+            "warmup_update_policy": "frozen",
+            "observation_identity": "unique_canonical_parent_child_transition",
+            "parent_domain_policy": "parent_and_child_within_configured_atom_bounds",
+            "credit_fragment_policy": credit_fragment_policy,
+        }
+    return {
+        "warmup_update_policy": "standard",
+        "observation_identity": (
+            "canonical_child_occurrence"
+            if variant == "released"
+            else "unique_canonical_child"
+        ),
+        "parent_domain_policy": "child_within_configured_atom_bounds",
+        "credit_fragment_policy": "sampled_three_cut_child",
+    }
+
+
+def _transition_observation_id(parent_smiles: str, child_smiles: str) -> str:
+    """Return an unambiguous identity for one canonical parent/child contrast."""
+
+    return json.dumps(
+        [parent_smiles, child_smiles],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _inactive_attribution(reason: str) -> dict[str, Any]:
+    return {
+        "applicable": False,
+        "reason": reason,
+        "attribution_mode": None,
+        "parent_all_fragments": [],
+        "child_all_fragments": [],
+        "credited_fragments": [],
+        "mapping_counts": {
+            "parent_all": 0,
+            "child_all": 0,
+            "shared": 0,
+            "credited": 0,
+        },
+        "mapping_covered": False,
+        "mapping_coverage": 0.0,
+    }
+
+
+def _attribution_metadata(
+    parent_smiles: str,
+    child_smiles: str,
+    *,
+    delta_attribution: str,
+) -> dict[str, Any]:
+    """Map an evaluated transition to deterministic one-bond-cut fragments."""
+
+    parent_fragments = set(cut_all(parent_smiles))
+    child_fragments = set(cut_all(child_smiles))
+    shared_fragments = parent_fragments & child_fragments
+    if delta_attribution == "novel_vs_parent":
+        credited_fragments = child_fragments - parent_fragments
+    elif delta_attribution == "all_child":
+        credited_fragments = child_fragments
+    else:
+        raise ValueError(f"unsupported delta attribution {delta_attribution!r}")
+    child_count = len(child_fragments)
+    credited_count = len(credited_fragments)
+    return {
+        "applicable": True,
+        "reason": "deterministic_mapping",
+        "attribution_mode": delta_attribution,
+        "parent_all_fragments": sorted(parent_fragments),
+        "child_all_fragments": sorted(child_fragments),
+        "credited_fragments": sorted(credited_fragments),
+        "mapping_counts": {
+            "parent_all": len(parent_fragments),
+            "child_all": child_count,
+            "shared": len(shared_fragments),
+            "credited": credited_count,
+        },
+        "mapping_covered": credited_count > 0,
+        "mapping_coverage": credited_count / child_count if child_count else 0.0,
+    }
+
+
 def _score_row(outcome: Optional[ScoreOutcome]) -> Optional[dict[str, Any]]:
     return None if outcome is None else dataclasses.asdict(outcome)
 
@@ -592,6 +693,7 @@ def _validate_args(args: argparse.Namespace) -> None:
 
 def _resolved_config(args: argparse.Namespace) -> dict[str, Any]:
     settings = VARIANT_SETTINGS[args.variant]
+    protocol = _protocol_metadata(args.variant, args.delta_attribution)
     vocab_path = args.vocab_path or (
         REPOSITORY_ROOT / "scripts" / "exps" / "pmo" / "vocab" / f"{args.oracle}.csv"
     )
@@ -633,8 +735,13 @@ def _resolved_config(args: argparse.Namespace) -> dict[str, Any]:
         "prior_mean_source": args.prior_mean_source,
         "legacy_seed_count": args.legacy_seed_count,
         "delta_attribution": args.delta_attribution,
+        **protocol,
         "population_sampling_order": "canonical fragment string before uniform sampling",
-        "statistical_duplicate_policy": "one update per unique canonical child",
+        "statistical_duplicate_policy": (
+            "one update per unique canonical parent-child transition"
+            if args.variant in DELTA_MECHANICS_VARIANTS
+            else "one update per unique canonical child"
+        ),
         "released_duplicate_policy": "repeat cached-child decomposition, matching release",
         "durable_events": bool(args.durable_events),
     }
@@ -766,6 +873,7 @@ def _run_locked(
     sampler = Sampler(str(config["model_path"]))
     sampler.model.to(str(config["device"]))
     sampler.mdlm.to_device(sampler.model.device)
+    uses_delta_mechanics = str(config["variant"]) in DELTA_MECHANICS_VARIANTS
 
     if args.resume:
         state, checkpoint_metadata = load_checkpoint(checkpoint_path, with_metadata=True)
@@ -862,6 +970,11 @@ def _run_locked(
                 parent_smiles = _attach_fragments(frag1, frag2, attach_rng)
                 if parent_smiles is None:
                     continue
+                parent_molecule = Chem.MolFromSmiles(parent_smiles)
+                if parent_molecule is None:
+                    continue
+                parent_smiles = Chem.MolToSmiles(parent_molecule)
+                parent_atom_count = parent_molecule.GetNumAtoms()
                 child_smiles = parent_smiles
                 if remask_enabled:
                     child_smiles = sampler.mask_modification(
@@ -875,13 +988,25 @@ def _run_locked(
                 child_molecule = Chem.MolFromSmiles(child_smiles) if child_smiles else None
                 if child_molecule is None:
                     continue
-                atom_count = child_molecule.GetNumAtoms()
-                if int(config["min_mol_size"]) <= atom_count <= int(config["max_mol_size"]):
+                child_atom_count = child_molecule.GetNumAtoms()
+                child_in_bounds = (
+                    int(config["min_mol_size"])
+                    <= child_atom_count
+                    <= int(config["max_mol_size"])
+                )
+                parent_in_bounds = (
+                    int(config["min_mol_size"])
+                    <= parent_atom_count
+                    <= int(config["max_mol_size"])
+                )
+                if child_in_bounds and (parent_in_bounds or not uses_delta_mechanics):
                     candidate = {
                         "selected_fragments": [frag1, frag2],
                         "parent_smiles": parent_smiles,
                         "child_smiles": Chem.MolToSmiles(child_molecule),
-                        "atom_count": atom_count,
+                        "atom_count": child_atom_count,
+                        "parent_atom_count": parent_atom_count,
+                        "child_atom_count": child_atom_count,
                         "proposal_attempts": proposal_attempt,
                         "remask_enabled": remask_enabled,
                     }
@@ -891,9 +1016,16 @@ def _run_locked(
                 raise RuntimeError("failed to generate a size-valid molecule in 1000 attempts")
 
             parent_outcome: Optional[ScoreOutcome] = None
+            attribution_payload: Optional[dict[str, Any]] = (
+                _inactive_attribution("warmup_frozen")
+                if uses_delta_mechanics and not remask_enabled
+                else None
+            )
             if remask_enabled and bool(config["parent_control"]):
                 parent_outcome = oracle.score(candidate["parent_smiles"])
                 if oracle.finished:
+                    if uses_delta_mechanics:
+                        attribution_payload = _inactive_attribution("budget_after_parent")
                     while oracle.calls >= next_checkpoint_call:
                         next_checkpoint_call += int(config["checkpoint_every"])
                     event = {
@@ -902,6 +1034,7 @@ def _run_locked(
                         **candidate,
                         "parent_oracle": _score_row(parent_outcome),
                         "child_oracle": None,
+                        "attribution": attribution_payload,
                         "population_update": {"updated": False, "reason": "budget_after_parent"},
                         "fragment_statistics_after": {},
                         "population_cutoff_after": population.active_rows()[-1][0],
@@ -920,17 +1053,30 @@ def _run_locked(
             update_payload: dict[str, Any] = {"updated": False, "reason": "unscored_child"}
             fragment_statistics: dict[str, Any] = {}
             if child_outcome.score is not None and child_outcome.canonical_smiles is not None:
-                if str(config["policy_mode"]) == "delta" and not remask_enabled:
-                    update_payload = {"updated": False, "reason": "delta_warmup"}
+                if uses_delta_mechanics and not remask_enabled:
+                    update_payload = {"updated": False, "reason": "frozen_warmup"}
                 else:
                     credit_fragments = None
-                    if str(config["policy_mode"]) == "delta":
-                        child_fragments = set(fragmenter(child_outcome.canonical_smiles))
-                        if config["delta_attribution"] == "novel_vs_parent":
-                            child_fragments -= cut_all(candidate["parent_smiles"])
-                        credit_fragments = frozenset(child_fragments)
+                    observation_id = child_outcome.canonical_smiles
+                    if uses_delta_mechanics:
+                        if parent_outcome is None or parent_outcome.score is None:
+                            raise RuntimeError("delta mechanics require a scored parent")
+                        if parent_outcome.canonical_smiles is None:
+                            raise RuntimeError("delta mechanics require a canonical parent")
+                        attribution_payload = _attribution_metadata(
+                            parent_outcome.canonical_smiles,
+                            child_outcome.canonical_smiles,
+                            delta_attribution=str(config["delta_attribution"]),
+                        )
+                        credit_fragments = frozenset(
+                            attribution_payload["credited_fragments"]
+                        )
+                        observation_id = _transition_observation_id(
+                            parent_outcome.canonical_smiles,
+                            child_outcome.canonical_smiles,
+                        )
                     observation = FragmentObservation(
-                        observation_id=child_outcome.canonical_smiles,
+                        observation_id=observation_id,
                         child_smiles=child_outcome.canonical_smiles,
                         child_score=child_outcome.score,
                         parent_score=None if parent_outcome is None else parent_outcome.score,
@@ -949,6 +1095,7 @@ def _run_locked(
                 **candidate,
                 "parent_oracle": _score_row(parent_outcome),
                 "child_oracle": _score_row(child_outcome),
+                "attribution": attribution_payload,
                 "population_update": update_payload,
                 "fragment_statistics_after": fragment_statistics,
                 "population_cutoff_after": population.active_rows()[-1][0],

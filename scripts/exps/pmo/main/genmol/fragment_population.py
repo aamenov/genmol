@@ -52,8 +52,10 @@ class FragmentObservation:
     """One scored child molecule presented to the vocabulary.
 
     Delta mode uses ``child_score - parent_score``.  If
-    ``credit_fragments`` is supplied, only those fragments receive the delta;
-    otherwise all fragments returned by the injected child fragmenter do.
+    ``credit_fragments`` is supplied, only those fragments receive the policy's
+    credit; otherwise all fragments returned by the injected child fragmenter
+    do.  The explicit set is also used by absolute-score matched controls so
+    attribution mechanics can be held fixed while only the credit value changes.
     """
 
     observation_id: str
@@ -453,7 +455,7 @@ class FragmentPopulation:
             credit = self._validate_score(child_score - parent_score, "delta credit")
 
         source_fragments: Iterable[str]
-        if self.mode == "delta" and observation.credit_fragments is not None:
+        if observation.credit_fragments is not None:
             source_fragments = observation.credit_fragments
         else:
             source_fragments = self.fragmenter(observation.child_smiles)

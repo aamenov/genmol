@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+import json
 import tempfile
 import unittest
 from argparse import Namespace
@@ -18,12 +19,14 @@ from scripts.exps.pmo.run_ablation import (
     SAFE_EXPERIMENT_ID,
     VARIANT_SETTINGS,
     CachedOracle,
+    _attribution_metadata,
     _attach_fragments,
     _derived_seed,
     _git_output,
     _molecule_size_bounds,
     _repair_event_tail,
     _resolved_config,
+    _transition_observation_id,
     _validate_args,
     _vocabulary_has_sufficient_statistics,
     run,
@@ -123,6 +126,37 @@ class ConfigurationTests(unittest.TestCase):
             assert orphaned is not None
             self.assertEqual(orphaned.read_bytes(), tail)
 
+    def test_delta_and_matched_control_resolve_the_same_noncredit_protocol(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model = root / "model.ckpt"
+            model.write_bytes(b"model")
+            vocab = root / "vocab.csv"
+            vocab.write_text("frag,score\n[1*]CC,0.5\n[1*]CO,0.4\n")
+            expected = {
+                "warmup_update_policy": "frozen",
+                "observation_identity": "unique_canonical_parent_child_transition",
+                "parent_domain_policy": "parent_and_child_within_configured_atom_bounds",
+                "credit_fragment_policy": "deterministic_cut_all_child_minus_parent",
+                "statistical_duplicate_policy": (
+                    "one update per unique canonical parent-child transition"
+                ),
+            }
+            for variant in ("delta", "running_mean_delta_control"):
+                args = RunnerIntegrationTests()._args(
+                    root,
+                    model,
+                    vocab,
+                    variant=variant,
+                )
+                config = _resolved_config(args)
+                for key, value in expected.items():
+                    self.assertEqual(config[key], value)
+
+        first = _transition_observation_id("CCO", "CCOC")
+        self.assertEqual(first, _transition_observation_id("CCO", "CCOC"))
+        self.assertNotEqual(first, _transition_observation_id("CCN", "CCOC"))
+
 
 class ChemistryTests(unittest.TestCase):
     def test_injected_cut_rng_is_reproducible_and_isolated(self):
@@ -148,6 +182,29 @@ class ChemistryTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertIsNotNone(first)
 
+    def test_delta_attribution_uses_deterministic_set_difference(self):
+        fragments = {
+            "parent": {"shared", "removed"},
+            "child": {"shared", "added-a", "added-b"},
+        }
+        with mock.patch(
+            "scripts.exps.pmo.run_ablation.cut_all",
+            side_effect=lambda smiles: fragments[smiles],
+        ):
+            metadata = _attribution_metadata(
+                "parent", "child", delta_attribution="novel_vs_parent"
+            )
+
+        self.assertEqual(metadata["parent_all_fragments"], ["removed", "shared"])
+        self.assertEqual(
+            metadata["credited_fragments"], ["added-a", "added-b"]
+        )
+        self.assertEqual(
+            metadata["mapping_counts"],
+            {"parent_all": 2, "child_all": 3, "shared": 1, "credited": 2},
+        )
+        self.assertAlmostEqual(metadata["mapping_coverage"], 2 / 3)
+
 
 class FakeModel:
     def __init__(self):
@@ -171,6 +228,11 @@ class FakeSampler:
 
     def mask_modification(self, smiles, **kwargs):
         return smiles + "C"
+
+
+class ConstantChildSampler(FakeSampler):
+    def mask_modification(self, smiles, **kwargs):
+        return "CCOC"
 
 
 class RunnerIntegrationTests(unittest.TestCase):
@@ -341,6 +403,158 @@ class RunnerIntegrationTests(unittest.TestCase):
             self.assertEqual(events[-1]["population_update"]["reason"], "budget_after_parent")
             self.assertIn("elapsed_seconds", events[-1])
             self.assertIn("population_cutoff_after", events[-1])
+
+    def test_corrected_delta_and_control_match_transition_but_not_credit_value(self):
+        captured = {}
+        for variant in ("delta", "running_mean_delta_control"):
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                model, vocab = self._files(root)
+                args = self._args(
+                    root / "output",
+                    model,
+                    vocab,
+                    variant=variant,
+                    experiment_id=f"unit_{variant}",
+                    max_oracle_calls=2,
+                    warmup=0,
+                    legacy_warmup_off_by_one=False,
+                )
+                parents = iter(["C", "CCO"])
+                with (
+                    mock.patch("scripts.exps.pmo.run_ablation.Sampler", FakeSampler),
+                    mock.patch(
+                        "scripts.exps.pmo.run_ablation.TDCOracle",
+                        return_value=lambda smiles: len(smiles) / 10,
+                    ),
+                    mock.patch(
+                        "scripts.exps.pmo.run_ablation._attach_fragments",
+                        side_effect=lambda *unused: next(parents),
+                    ),
+                    mock.patch(
+                        "scripts.exps.pmo.run_ablation._molecule_size_bounds",
+                        return_value=(3, 4),
+                    ),
+                ):
+                    run_dir = run(args)
+
+                event = json.loads((run_dir / "events.jsonl").read_text().strip())
+                self.assertEqual(event["proposal_attempts"], 2)
+                self.assertEqual(event["parent_smiles"], "CCO")
+                self.assertEqual(event["child_smiles"], "CCOC")
+                self.assertEqual(event["parent_atom_count"], 3)
+                self.assertEqual(event["child_atom_count"], 4)
+                self.assertTrue(event["attribution"]["applicable"])
+                self.assertEqual(
+                    event["population_update"]["observed_fragments"],
+                    event["attribution"]["credited_fragments"],
+                )
+                expected_credit = 0.1 if variant == "delta" else 0.4
+                for stats in event["fragment_statistics_after"].values():
+                    self.assertEqual(stats["count"], 1)
+                    self.assertAlmostEqual(stats["total"], expected_credit)
+                captured[variant] = event
+
+        delta_event = captured["delta"]
+        control_event = captured["running_mean_delta_control"]
+        for key in (
+            "selected_fragments",
+            "parent_smiles",
+            "child_smiles",
+            "parent_atom_count",
+            "child_atom_count",
+            "proposal_attempts",
+            "remask_enabled",
+            "attribution",
+        ):
+            self.assertEqual(delta_event[key], control_event[key])
+
+    def test_delta_matched_control_freezes_vocabulary_during_warmup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model, vocab = self._files(root)
+            args = self._args(
+                root / "output",
+                model,
+                vocab,
+                variant="running_mean_delta_control",
+                max_oracle_calls=1,
+                warmup=10,
+                legacy_warmup_off_by_one=False,
+            )
+            with (
+                mock.patch("scripts.exps.pmo.run_ablation.Sampler", FakeSampler),
+                mock.patch(
+                    "scripts.exps.pmo.run_ablation.TDCOracle",
+                    return_value=lambda smiles: len(smiles) / 10,
+                ),
+                mock.patch(
+                    "scripts.exps.pmo.run_ablation._attach_fragments",
+                    return_value="CCO",
+                ),
+                mock.patch(
+                    "scripts.exps.pmo.run_ablation._molecule_size_bounds",
+                    return_value=(3, 4),
+                ),
+            ):
+                run_dir = run(args)
+
+            event = json.loads((run_dir / "events.jsonl").read_text().strip())
+            self.assertFalse(event["remask_enabled"])
+            self.assertIsNone(event["parent_oracle"])
+            self.assertEqual(event["population_update"]["reason"], "frozen_warmup")
+            self.assertEqual(event["attribution"]["reason"], "warmup_frozen")
+            self.assertFalse(event["attribution"]["applicable"])
+
+    def test_delta_deduplicates_transitions_not_repeated_children(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model, vocab = self._files(root)
+            args = self._args(
+                root / "output",
+                model,
+                vocab,
+                variant="delta",
+                max_oracle_calls=4,
+                warmup=0,
+                legacy_warmup_off_by_one=False,
+            )
+            parents = iter(["CCO", "CCN", "COC"])
+            with (
+                mock.patch(
+                    "scripts.exps.pmo.run_ablation.Sampler", ConstantChildSampler
+                ),
+                mock.patch(
+                    "scripts.exps.pmo.run_ablation.TDCOracle",
+                    return_value=lambda smiles: len(smiles) / 10,
+                ),
+                mock.patch(
+                    "scripts.exps.pmo.run_ablation._attach_fragments",
+                    side_effect=lambda *unused: next(parents),
+                ),
+                mock.patch(
+                    "scripts.exps.pmo.run_ablation._molecule_size_bounds",
+                    return_value=(3, 4),
+                ),
+            ):
+                run_dir = run(args)
+
+            events = [
+                json.loads(line)
+                for line in (run_dir / "events.jsonl").read_text().splitlines()
+            ]
+            self.assertEqual(events[0]["child_smiles"], events[1]["child_smiles"])
+            self.assertNotEqual(events[0]["parent_smiles"], events[1]["parent_smiles"])
+            self.assertEqual(events[0]["population_update"]["reason"], "updated")
+            self.assertEqual(events[1]["population_update"]["reason"], "updated")
+            shared_credited = set(events[0]["attribution"]["credited_fragments"]) & set(
+                events[1]["attribution"]["credited_fragments"]
+            )
+            self.assertTrue(shared_credited)
+            for fragment in shared_credited:
+                self.assertEqual(
+                    events[1]["fragment_statistics_after"][fragment]["count"], 2
+                )
 
 
 if __name__ == "__main__":

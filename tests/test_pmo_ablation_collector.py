@@ -688,6 +688,99 @@ class AblationCollectorTests(unittest.TestCase):
                     collector._parse_launch_command(missing_prior_command)
                 )
 
+    def test_resolves_and_validates_corrected_delta_protocol_metadata(self):
+        parsed = {
+            "--oracle": "qed",
+            "--variant": "running_mean_delta_control",
+            "--model-path": "/tmp/model.ckpt",
+            "--experiment-id": "delta_control_test",
+            "--scientific-status": "unit test",
+            "--output-root": "/tmp/output",
+            "--delta-attribution": "novel_vs_parent",
+        }
+        config = collector._resolved_launch_config(parsed)
+        self.assertEqual(config["policy_mode"], "mean")
+        self.assertTrue(config["parent_control"])
+        self.assertEqual(config["warmup_update_policy"], "frozen")
+        self.assertEqual(
+            config["observation_identity"],
+            "unique_canonical_parent_child_transition",
+        )
+        self.assertEqual(
+            config["credit_fragment_policy"],
+            "deterministic_cut_all_child_minus_parent",
+        )
+        config["min_mol_size"] = 3
+        config["max_mol_size"] = 4
+
+        parent_fragments = sorted(collector.cut_all("CCO"))
+        child_fragments = sorted(collector.cut_all("CCOC"))
+        credited = sorted(set(child_fragments) - set(parent_fragments))
+        attribution = {
+            "applicable": True,
+            "reason": "deterministic_mapping",
+            "attribution_mode": "novel_vs_parent",
+            "parent_all_fragments": parent_fragments,
+            "child_all_fragments": child_fragments,
+            "credited_fragments": credited,
+            "mapping_counts": {
+                "parent_all": len(parent_fragments),
+                "child_all": len(child_fragments),
+                "shared": len(set(parent_fragments) & set(child_fragments)),
+                "credited": len(credited),
+            },
+            "mapping_covered": bool(credited),
+            "mapping_coverage": len(credited) / len(child_fragments),
+        }
+        event = {
+            "remask_enabled": True,
+            "parent_atom_count": 3,
+            "child_atom_count": 4,
+            "atom_count": 4,
+            "parent_smiles": "CCO",
+            "child_smiles": "CCOC",
+            "parent_oracle": {"canonical_smiles": "CCO"},
+            "child_oracle": {"canonical_smiles": "CCOC"},
+            "attribution": attribution,
+        }
+        collector._validate_corrected_delta_event(
+            event,
+            config=config,
+            event_index=0,
+            update_reason="updated",
+        )
+        seen_transitions = set()
+        collector._validate_corrected_delta_event(
+            event,
+            config=config,
+            event_index=0,
+            update_reason="updated",
+            seen_transitions=seen_transitions,
+        )
+        collector._validate_corrected_delta_event(
+            event,
+            config=config,
+            event_index=1,
+            update_reason="duplicate_observation",
+            seen_transitions=seen_transitions,
+        )
+        with self.assertRaisesRegex(collector.CollectionError, "transition update reason"):
+            collector._validate_corrected_delta_event(
+                event,
+                config=config,
+                event_index=2,
+                update_reason="updated",
+                seen_transitions=seen_transitions,
+            )
+        attribution["credited_fragments"] = []
+        with self.assertRaisesRegex(collector.CollectionError, "credited fragments"):
+            collector._validate_corrected_delta_event(
+                event,
+                config=config,
+                event_index=0,
+                update_reason="updated",
+            )
+
     def test_matrix_plan_resolves_only_the_declared_output_root(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -26,6 +26,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from rdkit import Chem
+
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 if str(REPOSITORY_ROOT) not in sys.path:
@@ -41,6 +43,7 @@ from scripts.exps.pmo.main.genmol.experiment_io import (  # noqa: E402
     write_manifest,
 )
 from scripts.exps.pmo import launch_ablation as ablation_launcher  # noqa: E402
+from genmol.utils.utils_chem import cut_all  # noqa: E402
 
 
 COLLECTION_SCHEMA_VERSION = 3
@@ -91,6 +94,10 @@ CSV_CONFIG_FIELDS = (
     "prior_strength",
     "prior_mean_source",
     "delta_attribution",
+    "warmup_update_policy",
+    "observation_identity",
+    "parent_domain_policy",
+    "credit_fragment_policy",
     "legacy_seed_count",
     "legacy_warmup_off_by_one",
     "durable_events",
@@ -235,7 +242,20 @@ VARIANT_SETTINGS: dict[str, dict[str, Any]] = {
         "parent_control": True,
         "prior_strength": 0.0,
     },
+    "running_mean_delta_control": {
+        "mode": "mean",
+        "min_support": 1,
+        "parent_control": True,
+        "prior_strength": 0.0,
+    },
 }
+DELTA_MECHANICS_VARIANTS = frozenset({"delta", "running_mean_delta_control"})
+PROTOCOL_CONFIG_FIELDS = (
+    "warmup_update_policy",
+    "observation_identity",
+    "parent_domain_policy",
+    "credit_fragment_policy",
+)
 SMALL_MOLECULE_ORACLES = {
     "albuterol_similarity",
     "isomers_c7h8n2o2",
@@ -550,6 +570,30 @@ def _optional(parsed: Mapping[str, Any], flag: str, converter: type, default: An
         raise CollectionError(f"invalid {flag} value in launch command") from error
 
 
+def _protocol_metadata(variant: str, delta_attribution: str) -> dict[str, str]:
+    if variant in DELTA_MECHANICS_VARIANTS:
+        return {
+            "warmup_update_policy": "frozen",
+            "observation_identity": "unique_canonical_parent_child_transition",
+            "parent_domain_policy": "parent_and_child_within_configured_atom_bounds",
+            "credit_fragment_policy": (
+                "deterministic_cut_all_child_minus_parent"
+                if delta_attribution == "novel_vs_parent"
+                else "deterministic_cut_all_child"
+            ),
+        }
+    return {
+        "warmup_update_policy": "standard",
+        "observation_identity": (
+            "canonical_child_occurrence"
+            if variant == "released"
+            else "unique_canonical_child"
+        ),
+        "parent_domain_policy": "child_within_configured_atom_bounds",
+        "credit_fragment_policy": "sampled_three_cut_child",
+    }
+
+
 def _resolved_launch_config(parsed: Mapping[str, Any]) -> dict[str, Any]:
     required = (
         "--oracle",
@@ -598,6 +642,14 @@ def _resolved_launch_config(parsed: Mapping[str, Any]) -> dict[str, Any]:
         raise CollectionError(
             "launch prior mean and source are only valid for Bayesian variants"
         )
+    delta_attribution = _optional(
+        parsed,
+        "--delta-attribution",
+        str,
+        "novel_vs_parent",
+    )
+    if delta_attribution not in {"all_child", "novel_vs_parent"}:
+        raise CollectionError("launch has unsupported delta attribution")
     resolved = {
         "experiment_id": str(parsed["--experiment-id"]),
         "scientific_status": str(parsed["--scientific-status"]),
@@ -629,13 +681,13 @@ def _resolved_launch_config(parsed: Mapping[str, Any]) -> dict[str, Any]:
         "prior_mean": prior_mean,
         "prior_mean_source": prior_mean_source,
         "legacy_seed_count": _optional(parsed, "--legacy-seed-count", int, None),
-        "delta_attribution": _optional(
-            parsed,
-            "--delta-attribution",
-            str,
-            "novel_vs_parent",
+        "delta_attribution": delta_attribution,
+        **_protocol_metadata(variant, delta_attribution),
+        "statistical_duplicate_policy": (
+            "one update per unique canonical parent-child transition"
+            if variant in DELTA_MECHANICS_VARIANTS
+            else "one update per unique canonical child"
         ),
-        "statistical_duplicate_policy": "one update per unique canonical child",
         "released_duplicate_policy": "repeat cached-child decomposition, matching release",
     }
     matrix_flags = {"--matrix-path", "--matrix-sha256"} & parsed.keys()
@@ -823,6 +875,13 @@ def _validate_run_matrix(collected: CollectedRun, plan: MatrixPlan) -> bool:
         raise CollectionError(
             f"cannot reconstruct matrix config for run {identity!r}: {error}"
         ) from error
+    if not any(key in config for key in PROTOCOL_CONFIG_FIELDS):
+        for key in PROTOCOL_CONFIG_FIELDS:
+            expected.pop(key, None)
+        if config.get("variant") == "delta":
+            expected["statistical_duplicate_policy"] = (
+                "one update per unique canonical child"
+            )
     for key, value in expected.items():
         if key not in {"matrix_path", "matrix_sha256"}:
             _equal(config.get(key), value, f"run {identity!r} matrix config {key}")
@@ -865,6 +924,13 @@ def _validate_launch(
         "launch output root",
     )
     resolved = _resolved_launch_config(parsed)
+    if not any(key in config for key in PROTOCOL_CONFIG_FIELDS):
+        for key in PROTOCOL_CONFIG_FIELDS:
+            resolved.pop(key, None)
+        if config.get("variant") == "delta":
+            resolved["statistical_duplicate_policy"] = (
+                "one update per unique canonical child"
+            )
     if "population_sampling_order" in config:
         resolved["population_sampling_order"] = (
             "canonical fragment string before uniform sampling"
@@ -1029,6 +1095,173 @@ def _score_outcome(
     raise CollectionError(f"{context} has unsupported ScoreOutcome reason {reason!r}")
 
 
+def _fragment_list(value: Any, context: str) -> list[str]:
+    if not isinstance(value, list) or not all(
+        isinstance(fragment, str) and fragment for fragment in value
+    ):
+        raise CollectionError(f"{context} must be a list of nonempty strings")
+    if value != sorted(set(value)):
+        raise CollectionError(f"{context} must be sorted and unique")
+    return value
+
+
+def _transition_identity(parent_smiles: str, child_smiles: str) -> str:
+    return json.dumps(
+        [parent_smiles, child_smiles],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _validate_corrected_delta_event(
+    event: Mapping[str, Any],
+    *,
+    config: Mapping[str, Any],
+    event_index: int,
+    update_reason: Any,
+    seen_transitions: set[str] | None = None,
+) -> None:
+    """Validate the paired delta/control mechanics recorded by new runs."""
+
+    context = f"event {event_index}"
+    remask_enabled = _boolean(event.get("remask_enabled"), f"{context}.remask_enabled")
+    parent_atom_count = _integer(
+        event.get("parent_atom_count"), f"{context}.parent_atom_count", minimum=1
+    )
+    child_atom_count = _integer(
+        event.get("child_atom_count"), f"{context}.child_atom_count", minimum=1
+    )
+    _equal(event.get("atom_count"), child_atom_count, f"{context}.atom_count")
+    min_size = _integer(config.get("min_mol_size"), "config.min_mol_size", minimum=1)
+    max_size = _integer(config.get("max_mol_size"), "config.max_mol_size", minimum=min_size)
+    if not min_size <= parent_atom_count <= max_size:
+        raise CollectionError(f"{context} parent atom count is outside configured bounds")
+    if not min_size <= child_atom_count <= max_size:
+        raise CollectionError(f"{context} child atom count is outside configured bounds")
+    for molecule_name, atom_count in (
+        ("parent_smiles", parent_atom_count),
+        ("child_smiles", child_atom_count),
+    ):
+        smiles = event.get(molecule_name)
+        if not isinstance(smiles, str) or not smiles:
+            raise CollectionError(f"{context}.{molecule_name} must be nonempty")
+        molecule = Chem.MolFromSmiles(smiles)
+        if molecule is None:
+            raise CollectionError(f"{context}.{molecule_name} is invalid")
+        _equal(molecule.GetNumAtoms(), atom_count, f"{context}.{molecule_name} atom count")
+
+    attribution = event.get("attribution")
+    if not isinstance(attribution, Mapping):
+        raise CollectionError(f"{context}.attribution must be an object")
+    attribution_fields = {
+        "applicable",
+        "reason",
+        "attribution_mode",
+        "parent_all_fragments",
+        "child_all_fragments",
+        "credited_fragments",
+        "mapping_counts",
+        "mapping_covered",
+        "mapping_coverage",
+    }
+    _equal(set(attribution), attribution_fields, f"{context}.attribution fields")
+    applicable = _boolean(
+        attribution.get("applicable"), f"{context}.attribution.applicable"
+    )
+    parent_fragments = _fragment_list(
+        attribution.get("parent_all_fragments"),
+        f"{context}.attribution.parent_all_fragments",
+    )
+    child_fragments = _fragment_list(
+        attribution.get("child_all_fragments"),
+        f"{context}.attribution.child_all_fragments",
+    )
+    credited_fragments = _fragment_list(
+        attribution.get("credited_fragments"),
+        f"{context}.attribution.credited_fragments",
+    )
+    counts = _mapping(attribution, "mapping_counts", f"{context}.attribution")
+    _equal(
+        set(counts),
+        {"parent_all", "child_all", "shared", "credited"},
+        f"{context}.attribution.mapping_counts fields",
+    )
+    for key in counts:
+        _integer(counts[key], f"{context}.attribution.mapping_counts.{key}")
+    mapping_covered = _boolean(
+        attribution.get("mapping_covered"),
+        f"{context}.attribution.mapping_covered",
+    )
+    mapping_coverage = _number(
+        attribution.get("mapping_coverage"),
+        f"{context}.attribution.mapping_coverage",
+    )
+
+    child_oracle = event.get("child_oracle")
+    if not remask_enabled:
+        _equal(update_reason, "frozen_warmup", f"{context} frozen update reason")
+        _equal(applicable, False, f"{context} warmup attribution applicability")
+        _equal(attribution.get("reason"), "warmup_frozen", f"{context} attribution reason")
+    elif child_oracle is None:
+        _equal(update_reason, "budget_after_parent", f"{context} terminal update reason")
+        _equal(applicable, False, f"{context} terminal attribution applicability")
+        _equal(attribution.get("reason"), "budget_after_parent", f"{context} attribution reason")
+    else:
+        _equal(applicable, True, f"{context} attribution applicability")
+        _equal(attribution.get("reason"), "deterministic_mapping", f"{context} attribution reason")
+
+    if not applicable:
+        _equal(attribution.get("attribution_mode"), None, f"{context} attribution mode")
+        _equal(parent_fragments, [], f"{context} inactive parent fragments")
+        _equal(child_fragments, [], f"{context} inactive child fragments")
+        _equal(credited_fragments, [], f"{context} inactive credited fragments")
+        _equal(dict(counts), {"parent_all": 0, "child_all": 0, "shared": 0, "credited": 0}, f"{context} inactive mapping counts")
+        _equal(mapping_covered, False, f"{context} inactive mapping covered")
+        _equal(mapping_coverage, 0.0, f"{context} inactive mapping coverage")
+        return
+
+    mode = config.get("delta_attribution")
+    _equal(attribution.get("attribution_mode"), mode, f"{context} attribution mode")
+    parent_outcome = _mapping(event, "parent_oracle", context)
+    child_outcome = _mapping(event, "child_oracle", context)
+    parent_canonical = str(parent_outcome.get("canonical_smiles"))
+    child_canonical = str(child_outcome.get("canonical_smiles"))
+    expected_parent = sorted(cut_all(parent_canonical))
+    expected_child = sorted(cut_all(child_canonical))
+    _equal(parent_fragments, expected_parent, f"{context} parent cut_all fragments")
+    _equal(child_fragments, expected_child, f"{context} child cut_all fragments")
+    parent_set = set(parent_fragments)
+    child_set = set(child_fragments)
+    expected_credited = child_set - parent_set if mode == "novel_vs_parent" else child_set
+    _equal(credited_fragments, sorted(expected_credited), f"{context} credited fragments")
+    expected_counts = {
+        "parent_all": len(parent_set),
+        "child_all": len(child_set),
+        "shared": len(parent_set & child_set),
+        "credited": len(expected_credited),
+    }
+    _equal(dict(counts), expected_counts, f"{context} mapping counts")
+    _equal(mapping_covered, bool(expected_credited), f"{context} mapping covered")
+    expected_coverage = len(expected_credited) / len(child_set) if child_set else 0.0
+    if not math.isclose(mapping_coverage, expected_coverage, rel_tol=0.0, abs_tol=1e-15):
+        raise CollectionError(
+            f"{context} mapping coverage is {mapping_coverage!r}, expected {expected_coverage!r}"
+        )
+    if seen_transitions is not None:
+        transition = _transition_identity(parent_canonical, child_canonical)
+        duplicate = transition in seen_transitions
+        expected_reason = (
+            "duplicate_observation"
+            if duplicate
+            else "updated"
+            if expected_credited
+            else "no_fragments"
+        )
+        _equal(update_reason, expected_reason, f"{context} transition update reason")
+        if not duplicate:
+            seen_transitions.add(transition)
+
+
 def _event_records(
     path: Path,
     *,
@@ -1036,6 +1269,7 @@ def _event_records(
     expected_events: int,
     budget: int,
     summary_schema: int,
+    config: Mapping[str, Any],
 ) -> tuple[list[tuple[int, float]], bool, float | None]:
     charged_calls: list[int] = []
     children: list[tuple[int, float]] = []
@@ -1045,6 +1279,7 @@ def _event_records(
     charged_canonicals: set[str] = set()
     elapsed_values: list[float] = []
     timing_complete = True
+    seen_transitions: set[str] = set()
     for event_index, event in enumerate(iter_events(path)):
         observed_events += 1
         _equal(event.get("event_index"), event_index, f"event {event_index} event_index")
@@ -1094,6 +1329,14 @@ def _event_records(
         elif update_reason == "budget_after_parent":
             raise CollectionError(
                 f"event {event_index} budget_after_parent must have a null child"
+            )
+        if config.get("observation_identity") == "unique_canonical_parent_child_transition":
+            _validate_corrected_delta_event(
+                event,
+                config=config,
+                event_index=event_index,
+                update_reason=update_reason,
+                seen_transitions=seen_transitions,
             )
         _equal(event.get("oracle_calls"), cumulative_calls, f"event {event_index} oracle_calls")
         if "elapsed_seconds" in event:
@@ -1312,6 +1555,31 @@ def collect_run(
     if not isinstance(experiment_id, str) or not experiment_id:
         raise CollectionError("manifest.config.experiment_id must be a nonempty string")
     identity = (experiment_id, path_oracle, path_variant, path_seed)
+    protocol_fields_present = set(PROTOCOL_CONFIG_FIELDS) & config.keys()
+    if protocol_fields_present and protocol_fields_present != set(PROTOCOL_CONFIG_FIELDS):
+        raise CollectionError(
+            "manifest config has partial corrected-protocol metadata: "
+            f"{sorted(protocol_fields_present)}"
+        )
+    if protocol_fields_present:
+        expected_protocol = _protocol_metadata(
+            path_variant,
+            str(config.get("delta_attribution")),
+        )
+        for key, expected in expected_protocol.items():
+            _equal(config.get(key), expected, f"manifest config {key}")
+        expected_duplicate_policy = (
+            "one update per unique canonical parent-child transition"
+            if path_variant in DELTA_MECHANICS_VARIANTS
+            else "one update per unique canonical child"
+        )
+        if path_variant == "released":
+            expected_duplicate_policy = "one update per unique canonical child"
+        _equal(
+            config.get("statistical_duplicate_policy"),
+            expected_duplicate_policy,
+            "manifest config statistical_duplicate_policy",
+        )
     run_id = f"{experiment_id}:{path_oracle}:{path_variant}:seed{path_seed}"
     for actual, expected, context in (
         (manifest.get("run_id"), run_id, "manifest run_id"),
@@ -1373,6 +1641,7 @@ def collect_run(
         expected_events=event_count,
         budget=budget,
         summary_schema=summary_schema,
+        config=config,
     )
     if last_event_elapsed is not None and last_event_elapsed > checkpoint_elapsed:
         raise CollectionError("last event elapsed_seconds exceeds checkpoint elapsed_seconds")

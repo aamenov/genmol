@@ -139,6 +139,26 @@ class StatisticalPopulationTests(unittest.TestCase):
         self.assertEqual(duplicate.reason, "duplicate_observation")
         self.assertEqual(population.active_rows(), [(stats.total / stats.count, "f")])
 
+    def test_running_mean_can_credit_an_explicit_matched_fragment_set(self):
+        fragmenter = MappingFragmenter({"child": ("unmatched",)})
+        population = FragmentPopulation(
+            [], capacity=2, mode="mean", fragmenter=fragmenter
+        )
+
+        result = population.observe(
+            FragmentObservation(
+                "parent-to-child",
+                "child",
+                0.75,
+                credit_fragments=frozenset({"changed"}),
+            )
+        )
+
+        self.assertEqual(result.observed_fragments, ("changed",))
+        self.assertEqual(fragmenter.calls, [])
+        self.assertEqual(population.get_stats("changed").total, 0.75)
+        self.assertIsNone(population.get_stats("unmatched"))
+
     def test_bayesian_shrinkage_arithmetic(self):
         fragmenter = MappingFragmenter({"x": ("f",), "y": ("f",)})
         population = FragmentPopulation(
