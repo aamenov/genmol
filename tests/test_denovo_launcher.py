@@ -201,7 +201,7 @@ def _write_summary(path: Path, payload: dict[str, object]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def test_gpu_indices_are_explicit_unique_and_match_gpu_count() -> None:
+def test_gpu_request_accepts_only_a_count_capped_at_two() -> None:
     required = [
         "--checkpoint",
         "model.ckpt",
@@ -214,21 +214,19 @@ def test_gpu_indices_are_explicit_unique_and_match_gpu_count() -> None:
         "--gpu-count",
         "2",
     ]
-    with pytest.raises(SystemExit):
-        launcher._parse_args(required)
-
-    parsed = launcher._parse_args([*required, "--gpu-indices", "4", "2"])
-    assert parsed.gpu_indices == [4, 2]
+    parsed = launcher._parse_args(required)
+    assert parsed.gpu_count == 2
+    assert not hasattr(parsed, "gpu_indices")
     assert parsed.max_utilization_percent == 10
     assert parsed.min_free_memory_mib == 30_000
-    assert launcher._validate_gpu_request(2, parsed.gpu_indices) == (4, 2)
+    assert launcher._validate_gpu_count(2) == 2
 
     with pytest.raises(ValueError, match="must be 1 or 2"):
-        launcher._validate_gpu_request(3, [4, 2])
-    with pytest.raises(ValueError, match="must contain unique"):
-        launcher._validate_gpu_request(2, [4, 4])
-    with pytest.raises(ValueError, match="non-negative"):
-        launcher._validate_gpu_request(1, [-1])
+        launcher._validate_gpu_count(3)
+    with pytest.raises(ValueError, match="must be 1 or 2"):
+        launcher._validate_gpu_count(True)
+    with pytest.raises(SystemExit):
+        launcher._parse_args([*required, "--gpu-indices", "4", "2"])
 
 
 def test_sample_tier_requires_explicit_bounded_pilot() -> None:
@@ -238,6 +236,8 @@ def test_sample_tier_requires_explicit_bounded_pilot() -> None:
         launcher._validate_sample_tier(32, pilot=False)
     with pytest.raises(ValueError, match="capped at 100"):
         launcher._validate_sample_tier(101, pilot=True)
+    with pytest.raises(ValueError, match="must be an integer"):
+        launcher._validate_sample_tier(True, pilot=True)
 
 
 def test_checkpoint_may_be_shared_from_project_but_not_escape_it(
@@ -282,7 +282,7 @@ def test_source_revision_allows_only_output_and_requires_pushed_head() -> None:
             launcher._require_clean_pushed_source()
 
 
-def test_snapshot_probes_only_user_selected_physical_indices() -> None:
+def test_snapshot_enumerates_and_probes_every_physical_gpu() -> None:
     with (
         mock.patch.object(launcher, "_physical_gpu_indices", return_value=[0, 2, 4]),
         mock.patch.object(
@@ -291,24 +291,45 @@ def test_snapshot_probes_only_user_selected_physical_indices() -> None:
             side_effect=lambda index: _gpu(index=index, uuid=f"GPU-{index}"),
         ) as probe,
     ):
-        states = launcher._snapshot((4, 2))
+        states = launcher._snapshot()
 
-    assert [state.index for state in states] == [4, 2]
-    assert probe.call_args_list == [mock.call(4), mock.call(2)]
+    assert [state.index for state in states] == [0, 2, 4]
+    assert probe.call_args_list == [mock.call(0), mock.call(2), mock.call(4)]
 
 
-def test_selection_policy_schema_records_shared_gpu_semantics() -> None:
+def test_snapshot_refuses_partial_unverifiable_inventory() -> None:
+    with (
+        mock.patch.object(launcher, "_physical_gpu_indices", return_value=[0, 1]),
+        mock.patch.object(
+            launcher,
+            "_probe_gpu",
+            side_effect=[_gpu(index=0, uuid="GPU-0"), RuntimeError("query failed")],
+        ),
+        pytest.raises(RuntimeError, match="complete NVIDIA GPU inventory"),
+    ):
+        launcher._snapshot()
+
+
+def test_selection_policy_schema_records_dynamic_full_inventory_semantics() -> None:
     assert launcher._selection_policy(
-        selected_physical_indices=(4, 2),
-        max_utilization_percent=15,
+        requested_gpu_count=2,
+        max_utilization_percent=10,
         min_free_memory_mib=30_000,
     ) == {
-        "max_utilization_percent": 15,
+        "selection_method": "dynamic_idle_discovery",
+        "inventory_scope": "all_nvidia_gpus",
+        "requested_gpu_count": 2,
+        "max_utilization_percent": 10,
         "utilization_comparison": "strictly_less_than",
         "min_free_memory_mib": 30_000,
         "active_compute_processes_allowed": False,
-        "selected_physical_indices": [4, 2],
     }
+    with pytest.raises(ValueError, match="must be 1 or 2"):
+        launcher._selection_policy(
+            requested_gpu_count=True,
+            max_utilization_percent=10,
+            min_free_memory_mib=30_000,
+        )
 
 
 def test_probe_gpu_parses_csv_and_rejects_compute_processes_under_policy() -> None:
@@ -322,7 +343,7 @@ def test_probe_gpu_parses_csv_and_rejects_compute_processes_under_policy() -> No
         subprocess.CompletedProcess(
             [],
             0,
-            "1234, /other/user/python, 1500\n",
+            "GPU-test-uuid, 1234, /other/user/python, 1500\n",
             "",
         ),
     ]
@@ -351,6 +372,55 @@ def test_probe_gpu_parses_csv_and_rejects_compute_processes_under_policy() -> No
     ) == ["1 active compute process(es) detected"]
 
 
+@pytest.mark.parametrize(
+    "process_output",
+    [
+        (
+            "GPU-test-uuid, 1234, /other/user/python, 1500\n"
+            "GPU-test-uuid, 1234, /other/user/python, 1500\n"
+        ),
+        (
+            "No running processes found\n"
+            "GPU-test-uuid, 1234, /other/user/python, 1500\n"
+        ),
+        "GPU-different, 1234, /other/user/python, 1500\n",
+    ],
+)
+def test_probe_gpu_rejects_duplicate_or_ambiguous_process_telemetry(
+    process_output: str,
+) -> None:
+    responses = [
+        subprocess.CompletedProcess(
+            [],
+            0,
+            '2, GPU-test-uuid, "NVIDIA RTX A6000", 23, 49140, 2, Default\n',
+            "",
+        ),
+        subprocess.CompletedProcess([], 0, process_output, ""),
+    ]
+    with (
+        mock.patch.object(launcher, "_run_nvidia_smi", side_effect=responses),
+        pytest.raises(RuntimeError, match="ambiguous|invalid"),
+    ):
+        launcher._probe_gpu("GPU-test-uuid")
+
+
+def test_snapshot_rejects_duplicate_uuids_across_inventory() -> None:
+    with (
+        mock.patch.object(launcher, "_physical_gpu_indices", return_value=[0, 1]),
+        mock.patch.object(
+            launcher,
+            "_probe_gpu",
+            side_effect=[
+                _gpu(index=0, uuid="GPU-same"),
+                _gpu(index=1, uuid="GPU-same"),
+            ],
+        ),
+        pytest.raises(RuntimeError, match="duplicate UUIDs"),
+    ):
+        launcher._snapshot()
+
+
 def test_gpu_eligibility_enforces_free_memory_and_exclusive_utilization() -> None:
     assert launcher._eligible(
         _gpu(memory_used_mib=19_140, utilization_percent=14),
@@ -372,7 +442,9 @@ def test_gpu_eligibility_enforces_free_memory_and_exclusive_utilization() -> Non
 def test_final_probe_rechecks_policy_uuid_and_active_processes() -> None:
     candidate = _gpu()
     reached_threshold = _gpu(utilization_percent=15)
-    with mock.patch.object(launcher, "_probe_gpu", return_value=reached_threshold):
+    with mock.patch.object(
+        launcher, "_probe_gpu", return_value=reached_threshold
+    ) as probe:
         selected, reasons = launcher._recheck_gpu_for_launch(
             candidate,
             max_utilization_percent=15,
@@ -380,6 +452,7 @@ def test_final_probe_rechecks_policy_uuid_and_active_processes() -> None:
         )
     assert selected is None
     assert any("not strictly below" in reason for reason in reasons)
+    probe.assert_called_once_with(candidate.uuid)
 
     shared_but_below_threshold = _gpu(
         processes=(
@@ -680,6 +753,7 @@ def test_main_skips_matching_run_without_probing_gpus(
     monkeypatch.setattr(launcher, "REPOSITORY_ROOT", tmp_path)
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.delenv("TMUX", raising=False)
     monkeypatch.setattr(
         launcher,
         "_require_clean_pushed_source",
@@ -711,14 +785,65 @@ def test_main_skips_matching_run_without_probing_gpus(
             output_root.name,
             "--gpu-count",
             "1",
-            "--gpu-indices",
-            "2",
             "--log-root",
             "logs",
         ]
     )
 
     assert "already have matching, integrity-checked artifacts" in capsys.readouterr().out
+
+
+def test_main_requires_tmux_only_for_real_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    expected = _expected(tmp_path)
+    monkeypatch.setattr(launcher, "REPOSITORY_ROOT", tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.setattr(
+        launcher,
+        "_require_clean_pushed_source",
+        lambda: {"head": "a" * 40, "upstream": "a" * 40},
+    )
+    monkeypatch.setattr(
+        launcher,
+        "_build_expected_run_identity",
+        lambda checkpoint, config, num_samples: expected,
+    )
+    monkeypatch.setattr(launcher, "_snapshot", lambda: [_gpu()])
+    common = [
+        "--checkpoint",
+        expected.checkpoint_path.name,
+        "--config",
+        expected.config_path.name,
+        "--num-samples",
+        str(expected.num_samples),
+        "--pilot",
+        "--seeds",
+        "4",
+        "--gpu-count",
+        "1",
+        "--log-root",
+        "logs",
+    ]
+
+    launcher.main([*common, "--output-root", "dry-runs", "--dry-run"])
+    assert "DRY RUN" in capsys.readouterr().out
+    assert not (tmp_path / "dry-runs").exists()
+    assert not (tmp_path / "logs").exists()
+
+    monkeypatch.setattr(
+        launcher,
+        "_snapshot",
+        lambda: pytest.fail("tmux guard must run before a real GPU probe"),
+    )
+    with pytest.raises(RuntimeError, match="must run inside tmux"):
+        launcher.main([*common, "--output-root", "real-runs"])
+    assert not (tmp_path / "real-runs").exists()
+    assert not (tmp_path / "logs").exists()
 
 
 def test_main_rejects_partial_output_before_probing_gpus(
@@ -765,8 +890,6 @@ def test_main_rejects_partial_output_before_probing_gpus(
                 output_root.name,
                 "--gpu-count",
                 "1",
-                "--gpu-indices",
-                "2",
                 "--log-root",
                 "logs",
             ]
@@ -818,8 +941,6 @@ def test_main_rejects_mismatched_completion_before_probing_gpus(
                 output_root.name,
                 "--gpu-count",
                 "1",
-                "--gpu-indices",
-                "2",
                 "--log-root",
                 "logs",
             ]

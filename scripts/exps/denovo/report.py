@@ -234,6 +234,61 @@ def _finite_number(value: Any, context: str, *, allow_none: bool = False) -> flo
     return number
 
 
+def _utc_datetime(value: Any, context: str) -> datetime:
+    """Parse an explicit UTC timestamp used in launch-safety provenance."""
+
+    if not isinstance(value, str) or not value:
+        raise ReportValidationError(f"{context} must be a non-empty UTC timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ReportValidationError(f"{context} must be an ISO-8601 timestamp") from error
+    if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
+        raise ReportValidationError(f"{context} must include an explicit UTC offset")
+    return parsed
+
+
+def _validate_compute_processes(value: Any, context: str) -> list[dict[str, Any]]:
+    """Validate an unambiguous per-GPU compute-process snapshot."""
+
+    if not isinstance(value, list):
+        raise ReportValidationError(f"{context} must be a list")
+    validated = []
+    seen_pids: set[int] = set()
+    for index, process_value in enumerate(value):
+        process_context = f"{context}[{index}]"
+        process = _mapping(process_value, process_context)
+        if set(process) != {"pid", "process_name", "used_memory_mib"}:
+            raise ReportValidationError(
+                f"{process_context} must contain pid, process_name, and used_memory_mib"
+            )
+        pid = _integer(process.get("pid"), f"{process_context}.pid")
+        process_name = process.get("process_name")
+        process_memory = _integer(
+            process.get("used_memory_mib"), f"{process_context}.used_memory_mib"
+        )
+        if (
+            pid <= 0
+            or pid in seen_pids
+            or not isinstance(process_name, str)
+            or not process_name.strip()
+        ):
+            raise ReportValidationError(
+                f"{process_context} has invalid or duplicate process identity"
+            )
+        if process_memory < 0:
+            raise ReportValidationError(f"{process_context} has negative GPU memory")
+        seen_pids.add(pid)
+        validated.append(
+            {
+                "pid": pid,
+                "process_name": process_name,
+                "used_memory_mib": process_memory,
+            }
+        )
+    return validated
+
+
 def _sha256_value(value: Any, context: str) -> str:
     if not isinstance(value, str) or not HEX_SHA256.fullmatch(value):
         raise ReportValidationError(f"{context} must be a lowercase SHA-256 digest")
@@ -684,6 +739,69 @@ def _validate_cuda_provenance(
     snapshot = _mapping(snapshot_value, f"{context} launch snapshot")
     if snapshot.get("event") != "launch":
         raise ReportValidationError(f"{context} launch snapshot has the wrong event")
+    selection_timestamp = _utc_datetime(
+        snapshot.get("timestamp_utc"), f"{context} launch snapshot timestamp_utc"
+    )
+    selection_schema_version = snapshot.get("gpu_selection_schema_version")
+    inventory_snapshot_completed_at_utc = None
+    final_uuid_probe_completed_at_utc = None
+    if selection_schema_version is None:
+        physical_gpu_field = "physical_gpu"
+        selected_gpu_telemetry_stage = "legacy_final_launch_probe"
+    elif (
+        _integer(
+            selection_schema_version,
+            f"{context} launch snapshot gpu_selection_schema_version",
+        )
+        == 2
+    ):
+        expected_snapshot_fields = {
+            "event",
+            "gpu_selection_schema_version",
+            "timestamp_utc",
+            "inventory_snapshot_completed_at_utc",
+            "final_uuid_probe_completed_at_utc",
+            "source_revision",
+            "gpu_inventory_at_selection",
+            "running_physical_indices_at_selection",
+            "physical_gpu_at_final_uuid_probe",
+            "policy",
+            "command",
+        }
+        if set(snapshot) != expected_snapshot_fields:
+            raise ReportValidationError(
+                f"{context} schema-v2 launch snapshot fields must be exactly "
+                f"{sorted(expected_snapshot_fields)}"
+            )
+        physical_gpu_field = "physical_gpu_at_final_uuid_probe"
+        selected_gpu_telemetry_stage = "final_exact_uuid_probe"
+        inventory_snapshot_completed_at_utc = snapshot.get(
+            "inventory_snapshot_completed_at_utc"
+        )
+        final_uuid_probe_completed_at_utc = snapshot.get(
+            "final_uuid_probe_completed_at_utc"
+        )
+        inventory_timestamp = _utc_datetime(
+            inventory_snapshot_completed_at_utc,
+            f"{context} launch snapshot inventory_snapshot_completed_at_utc",
+        )
+        final_probe_timestamp = _utc_datetime(
+            final_uuid_probe_completed_at_utc,
+            f"{context} launch snapshot final_uuid_probe_completed_at_utc",
+        )
+        if final_probe_timestamp != selection_timestamp:
+            raise ReportValidationError(
+                f"{context} schema-v2 launch and final-probe timestamps disagree"
+            )
+        if final_probe_timestamp < inventory_timestamp:
+            raise ReportValidationError(
+                f"{context} final UUID probe predates the inventory snapshot"
+            )
+    else:
+        raise ReportValidationError(
+            f"{context} has unsupported gpu_selection_schema_version "
+            f"{selection_schema_version!r}"
+        )
     source_revision = _mapping(
         snapshot.get("source_revision"), f"{context} launch snapshot source_revision"
     )
@@ -699,43 +817,33 @@ def _validate_cuda_provenance(
             f"{context} benchmark source was not the recorded pushed commit"
         )
     physical_gpu = _mapping(
-        snapshot.get("physical_gpu"), f"{context} launch snapshot physical_gpu"
+        snapshot.get(physical_gpu_field),
+        f"{context} launch snapshot {physical_gpu_field}",
     )
+    expected_physical_gpu_fields = {
+        "index",
+        "uuid",
+        "name",
+        "memory_used_mib",
+        "memory_total_mib",
+        "utilization_percent",
+        "compute_mode",
+        "compute_processes",
+    }
+    if set(physical_gpu) != expected_physical_gpu_fields:
+        raise ReportValidationError(
+            f"{context} {physical_gpu_field} must contain exact GPU telemetry"
+        )
     if _integer(physical_gpu.get("index"), f"{context} physical_gpu.index") != physical_index:
         raise ReportValidationError(f"{context} physical GPU indices disagree")
     if physical_gpu.get("uuid") != visible_uuid:
         raise ReportValidationError(f"{context} physical GPU UUIDs disagree")
     if physical_gpu.get("name") != device_name:
         raise ReportValidationError(f"{context} physical and logical GPU names disagree")
-    processes = physical_gpu.get("compute_processes")
-    if not isinstance(processes, list):
-        raise ReportValidationError(
-            f"{context} physical_gpu.compute_processes must be a list"
-        )
-    validated_processes = []
-    for index, process_value in enumerate(processes):
-        process_context = f"{context} physical_gpu.compute_processes[{index}]"
-        process = _mapping(process_value, process_context)
-        if set(process) != {"pid", "process_name", "used_memory_mib"}:
-            raise ReportValidationError(
-                f"{process_context} must contain pid, process_name, and used_memory_mib"
-            )
-        pid = _integer(process.get("pid"), f"{process_context}.pid")
-        process_name = process.get("process_name")
-        process_memory = _integer(
-            process.get("used_memory_mib"), f"{process_context}.used_memory_mib"
-        )
-        if pid <= 0 or not isinstance(process_name, str) or not process_name.strip():
-            raise ReportValidationError(f"{process_context} has invalid process identity")
-        if process_memory < 0:
-            raise ReportValidationError(f"{process_context} has negative GPU memory")
-        validated_processes.append(
-            {
-                "pid": pid,
-                "process_name": process_name,
-                "used_memory_mib": process_memory,
-            }
-        )
+    validated_processes = _validate_compute_processes(
+        physical_gpu.get("compute_processes"),
+        f"{context} {physical_gpu_field}.compute_processes",
+    )
     memory_used = _integer(
         physical_gpu.get("memory_used_mib"), f"{context} physical_gpu.memory_used_mib"
     )
@@ -755,21 +863,190 @@ def _validate_cuda_provenance(
         raise ReportValidationError(f"{context} contains impossible GPU utilization data")
     memory_free = memory_total - memory_used
     compute_mode = physical_gpu.get("compute_mode")
-    if not isinstance(compute_mode, str) or compute_mode.lower() == "prohibited":
+    if (
+        not isinstance(compute_mode, str)
+        or not compute_mode.strip()
+        or compute_mode.lower() == "prohibited"
+    ):
         raise ReportValidationError(f"{context} selected a prohibited compute-mode GPU")
 
     policy = _mapping(snapshot.get("policy"), f"{context} launch snapshot policy")
-    expected_policy_fields = {
+    common_policy_fields = {
         "max_utilization_percent",
         "utilization_comparison",
         "min_free_memory_mib",
         "active_compute_processes_allowed",
+    }
+    legacy_policy_fields = {
+        *common_policy_fields,
         "selected_physical_indices",
     }
-    if set(policy) != expected_policy_fields:
+    dynamic_policy_fields = {
+        *common_policy_fields,
+        "selection_method",
+        "inventory_scope",
+        "requested_gpu_count",
+    }
+    policy_fields = set(policy)
+    selected_inventory_item = None
+    if policy_fields == legacy_policy_fields:
+        if selection_schema_version is not None:
+            raise ReportValidationError(
+                f"{context} schema-v2 snapshot cannot use the legacy explicit policy"
+            )
+        selection_method = "explicit_physical_indices"
+        inventory_scope = "user_selected_physical_indices"
+        selected_indices = policy.get("selected_physical_indices")
+        if (
+            not isinstance(selected_indices, list)
+            or not selected_indices
+            or any(
+                isinstance(index, bool) or not isinstance(index, int) or index < 0
+                for index in selected_indices
+            )
+            or len(selected_indices) != len(set(selected_indices))
+            or len(selected_indices) > 2
+        ):
+            raise ReportValidationError(
+                f"{context} policy.selected_physical_indices must be unique physical IDs"
+            )
+        if physical_index not in selected_indices:
+            raise ReportValidationError(
+                f"{context} selected physical GPU was not explicitly chosen by the user"
+            )
+        requested_gpu_count = len(selected_indices)
+    elif policy_fields == dynamic_policy_fields:
+        selection_method = policy.get("selection_method")
+        inventory_scope = policy.get("inventory_scope")
+        if selection_method != "dynamic_idle_discovery":
+            raise ReportValidationError(
+                f"{context} dynamic launch policy has an invalid selection method"
+            )
+        if inventory_scope != "all_nvidia_gpus":
+            raise ReportValidationError(
+                f"{context} dynamic launch policy must inspect all NVIDIA GPUs"
+            )
+        if selection_schema_version is None:
+            selected_gpu_telemetry_stage = "legacy_dynamic_final_uuid_probe"
+        requested_gpu_count = _integer(
+            policy.get("requested_gpu_count"),
+            f"{context} policy.requested_gpu_count",
+        )
+        if requested_gpu_count not in (1, 2):
+            raise ReportValidationError(
+                f"{context} policy.requested_gpu_count must be 1 or 2"
+            )
+        selected_indices = None
+        inventory_value = snapshot.get("gpu_inventory_at_selection")
+        if not isinstance(inventory_value, list) or not inventory_value:
+            raise ReportValidationError(
+                f"{context} dynamic launch snapshot must record the full GPU inventory"
+            )
+        inventory_identities = []
+        validated_inventory = []
+        expected_inventory_fields = {
+            "index",
+            "uuid",
+            "name",
+            "memory_used_mib",
+            "memory_total_mib",
+            "utilization_percent",
+            "compute_mode",
+            "compute_processes",
+        }
+        for inventory_index, inventory_item in enumerate(inventory_value):
+            item_context = (
+                f"{context} gpu_inventory_at_selection[{inventory_index}]"
+            )
+            item = _mapping(inventory_item, item_context)
+            if set(item) != expected_inventory_fields:
+                raise ReportValidationError(
+                    f"{item_context} must contain exact GPU telemetry and processes"
+                )
+            item_index = _integer(item.get("index"), f"{item_context}.index")
+            item_uuid = item.get("uuid")
+            item_name = item.get("name")
+            item_memory_used = _integer(
+                item.get("memory_used_mib"), f"{item_context}.memory_used_mib"
+            )
+            item_memory_total = _integer(
+                item.get("memory_total_mib"), f"{item_context}.memory_total_mib"
+            )
+            item_utilization = _integer(
+                item.get("utilization_percent"),
+                f"{item_context}.utilization_percent",
+            )
+            item_compute_mode = item.get("compute_mode")
+            item_processes = item.get("compute_processes")
+            if (
+                item_index < 0
+                or not isinstance(item_uuid, str)
+                or not item_uuid.startswith("GPU-")
+                or not isinstance(item_name, str)
+                or not item_name
+                or item_memory_used < 0
+                or item_memory_total <= 0
+                or item_memory_used > item_memory_total
+                or not 0 <= item_utilization <= 100
+                or not isinstance(item_compute_mode, str)
+                or not item_compute_mode.strip()
+                or not isinstance(item_processes, list)
+            ):
+                raise ReportValidationError(
+                    f"{item_context} contains invalid GPU inventory telemetry"
+                )
+            _validate_compute_processes(
+                item_processes, f"{item_context}.compute_processes"
+            )
+            identity = (item_index, item_uuid)
+            inventory_identities.append(identity)
+            validated_inventory.append(dict(item))
+        if (
+            len({index for index, _ in inventory_identities})
+            != len(inventory_identities)
+            or len({uuid for _, uuid in inventory_identities})
+            != len(inventory_identities)
+        ):
+            raise ReportValidationError(
+                f"{context} dynamic GPU inventory contains duplicate identities"
+            )
+        if [index for index, _ in inventory_identities] != sorted(
+            index for index, _ in inventory_identities
+        ):
+            raise ReportValidationError(
+                f"{context} dynamic GPU inventory must be ordered by physical index"
+            )
+        if (physical_index, visible_uuid) not in inventory_identities:
+            raise ReportValidationError(
+                f"{context} dynamically selected GPU is absent from the full inventory"
+            )
+        selected_inventory_item = next(
+            item
+            for item in validated_inventory
+            if item["index"] == physical_index and item["uuid"] == visible_uuid
+        )
+        running_indices = snapshot.get("running_physical_indices_at_selection")
+        if (
+            not isinstance(running_indices, list)
+            or any(
+                isinstance(index, bool) or not isinstance(index, int) or index < 0
+                for index in running_indices
+            )
+            or len(running_indices) != len(set(running_indices))
+            or any(
+                index not in {item_index for item_index, _ in inventory_identities}
+                for index in running_indices
+            )
+            or physical_index in running_indices
+        ):
+            raise ReportValidationError(
+                f"{context} dynamic launch snapshot has invalid running GPU indices"
+            )
+    else:
         raise ReportValidationError(
-            f"{context} launch policy must contain exactly "
-            f"{sorted(expected_policy_fields)}"
+            f"{context} launch policy fields must match either the legacy explicit "
+            f"schema {sorted(legacy_policy_fields)} or dynamic schema "
+            f"{sorted(dynamic_policy_fields)}"
         )
     max_utilization = _integer(
         policy.get("max_utilization_percent"),
@@ -789,27 +1066,27 @@ def _validate_cuda_provenance(
         raise ReportValidationError(
             f"{context} launch policy must forbid active compute processes"
         )
+    if selected_inventory_item is not None:
+        initial_processes = _validate_compute_processes(
+            selected_inventory_item["compute_processes"],
+            f"{context} selected inventory GPU compute_processes",
+        )
+        initial_free_memory = (
+            selected_inventory_item["memory_total_mib"]
+            - selected_inventory_item["memory_used_mib"]
+        )
+        if (
+            initial_processes
+            or selected_inventory_item["utilization_percent"] >= max_utilization
+            or initial_free_memory < min_free_memory
+            or selected_inventory_item["compute_mode"].lower() == "prohibited"
+        ):
+            raise ReportValidationError(
+                f"{context} dynamically selected GPU was not idle in the full inventory"
+            )
     if validated_processes:
         raise ReportValidationError(
             f"{context} selected a GPU with active compute processes"
-        )
-    selected_indices = policy.get("selected_physical_indices")
-    if (
-        not isinstance(selected_indices, list)
-        or not selected_indices
-        or any(
-            isinstance(index, bool) or not isinstance(index, int) or index < 0
-            for index in selected_indices
-        )
-        or len(selected_indices) != len(set(selected_indices))
-        or len(selected_indices) > 2
-    ):
-        raise ReportValidationError(
-            f"{context} policy.selected_physical_indices must be unique physical IDs"
-        )
-    if physical_index not in selected_indices:
-        raise ReportValidationError(
-            f"{context} selected physical GPU was not explicitly chosen by the user"
         )
     if utilization >= max_utilization:
         raise ReportValidationError(
@@ -857,17 +1134,40 @@ def _validate_cuda_provenance(
         "uuid": visible_uuid,
         "name": device_name,
         "selection_timestamp_utc": snapshot.get("timestamp_utc"),
+        "gpu_selection_schema_version": selection_schema_version,
+        "selected_gpu_telemetry_stage": selected_gpu_telemetry_stage,
+        "inventory_snapshot_completed_at_utc": inventory_snapshot_completed_at_utc,
+        "final_uuid_probe_completed_at_utc": final_uuid_probe_completed_at_utc,
         "memory_used_mib_at_selection": memory_used,
         "memory_total_mib_at_selection": memory_total,
         "memory_free_mib_at_selection": memory_free,
         "utilization_percent_at_selection": utilization,
         "compute_process_count_at_selection": len(validated_processes),
         "compute_processes_at_selection": validated_processes,
-        "user_selected_physical_indices": list(selected_indices),
+        "selection_method": selection_method,
+        "inventory_scope": inventory_scope,
+        "user_requested_gpu_count": requested_gpu_count,
+        "user_selected_physical_indices": (
+            None if selected_indices is None else list(selected_indices)
+        ),
+        "gpu_inventory_at_selection": (
+            validated_inventory
+            if selection_method == "dynamic_idle_discovery"
+            else None
+        ),
+        "running_physical_indices_at_selection": (
+            list(running_indices)
+            if selection_method == "dynamic_idle_discovery"
+            else None
+        ),
         "policy": dict(policy),
         "source_revision": dict(source_revision),
         "visibility": (
-            "one user-selected physical GPU UUID mapped to logical cuda:0; "
+            "one dynamically selected idle GPU UUID from the full NVIDIA inventory "
+            "mapped to logical cuda:0; no active compute process was present at the "
+            "final UUID probe"
+            if selection_method == "dynamic_idle_discovery"
+            else "one user-selected physical GPU UUID mapped to logical cuda:0; "
             "no active compute process was present at the final launch probe"
         ),
     }
@@ -1568,7 +1868,7 @@ def collect_report(runs_dir: Path) -> dict[str, Any]:
         "comparability": (
             "Descriptive only: the local timer matches the released de_novo_generation "
             "boundary (model/tokenizer plus SAFE repair and largest-component selection), "
-            "but local inference uses a user-selected idle RTX A6000 while the "
+            "but local inference uses a recorded idle RTX A6000 while the "
             "paper used an A100. Point-in-time selection below the recorded exclusive "
             "utilization threshold cannot guarantee identical timing conditions, and "
             "the software environments are not identical."
@@ -2690,7 +2990,7 @@ def render_pdf(payload: Mapping[str, Any], pdf_path: Path) -> None:
             Spacer(1, 4 * mm),
             callout(
                 "HARDWARE TIMING CAVEAT. Local generation time is measured on "
-                "user-selected, idle RTX A6000 inference devices, using the released "
+                "recorded idle RTX A6000 inference devices, using the released "
                 "de_novo_generation timer boundary (model/tokenizer + SAFE repair + "
                 "largest component). Each launch snapshot satisfied an exclusive "
                 "utilization threshold of at most 10%, at least 30,000 MiB free memory, "
@@ -2737,9 +3037,9 @@ def render_pdf(payload: Mapping[str, Any], pdf_path: Path) -> None:
     selection_rows = [
         [
             "Seed",
-            "User-selected physical ID",
-            "Point-in-time load / free memory",
-            "Active compute processes at selection",
+            "Physical GPU selection",
+            "Load / free memory at final launch probe",
+            "Active compute processes at final launch probe",
         ]
     ]
     for seed_run in payload["seed_runs"]:
@@ -2753,13 +3053,20 @@ def render_pdf(payload: Mapping[str, Any], pdf_path: Path) -> None:
                 f"({process['used_memory_mib']} MiB)"
                 for process in processes
             )
-        selected_ids = ", ".join(
-            str(index) for index in launch["user_selected_physical_indices"]
-        )
+        if launch["selection_method"] == "dynamic_idle_discovery":
+            selection_text = (
+                f"{launch['physical_index']} (dynamic; full inventory; "
+                f"requested {launch['user_requested_gpu_count']})"
+            )
+        else:
+            selected_ids = ", ".join(
+                str(index) for index in launch["user_selected_physical_indices"]
+            )
+            selection_text = f"{launch['physical_index']} (allowed: {selected_ids})"
         selection_rows.append(
             [
                 seed_run["seed"],
-                f"{launch['physical_index']} (allowed: {selected_ids})",
+                selection_text,
                 f"{launch['utilization_percent_at_selection']}% "
                 f"(< {policy['max_utilization_percent']}%); "
                 f"{launch['memory_free_mib_at_selection']:,} MiB free "
@@ -2770,7 +3077,7 @@ def render_pdf(payload: Mapping[str, Any], pdf_path: Path) -> None:
     story.extend(
         [
             table(artifact_rows, [14 * mm, 61 * mm, 61 * mm, 38 * mm]),
-            Paragraph("Idle-GPU launch snapshots", styles["h2"]),
+            Paragraph("Idle-GPU final launch probes", styles["h2"]),
             table(selection_rows, [13 * mm, 40 * mm, 56 * mm, 65 * mm]),
             Paragraph("Validation performed before aggregation", styles["h2"]),
             Paragraph(
@@ -2778,10 +3085,11 @@ def render_pdf(payload: Mapping[str, Any], pdf_path: Path) -> None:
                 "and sample-count agreement; 1,000 ordered CSV rows per seed; exact CSV "
                 "schema; raw-file SHA-256; consistent checkpoint hash/size/global step; "
                 "backend-specific sampling/generation protocol; distinct ordered raw outputs; "
-                "complete RNG seeding; user-selected physical-ID provenance and UUID to "
-                "logical cuda:0 mapping; idle-GPU snapshots satisfying the recorded "
-                "exclusive utilization and minimum-free-memory policy, with process "
-                "inventories preserved; cross-seed dependency, tokenizer, implementation, "
+                "complete RNG seeding; physical-GPU selection provenance and UUID to "
+                "logical cuda:0 mapping; recorded GPU-selection method plus final launch "
+                "probes satisfying the exclusive utilization and minimum-free-memory policy, "
+                "with process inventories preserved; cross-seed dependency, tokenizer, "
+                "implementation, "
                 "checkpoint, effective-config, and runner identity; recomputed "
                 "strict/released validity, first-occurrence uniqueness, quality gates, "
                 "repair recovery, largest-component flags, failure counts, ratios, and "
@@ -2874,7 +3182,7 @@ def validate_pdf(
         "Checkpoint and protocol provenance",
         "Softmax temperature",
         "Evaluation seeds",
-        "Idle-GPU launch snapshots",
+        "Idle-GPU final launch probes",
         "model_sampling_and_tokenizer + released_postprocessing",
         "NOT AN EXACT REPRODUCTION CLAIM",
         PAPER_PRIMARY_URL,

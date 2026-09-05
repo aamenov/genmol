@@ -84,8 +84,10 @@ Combining clean logits would not equal the UDLM paper's D-CFG rule.
    throughput, checkpoint save/load, and no NaNs.
 4. Warm-start pilots at 100, 500, then 1,000 steps. Evaluate 32 samples first,
    then 256 samples at 32/64 reverse steps. Retain a 128-step faithful control.
-5. Advance only a promising candidate to 2,000–5,000 steps. Use at most two
-   user-selected, freshly verified idle GPUs.
+5. Advance only a promising candidate to 2,000–5,000 steps. The user requests
+   a count of one or two GPUs; immediately before each job, the launcher scans
+   the full NVIDIA inventory, dynamically selects genuinely idle physical GPUs,
+   re-probes their exact UUIDs, and maps them into the isolated process.
 6. Run three 1,000-sample seeds and update the benchmark PDF only after a pilot
    clears the quality/diversity gate.
 

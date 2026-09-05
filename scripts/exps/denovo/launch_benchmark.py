@@ -1,11 +1,11 @@
-"""Launch reproducible de novo benchmark runs on explicitly selected GPUs.
+"""Launch reproducible de novo benchmark runs on dynamically selected GPUs.
 
-The controller is intended to run inside ``tmux``.  The caller supplies both
-the GPU count and the exact physical device indices.  A selected device is
-eligible when its utilization is strictly below the requested threshold, it
-has enough free memory, its compute mode is not prohibited, and it has no
-active compute process.  Every device is rechecked
-immediately before a child starts and is then mapped into the child by UUID.
+The controller is intended to run inside ``tmux``. The caller supplies only a
+GPU count of one or two. Before each child starts, the controller inventories
+every NVIDIA GPU and dynamically chooses an idle device under the configured
+utilization, memory, compute-mode, and process guards. It then re-probes that
+exact UUID and maps it into the child as logical ``cuda:0``. The controller
+never interrupts or reuses a device with an active compute process.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Mapping, Optional
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
@@ -142,15 +142,10 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         "--gpu-count",
         type=int,
         required=True,
-        help="Number of benchmark GPUs requested by the user.",
-    )
-    parser.add_argument(
-        "--gpu-indices",
-        type=int,
-        nargs="+",
-        required=True,
-        metavar="PHYSICAL_INDEX",
-        help="Exact physical GPU indices authorized by the user.",
+        help=(
+            "Maximum concurrent benchmark GPUs, selected dynamically from the "
+            "full NVIDIA inventory; must be 1 or 2."
+        ),
     )
     parser.add_argument("--poll-seconds", type=int, default=30)
     parser.add_argument("--max-utilization-percent", type=int, default=10)
@@ -160,31 +155,19 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _validate_gpu_request(
-    gpu_count: int,
-    gpu_indices: Sequence[int],
-) -> tuple[int, ...]:
-    """Validate and freeze the caller's explicit physical-device selection."""
+def _validate_gpu_count(gpu_count: int) -> int:
+    """Validate the user-selected concurrency without accepting physical IDs."""
 
-    if not 1 <= gpu_count <= 2:
+    if type(gpu_count) is not int or not 1 <= gpu_count <= 2:
         raise ValueError("gpu-count must be 1 or 2")
-    selected = tuple(gpu_indices)
-    if any(index < 0 for index in selected):
-        raise ValueError("gpu-indices must be non-negative physical device IDs")
-    unique_count = len(set(selected))
-    if unique_count != len(selected):
-        raise ValueError("gpu-indices must contain unique physical device IDs")
-    if unique_count != gpu_count:
-        raise ValueError(
-            "the unique --gpu-indices count must equal --gpu-count "
-            f"({unique_count} != {gpu_count})"
-        )
-    return selected
+    return gpu_count
 
 
 def _validate_sample_tier(num_samples: int, *, pilot: bool) -> str:
     """Prevent a pilot from being mistaken for the final benchmark."""
 
+    if type(num_samples) is not int:
+        raise ValueError("num-samples must be an integer")
     if num_samples <= 0:
         raise ValueError("num-samples must be positive")
     if pilot:
@@ -201,18 +184,21 @@ def _validate_sample_tier(num_samples: int, *, pilot: bool) -> str:
 
 def _selection_policy(
     *,
-    selected_physical_indices: Sequence[int],
+    requested_gpu_count: int,
     max_utilization_percent: int,
     min_free_memory_mib: int,
 ) -> dict[str, Any]:
     """Return the policy schema embedded in controller and child provenance."""
 
+    requested_gpu_count = _validate_gpu_count(requested_gpu_count)
     return {
+        "selection_method": "dynamic_idle_discovery",
+        "inventory_scope": "all_nvidia_gpus",
+        "requested_gpu_count": requested_gpu_count,
         "max_utilization_percent": max_utilization_percent,
         "utilization_comparison": "strictly_less_than",
         "min_free_memory_mib": min_free_memory_mib,
         "active_compute_processes_allowed": False,
-        "selected_physical_indices": list(selected_physical_indices),
     }
 
 
@@ -239,12 +225,15 @@ def _resolve_checkpoint(path: Path) -> Path:
     return resolved
 
 
-def _run_nvidia_smi(gpu_index: int, query: str) -> subprocess.CompletedProcess:
+def _run_nvidia_smi(
+    gpu_identifier: int | str,
+    query: str,
+) -> subprocess.CompletedProcess:
     return subprocess.run(
         [
             "nvidia-smi",
             "-i",
-            str(gpu_index),
+            str(gpu_identifier),
             query,
             "--format=csv,noheader,nounits",
         ],
@@ -262,26 +251,43 @@ def _physical_gpu_indices() -> list[int]:
         check=True,
     )
     indices = [int(line.strip()) for line in completed.stdout.splitlines() if line.strip()]
-    if not indices or len(indices) != len(set(indices)):
-        raise RuntimeError("nvidia-smi returned no GPUs or duplicate physical indices")
-    return indices
+    if (
+        not indices
+        or any(index < 0 for index in indices)
+        or len(indices) != len(set(indices))
+    ):
+        raise RuntimeError(
+            "nvidia-smi returned no GPUs or invalid/duplicate physical indices"
+        )
+    return sorted(indices)
 
 
-def _probe_gpu(gpu_index: int) -> GPUState:
+def _probe_gpu(gpu_identifier: int | str) -> GPUState:
+    """Probe one physical GPU by enumerated index or exact NVIDIA UUID."""
+
+    if isinstance(gpu_identifier, bool) or not isinstance(gpu_identifier, (int, str)):
+        raise TypeError("GPU identifier must be a physical index or NVIDIA UUID")
+    expected_index = gpu_identifier if isinstance(gpu_identifier, int) else None
+    expected_uuid = gpu_identifier if isinstance(gpu_identifier, str) else None
+    if expected_index is not None and expected_index < 0:
+        raise ValueError("physical GPU index must be non-negative")
+    if expected_uuid is not None and not expected_uuid.startswith("GPU-"):
+        raise ValueError(f"invalid NVIDIA GPU UUID: {expected_uuid!r}")
+    context = f"GPU {gpu_identifier}"
     status = _run_nvidia_smi(
-        gpu_index,
+        gpu_identifier,
         "--query-gpu=index,uuid,name,memory.used,memory.total,utilization.gpu,compute_mode",
     )
     if status.returncode or status.stderr.strip():
         detail = status.stderr.strip() or status.stdout.strip()
-        raise RuntimeError(f"GPU {gpu_index} status query failed: {detail}")
+        raise RuntimeError(f"{context} status query failed: {detail}")
     rows = [
         [field.strip() for field in row]
         for row in csv.reader(io.StringIO(status.stdout), skipinitialspace=True)
         if any(field.strip() for field in row)
     ]
     if len(rows) != 1 or len(rows[0]) != 7:
-        raise RuntimeError(f"GPU {gpu_index} status query returned an unexpected row")
+        raise RuntimeError(f"{context} status query returned an unexpected row")
     (
         index_text,
         uuid,
@@ -291,42 +297,95 @@ def _probe_gpu(gpu_index: int) -> GPUState:
         utilization_text,
         compute_mode,
     ) = rows[0]
-    if int(index_text) != gpu_index or not uuid.startswith("GPU-"):
-        raise RuntimeError(f"GPU {gpu_index} status query returned inconsistent identity")
-    memory_used_mib = int(memory_used_text)
-    memory_total_mib = int(memory_total_text)
-    utilization_percent = int(utilization_text)
+    try:
+        physical_index = int(index_text)
+    except ValueError as error:
+        raise RuntimeError(
+            f"{context} status query returned a non-integer physical index"
+        ) from error
+    if (
+        physical_index < 0
+        or (expected_index is not None and physical_index != expected_index)
+        or (expected_uuid is not None and uuid != expected_uuid)
+        or not uuid.startswith("GPU-")
+        or not name
+        or not compute_mode
+    ):
+        raise RuntimeError(f"{context} status query returned inconsistent identity")
+    try:
+        memory_used_mib = int(memory_used_text)
+        memory_total_mib = int(memory_total_text)
+        utilization_percent = int(utilization_text)
+    except ValueError as error:
+        raise RuntimeError(
+            f"{context} status query returned non-integer telemetry"
+        ) from error
     if (
         memory_used_mib < 0
         or memory_total_mib <= 0
         or memory_used_mib > memory_total_mib
         or not 0 <= utilization_percent <= 100
     ):
-        raise RuntimeError(f"GPU {gpu_index} status query returned invalid telemetry")
+        raise RuntimeError(f"{context} status query returned invalid telemetry")
 
     processes = _run_nvidia_smi(
-        gpu_index,
-        "--query-compute-apps=pid,process_name,used_memory",
+        gpu_identifier,
+        "--query-compute-apps=gpu_uuid,pid,process_name,used_memory",
     )
     if processes.returncode or processes.stderr.strip():
         detail = processes.stderr.strip() or processes.stdout.strip()
-        raise RuntimeError(f"GPU {gpu_index} process query failed: {detail}")
+        raise RuntimeError(f"{context} process query failed: {detail}")
+    raw_process_rows = [
+        [field.strip() for field in row]
+        for row in csv.reader(io.StringIO(processes.stdout), skipinitialspace=True)
+        if any(field.strip() for field in row)
+    ]
+    no_process_markers = [
+        fields
+        for fields in raw_process_rows
+        if fields[0].lower().startswith("no running")
+    ]
+    if no_process_markers and (
+        len(raw_process_rows) != 1 or len(no_process_markers[0]) != 1
+    ):
+        raise RuntimeError(
+            f"{context} process query returned ambiguous no-process telemetry"
+        )
+
     process_rows = []
-    for row in csv.reader(io.StringIO(processes.stdout), skipinitialspace=True):
-        fields = [field.strip() for field in row]
-        if not any(fields) or fields[0].lower().startswith("no running"):
+    seen_process_pids: set[int] = set()
+    for fields in raw_process_rows:
+        if fields[0].lower().startswith("no running"):
             continue
-        if len(fields) != 3 or not fields[0].isdigit():
-            raise RuntimeError(f"GPU {gpu_index} process query returned an unexpected row")
+        if len(fields) != 4 or not fields[1].isdigit():
+            raise RuntimeError(f"{context} process query returned an unexpected row")
+        process_uuid = fields[0]
+        process_pid = int(fields[1])
+        process_name = fields[2]
+        try:
+            process_memory_mib = int(fields[3])
+        except ValueError as error:
+            raise RuntimeError(
+                f"{context} process query returned non-integer memory telemetry"
+            ) from error
+        if (
+            process_uuid != uuid
+            or process_pid <= 0
+            or not process_name
+            or process_memory_mib < 0
+            or process_pid in seen_process_pids
+        ):
+            raise RuntimeError(f"{context} process query returned invalid telemetry")
+        seen_process_pids.add(process_pid)
         process_rows.append(
             {
-                "pid": int(fields[0]),
-                "process_name": fields[1],
-                "used_memory_mib": int(fields[2]),
+                "pid": process_pid,
+                "process_name": process_name,
+                "used_memory_mib": process_memory_mib,
             }
         )
     return GPUState(
-        index=gpu_index,
+        index=physical_index,
         uuid=uuid,
         name=name,
         memory_used_mib=memory_used_mib,
@@ -337,23 +396,38 @@ def _probe_gpu(gpu_index: int) -> GPUState:
     )
 
 
-def _snapshot(selected_physical_indices: Sequence[int]) -> list[GPUState]:
-    """Probe only the exact physical devices authorized by the caller."""
+def _snapshot() -> list[GPUState]:
+    """Enumerate and inspect the complete NVIDIA GPU inventory."""
 
-    available_indices = set(_physical_gpu_indices())
-    missing_indices = sorted(set(selected_physical_indices) - available_indices)
-    if missing_indices:
-        raise RuntimeError(
-            "Requested physical GPU indices are unavailable: "
-            f"{missing_indices}; available indices: {sorted(available_indices)}"
-        )
+    available_indices = _physical_gpu_indices()
     states = []
-    for index in selected_physical_indices:
+    errors = {}
+    for index in available_indices:
         try:
             states.append(_probe_gpu(index))
         except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as error:
-            print(f"GPU {index} rejected because its state is unverifiable: {error}", flush=True)
+            errors[index] = str(error)
+    if errors:
+        raise RuntimeError(
+            "complete NVIDIA GPU inventory is unverifiable; refusing dynamic "
+            f"selection: {errors}"
+        )
+    if len({state.uuid for state in states}) != len(states):
+        raise RuntimeError(
+            "complete NVIDIA GPU inventory contains duplicate UUIDs; refusing "
+            "dynamic selection"
+        )
     return states
+
+
+def _require_tmux_for_execution() -> None:
+    """Refuse a disconnect-fragile controller for every non-dry GPU run."""
+
+    if not os.environ.get("TMUX"):
+        raise RuntimeError(
+            "benchmark execution must run inside tmux; dry-run and completed-artifact "
+            "validation remain available outside tmux"
+        )
 
 
 def _eligible(
@@ -837,10 +911,10 @@ def _recheck_gpu_for_launch(
     max_utilization_percent: int,
     min_free_memory_mib: int,
 ) -> tuple[Optional[GPUState], list[str]]:
-    """Probe once more and reject a changed, out-of-policy, or unknown device."""
+    """Probe the exact chosen UUID and reject changed or occupied devices."""
 
     try:
-        rechecked = _probe_gpu(candidate.index)
+        rechecked = _probe_gpu(candidate.uuid)
     except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as error:
         return None, [f"final GPU probe failed: {error}"]
     reasons = rechecked.rejection_reasons(
@@ -849,7 +923,11 @@ def _recheck_gpu_for_launch(
     )
     if rechecked.uuid != candidate.uuid:
         reasons.append(
-            f"physical index identity changed from {candidate.uuid} to {rechecked.uuid}"
+            f"UUID identity changed from {candidate.uuid} to {rechecked.uuid}"
+        )
+    if rechecked.index != candidate.index:
+        reasons.append(
+            f"physical index identity changed from {candidate.index} to {rechecked.index}"
         )
     if reasons:
         return None, reasons
@@ -907,7 +985,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         )
     source_revision = _require_clean_pushed_source()
     evaluation_tier = _validate_sample_tier(args.num_samples, pilot=args.pilot)
-    selected_gpu_indices = _validate_gpu_request(args.gpu_count, args.gpu_indices)
+    gpu_count = _validate_gpu_count(args.gpu_count)
     if args.poll_seconds <= 0:
         raise ValueError("poll-seconds must be positive")
     if args.min_free_memory_mib < 30_000:
@@ -917,7 +995,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     if len(args.seeds) != len(set(args.seeds)):
         raise ValueError("seeds must be unique")
     selection_policy = _selection_policy(
-        selected_physical_indices=selected_gpu_indices,
+        requested_gpu_count=gpu_count,
         max_utilization_percent=args.max_utilization_percent,
         min_free_memory_mib=args.min_free_memory_mib,
     )
@@ -928,8 +1006,6 @@ def main(argv: Optional[list[str]] = None) -> None:
     log_root = _resolve_in_repo(args.log_root)
     if not checkpoint.is_file() or not config.is_file():
         raise FileNotFoundError("checkpoint and config must both exist")
-    output_root.mkdir(parents=True, exist_ok=True)
-    log_root.mkdir(parents=True, exist_ok=True)
 
     expected = _build_expected_run_identity(checkpoint, config, args.num_samples)
     pending = []
@@ -956,8 +1032,7 @@ def main(argv: Optional[list[str]] = None) -> None:
                 "seeds": args.seeds,
                 "completed_seeds": completed_at_start,
                 "pending_seeds": pending,
-                "user_requested_gpu_count": args.gpu_count,
-                "user_selected_physical_indices": list(selected_gpu_indices),
+                "user_requested_gpu_count": gpu_count,
                 "selection_policy": selection_policy,
                 "source_revision": source_revision,
             },
@@ -973,9 +1048,38 @@ def main(argv: Optional[list[str]] = None) -> None:
         )
         return
     if args.dry_run:
+        states = _snapshot()
+        eligible = sorted(
+            (
+                state
+                for state in states
+                if _eligible(
+                    state,
+                    max_utilization_percent=args.max_utilization_percent,
+                    min_free_memory_mib=args.min_free_memory_mib,
+                )
+            ),
+            key=lambda state: (
+                -(state.memory_total_mib - state.memory_used_mib),
+                state.utilization_percent,
+                state.index,
+            ),
+        )
+        requested_now = min(gpu_count, len(pending))
+        if len(eligible) < requested_now:
+            raise RuntimeError(
+                f"dry-run requested {requested_now} concurrent GPU(s), but only "
+                f"{len(eligible)} are genuinely idle"
+            )
         print(
             json.dumps(
-                [state.as_dict() for state in _snapshot(selected_gpu_indices)],
+                {
+                    "event": "dry_run_gpu_inventory",
+                    "gpu_states": [state.as_dict() for state in states],
+                    "dynamically_selected_gpu_states": [
+                        state.as_dict() for state in eligible[:gpu_count]
+                    ],
+                },
                 sort_keys=True,
             )
         )
@@ -991,6 +1095,10 @@ def main(argv: Optional[list[str]] = None) -> None:
                 ),
             )
         return
+
+    _require_tmux_for_execution()
+    output_root.mkdir(parents=True, exist_ok=True)
+    log_root.mkdir(parents=True, exist_ok=True)
 
     running: dict[int, RunningJob] = {}
     failure_seen = False
@@ -1038,7 +1146,11 @@ def main(argv: Optional[list[str]] = None) -> None:
             time.sleep(args.poll_seconds)
             continue
 
-        states = _snapshot(selected_gpu_indices)
+        # Every launch opportunity starts from a fresh enumeration of the full
+        # NVIDIA inventory. When multiple slots are free, the inventory is
+        # queried again after each child launch rather than reusing stale data.
+        states = _snapshot()
+        inventory_snapshot_completed_at_utc = datetime.now(timezone.utc).isoformat()
         signature = _snapshot_signature(states)
         unchanged_polls = unchanged_polls + 1 if signature == last_signature else 0
         last_signature = signature
@@ -1067,7 +1179,7 @@ def main(argv: Optional[list[str]] = None) -> None:
                 flush=True,
             )
 
-        free_slots = args.gpu_count - len(running)
+        free_slots = gpu_count - len(running)
         candidates = sorted(
             (
                 state
@@ -1084,12 +1196,40 @@ def main(argv: Optional[list[str]] = None) -> None:
                 state.utilization_percent,
                 state.index,
             ),
-        )[: max(free_slots, 0)]
+        )[:1] if free_slots > 0 else []
 
+        launched_job = False
         for candidate in candidates:
             if not pending:
                 break
-            # The second probe is the final point-in-time guard before launch.
+            seed = pending[0]
+            output_dir = output_root / f"seed_{seed}"
+            command = _command(
+                checkpoint=checkpoint,
+                config=config,
+                num_samples=args.num_samples,
+                seed=seed,
+                output_dir=output_dir,
+            )
+            run_label = benchmark_runner.benchmark_run_label(
+                expected.checkpoint_global_step,
+                expected.checkpoint_sha256,
+                seed,
+            )
+            log_path = log_root / f"{run_label}.log"
+            # Catch artifacts created by another controller before the final GPU
+            # probe so that the exact-UUID check remains as close to launch as
+            # possible.
+            if _completed(output_root, seed, expected):
+                pending.pop(0)
+                print(
+                    f"SKIPPED seed={seed}; matching artifacts appeared while waiting",
+                    flush=True,
+                )
+                continue
+
+            # This exact-UUID query is the final substantive safety guard before
+            # the child is constructed and launched.
             rechecked, rejection_reasons = _recheck_gpu_for_launch(
                 candidate,
                 max_utilization_percent=args.max_utilization_percent,
@@ -1110,39 +1250,26 @@ def main(argv: Optional[list[str]] = None) -> None:
                     flush=True,
                 )
                 continue
-
-            seed = pending[0]
-            # Recheck the output immediately before spending GPU resources.  This
-            # also catches artifacts created by another controller after startup.
-            if _completed(output_root, seed, expected):
-                pending.pop(0)
-                print(
-                    f"SKIPPED seed={seed}; matching artifacts appeared while waiting",
-                    flush=True,
-                )
-                continue
+            final_uuid_probe_completed_at_utc = datetime.now(timezone.utc).isoformat()
 
             pending.pop(0)
-            output_dir = output_root / f"seed_{seed}"
-            command = _command(
-                checkpoint=checkpoint,
-                config=config,
-                num_samples=args.num_samples,
-                seed=seed,
-                output_dir=output_dir,
-            )
-            run_label = benchmark_runner.benchmark_run_label(
-                expected.checkpoint_global_step,
-                expected.checkpoint_sha256,
-                seed,
-            )
-            log_path = log_root / f"{run_label}.log"
             log_handle = log_path.open("a", encoding="utf-8", buffering=1)
             selection = {
                 "event": "launch",
-                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                "gpu_selection_schema_version": 2,
+                "timestamp_utc": final_uuid_probe_completed_at_utc,
+                "inventory_snapshot_completed_at_utc": (
+                    inventory_snapshot_completed_at_utc
+                ),
+                "final_uuid_probe_completed_at_utc": (
+                    final_uuid_probe_completed_at_utc
+                ),
                 "source_revision": source_revision,
-                "physical_gpu": rechecked.as_dict(),
+                "gpu_inventory_at_selection": [
+                    state.as_dict() for state in states
+                ],
+                "running_physical_indices_at_selection": sorted(running),
+                "physical_gpu_at_final_uuid_probe": rechecked.as_dict(),
                 "policy": selection_policy,
                 "command": command,
             }
@@ -1167,12 +1294,20 @@ def main(argv: Optional[list[str]] = None) -> None:
                 log_handle=log_handle,
                 log_path=log_path,
             )
+            launched_job = True
             print(
                 f"LAUNCHED seed={seed} pid={process.pid} "
                 f"physical_gpu={rechecked.index} uuid={rechecked.uuid} log={log_path}",
                 flush=True,
             )
 
+            # Do not choose another GPU from the pre-launch inventory snapshot.
+            # The next outer iteration re-enumerates all devices before the next
+            # child and provides its own exact-UUID final probe.
+            break
+
+        if launched_job and pending and len(running) < gpu_count:
+            continue
         if pending or running:
             time.sleep(args.poll_seconds)
 

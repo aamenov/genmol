@@ -799,6 +799,124 @@ class DenovoReportTests(unittest.TestCase):
             ):
                 report.collect_report(runs)
 
+    def test_dynamic_full_inventory_gpu_policy_is_accepted_and_recorded(self):
+        with self._workspace() as directory:
+            runs = Path(directory) / "runs"
+            self._three_runs(runs)
+            for seed in report.EXPECTED_SEEDS:
+                summary_path = runs / f"seed_{seed}" / "summary.json"
+                summary = json.loads(summary_path.read_text(encoding="utf-8"))
+                launch = summary["environment"]["launch_environment"]
+                snapshot = json.loads(
+                    launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"]
+                )
+                final_probe = snapshot.pop("physical_gpu")
+                snapshot["gpu_selection_schema_version"] = 2
+                snapshot["inventory_snapshot_completed_at_utc"] = (
+                    "2026-09-04T23:59:59+00:00"
+                )
+                snapshot["final_uuid_probe_completed_at_utc"] = snapshot[
+                    "timestamp_utc"
+                ]
+                snapshot["physical_gpu_at_final_uuid_probe"] = final_probe
+                snapshot["policy"] = {
+                    "selection_method": "dynamic_idle_discovery",
+                    "inventory_scope": "all_nvidia_gpus",
+                    "requested_gpu_count": 2,
+                    "max_utilization_percent": 10,
+                    "utilization_comparison": "strictly_less_than",
+                    "min_free_memory_mib": 40_000,
+                    "active_compute_processes_allowed": False,
+                }
+                snapshot["gpu_inventory_at_selection"] = [
+                    dict(final_probe)
+                ]
+                snapshot["running_physical_indices_at_selection"] = []
+                launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"] = json.dumps(
+                    snapshot
+                )
+                summary_path.write_text(json.dumps(summary), encoding="utf-8")
+
+            payload = report.collect_report(runs)
+
+            for seed_run in payload["seed_runs"]:
+                provenance = seed_run["launch_provenance"]
+                self.assertEqual(
+                    provenance["selection_method"], "dynamic_idle_discovery"
+                )
+                self.assertEqual(provenance["inventory_scope"], "all_nvidia_gpus")
+                self.assertEqual(provenance["user_requested_gpu_count"], 2)
+                self.assertIsNone(provenance["user_selected_physical_indices"])
+                self.assertEqual(provenance["gpu_selection_schema_version"], 2)
+                self.assertEqual(
+                    provenance["selected_gpu_telemetry_stage"],
+                    "final_exact_uuid_probe",
+                )
+
+    def test_duplicate_process_telemetry_is_rejected_in_final_or_inventory_snapshot(self):
+        process = {"pid": 123, "process_name": "other", "used_memory_mib": 4}
+        with self._workspace() as directory:
+            runs = Path(directory) / "runs"
+            self._three_runs(runs)
+            summary_path = runs / "seed_0" / "summary.json"
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            launch = summary["environment"]["launch_environment"]
+            snapshot = json.loads(
+                launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"]
+            )
+            snapshot["physical_gpu"]["compute_processes"] = [process, process]
+            launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"] = json.dumps(snapshot)
+            summary_path.write_text(json.dumps(summary), encoding="utf-8")
+            with self.assertRaisesRegex(
+                report.ReportValidationError,
+                "duplicate process identity",
+            ):
+                report.collect_report(runs)
+
+        with self._workspace() as directory:
+            runs = Path(directory) / "runs"
+            self._three_runs(runs)
+            summary_path = runs / "seed_0" / "summary.json"
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            launch = summary["environment"]["launch_environment"]
+            snapshot = json.loads(
+                launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"]
+            )
+            final_probe = snapshot.pop("physical_gpu")
+            snapshot.update(
+                {
+                    "gpu_selection_schema_version": 2,
+                    "inventory_snapshot_completed_at_utc": (
+                        "2026-09-04T23:59:59+00:00"
+                    ),
+                    "final_uuid_probe_completed_at_utc": snapshot["timestamp_utc"],
+                    "physical_gpu_at_final_uuid_probe": final_probe,
+                    "gpu_inventory_at_selection": [
+                        {
+                            **final_probe,
+                            "compute_processes": [process, process],
+                        }
+                    ],
+                    "running_physical_indices_at_selection": [],
+                }
+            )
+            snapshot["policy"] = {
+                "selection_method": "dynamic_idle_discovery",
+                "inventory_scope": "all_nvidia_gpus",
+                "requested_gpu_count": 1,
+                "max_utilization_percent": 10,
+                "utilization_comparison": "strictly_less_than",
+                "min_free_memory_mib": 40_000,
+                "active_compute_processes_allowed": False,
+            }
+            launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"] = json.dumps(snapshot)
+            summary_path.write_text(json.dumps(summary), encoding="utf-8")
+            with self.assertRaisesRegex(
+                report.ReportValidationError,
+                "duplicate process identity",
+            ):
+                report.collect_report(runs)
+
     def test_tokenizer_fingerprint_mismatch_is_rejected(self):
         with self._workspace() as directory:
             runs = Path(directory) / "runs"

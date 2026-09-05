@@ -1,9 +1,10 @@
-"""Launch a bounded UDLM pilot on explicitly authorized idle GPUs.
+"""Launch a bounded UDLM pilot on dynamically selected idle GPUs.
 
-The launcher refuses more than two devices, active compute processes, an
-unpushed implementation commit, or an existing tmux session. It probes the
-selected physical devices immediately before launch and exposes their UUIDs as
-the child's logical CUDA devices.
+The caller chooses only the number of GPUs (one or two). Immediately before
+launch, the controller inventories every NVIDIA GPU, selects genuinely idle
+devices, re-probes those exact UUIDs, and exposes the UUIDs as the child's
+logical CUDA devices. It never interrupts or reuses a device with an active
+compute process.
 """
 
 from __future__ import annotations
@@ -19,7 +20,6 @@ import subprocess
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Sequence
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -37,6 +37,7 @@ class GPUState:
     memory_used_mib: int
     memory_total_mib: int
     utilization_percent: int
+    compute_mode: str
     compute_processes: tuple[dict[str, object], ...]
 
     @property
@@ -60,22 +61,19 @@ class GPUState:
                 f"free memory {self.free_memory_mib} MiB is below "
                 f"{min_free_memory_mib} MiB"
             )
+        if self.compute_mode.lower() == "prohibited":
+            reasons.append("compute mode is prohibited")
         if self.compute_processes:
             reasons.append(f"{len(self.compute_processes)} active compute process(es)")
         return reasons
 
 
-def validate_gpu_request(gpu_count: int, gpu_indices: Sequence[int]) -> tuple[int, ...]:
-    selected = tuple(int(index) for index in gpu_indices)
-    if gpu_count not in (1, 2):
+def validate_gpu_count(gpu_count: int) -> int:
+    """Validate the user-selected device count without accepting physical IDs."""
+
+    if type(gpu_count) is not int or gpu_count not in (1, 2):
         raise ValueError("gpu-count must be 1 or 2")
-    if len(selected) != gpu_count:
-        raise ValueError("gpu-indices count must equal gpu-count")
-    if len(set(selected)) != len(selected):
-        raise ValueError("gpu-indices must be unique")
-    if any(index < 0 for index in selected):
-        raise ValueError("gpu-indices must be non-negative physical IDs")
-    return selected
+    return gpu_count
 
 
 def exact_accumulation_steps(
@@ -84,6 +82,11 @@ def exact_accumulation_steps(
     world_size: int,
 ) -> int:
     """Return exact accumulation, refusing a silently inflated global batch."""
+    if any(
+        type(value) is not int
+        for value in (global_batch_size, micro_batch_size, world_size)
+    ):
+        raise ValueError("batch sizes and world size must be integers")
     if min(global_batch_size, micro_batch_size, world_size) <= 0:
         raise ValueError("batch sizes and world size must be positive")
     samples_per_micro_step = micro_batch_size * world_size
@@ -116,35 +119,70 @@ def _run(command: list[str]) -> subprocess.CompletedProcess:
     return subprocess.run(command, text=True, capture_output=True, check=True)
 
 
-def probe_gpus(selected_indices: Sequence[int]) -> list[GPUState]:
+def _probe_gpus(device_uuid: str | None = None) -> list[GPUState]:
+    """Query GPU telemetry and compute processes, optionally for one UUID."""
+
+    prefix = ["nvidia-smi"]
+    if device_uuid is not None:
+        if not device_uuid.startswith("GPU-"):
+            raise ValueError(f"invalid NVIDIA GPU UUID: {device_uuid!r}")
+        prefix.extend(["-i", device_uuid])
     status = _run(
         [
-            "nvidia-smi",
-            "--query-gpu=index,uuid,name,memory.used,memory.total,utilization.gpu",
+            *prefix,
+            "--query-gpu=index,uuid,name,memory.used,memory.total,utilization.gpu,compute_mode",
             "--format=csv,noheader,nounits",
         ]
     )
-    rows = {}
+    if status.stderr.strip():
+        raise RuntimeError(f"nvidia-smi GPU query returned stderr: {status.stderr.strip()}")
+    rows: dict[int, dict[str, object]] = {}
+    seen_uuids: set[str] = set()
     for row in csv.reader(io.StringIO(status.stdout), skipinitialspace=True):
         fields = [field.strip() for field in row]
-        if len(fields) != 6:
+        if not any(fields):
+            continue
+        if len(fields) != 7:
             raise RuntimeError(f"unexpected nvidia-smi GPU row: {fields}")
-        index = int(fields[0])
+        try:
+            index = int(fields[0])
+            memory_used_mib = int(fields[3])
+            memory_total_mib = int(fields[4])
+            utilization_percent = int(fields[5])
+        except ValueError as error:
+            raise RuntimeError(
+                f"nvidia-smi returned non-integer GPU telemetry: {fields}"
+            ) from error
+        uuid = fields[1]
+        if index in rows or uuid in seen_uuids:
+            raise RuntimeError("nvidia-smi returned duplicate GPU identities")
+        if (
+            index < 0
+            or not uuid.startswith("GPU-")
+            or memory_used_mib < 0
+            or memory_total_mib <= 0
+            or memory_used_mib > memory_total_mib
+            or not 0 <= utilization_percent <= 100
+            or not fields[2]
+            or not fields[6]
+        ):
+            raise RuntimeError(f"nvidia-smi returned invalid GPU telemetry: {fields}")
         rows[index] = {
-            "uuid": fields[1],
+            "uuid": uuid,
             "name": fields[2],
-            "memory_used_mib": int(fields[3]),
-            "memory_total_mib": int(fields[4]),
-            "utilization_percent": int(fields[5]),
+            "memory_used_mib": memory_used_mib,
+            "memory_total_mib": memory_total_mib,
+            "utilization_percent": utilization_percent,
+            "compute_mode": fields[6],
         }
-    missing = sorted(set(selected_indices) - set(rows))
-    if missing:
-        raise RuntimeError(f"physical GPUs not reported by nvidia-smi: {missing}")
+        seen_uuids.add(uuid)
+    if not rows:
+        raise RuntimeError("nvidia-smi returned no NVIDIA GPUs")
 
     processes_by_uuid: dict[str, list[dict[str, object]]] = {}
     processes = subprocess.run(
         [
-            "nvidia-smi",
+            *prefix,
             "--query-compute-apps=gpu_uuid,pid,process_name,used_memory",
             "--format=csv,noheader,nounits",
         ],
@@ -154,24 +192,57 @@ def probe_gpus(selected_indices: Sequence[int]) -> list[GPUState]:
     )
     # NVIDIA returns exit 0 and a human-readable "No running processes" line
     # on some driver versions; other versions return an empty table.
-    if processes.returncode != 0 and "No running" not in processes.stderr:
+    if processes.returncode != 0 or processes.stderr.strip():
         raise RuntimeError(processes.stderr.strip() or "compute process query failed")
-    for row in csv.reader(io.StringIO(processes.stdout), skipinitialspace=True):
-        fields = [field.strip() for field in row]
-        if not fields or not any(fields) or fields[0].lower().startswith("no running"):
+    raw_process_rows = [
+        [field.strip() for field in row]
+        for row in csv.reader(io.StringIO(processes.stdout), skipinitialspace=True)
+        if any(field.strip() for field in row)
+    ]
+    no_process_markers = [
+        fields
+        for fields in raw_process_rows
+        if fields[0].lower().startswith("no running")
+    ]
+    if no_process_markers and (
+        len(raw_process_rows) != 1 or len(no_process_markers[0]) != 1
+    ):
+        raise RuntimeError("nvidia-smi returned ambiguous no-process telemetry")
+    seen_processes: set[tuple[str, int]] = set()
+    for fields in raw_process_rows:
+        if fields[0].lower().startswith("no running"):
             continue
         if len(fields) != 4:
             raise RuntimeError(f"unexpected nvidia-smi process row: {fields}")
-        processes_by_uuid.setdefault(fields[0], []).append(
+        process_uuid = fields[0]
+        process_name = fields[2]
+        try:
+            process_pid = int(fields[1])
+            process_memory_mib = int(fields[3])
+        except ValueError as error:
+            raise RuntimeError(
+                f"nvidia-smi returned non-integer process telemetry: {fields}"
+            ) from error
+        process_identity = (process_uuid, process_pid)
+        if (
+            process_uuid not in seen_uuids
+            or process_pid <= 0
+            or not process_name
+            or process_memory_mib < 0
+            or process_identity in seen_processes
+        ):
+            raise RuntimeError(f"invalid nvidia-smi process row: {fields}")
+        seen_processes.add(process_identity)
+        processes_by_uuid.setdefault(process_uuid, []).append(
             {
-                "pid": int(fields[1]),
-                "process_name": fields[2],
-                "used_memory_mib": int(fields[3]),
+                "pid": process_pid,
+                "process_name": process_name,
+                "used_memory_mib": process_memory_mib,
             }
         )
 
     states = []
-    for index in selected_indices:
+    for index in sorted(rows):
         row = rows[index]
         states.append(
             GPUState(
@@ -181,10 +252,114 @@ def probe_gpus(selected_indices: Sequence[int]) -> list[GPUState]:
                 memory_used_mib=int(row["memory_used_mib"]),
                 memory_total_mib=int(row["memory_total_mib"]),
                 utilization_percent=int(row["utilization_percent"]),
+                compute_mode=str(row["compute_mode"]),
                 compute_processes=tuple(processes_by_uuid.get(str(row["uuid"]), [])),
             )
         )
+    if device_uuid is not None:
+        if len(states) != 1 or states[0].uuid != device_uuid:
+            identities = [(state.physical_index, state.uuid) for state in states]
+            raise RuntimeError(
+                f"UUID-specific probe for {device_uuid} returned {identities}"
+            )
     return states
+
+
+def probe_all_gpus() -> list[GPUState]:
+    """Enumerate and fully inspect every NVIDIA GPU on the host."""
+
+    return _probe_gpus()
+
+
+def probe_gpu_uuid(device_uuid: str) -> GPUState:
+    """Re-probe one exact UUID immediately before exposing it to a child."""
+
+    return _probe_gpus(device_uuid)[0]
+
+
+def select_idle_gpus(
+    states: list[GPUState],
+    *,
+    gpu_count: int,
+    max_utilization_percent: int,
+    min_free_memory_mib: int,
+) -> tuple[GPUState, ...]:
+    """Choose the requested number of best genuinely idle devices."""
+
+    validate_gpu_count(gpu_count)
+    eligible = sorted(
+        (
+            state
+            for state in states
+            if not state.rejection_reasons(
+                max_utilization_percent=max_utilization_percent,
+                min_free_memory_mib=min_free_memory_mib,
+            )
+        ),
+        key=lambda state: (
+            -state.free_memory_mib,
+            state.utilization_percent,
+            state.physical_index,
+        ),
+    )
+    if len(eligible) < gpu_count:
+        inventory = {
+            state.physical_index: state.rejection_reasons(
+                max_utilization_percent=max_utilization_percent,
+                min_free_memory_mib=min_free_memory_mib,
+            )
+            for state in states
+        }
+        raise RuntimeError(
+            f"requested {gpu_count} GPU(s), but only {len(eligible)} are genuinely "
+            f"idle; full inventory rejection reasons: {inventory}"
+        )
+    return tuple(eligible[:gpu_count])
+
+
+def reprobe_selected_gpus(
+    selected: tuple[GPUState, ...],
+    *,
+    max_utilization_percent: int,
+    min_free_memory_mib: int,
+) -> tuple[GPUState, ...]:
+    """Verify exact selected UUIDs one last time and refuse identity changes."""
+
+    if (
+        len({state.uuid for state in selected}) != len(selected)
+        or len({state.physical_index for state in selected}) != len(selected)
+    ):
+        raise RuntimeError("selected GPU identities must be unique before final probes")
+    rechecked_states = []
+    rejected: dict[str, list[str]] = {}
+    for initial in selected:
+        try:
+            current = probe_gpu_uuid(initial.uuid)
+        except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as error:
+            rejected[initial.uuid] = [f"final UUID probe failed: {error}"]
+            continue
+        reasons = current.rejection_reasons(
+            max_utilization_percent=max_utilization_percent,
+            min_free_memory_mib=min_free_memory_mib,
+        )
+        if current.uuid != initial.uuid:
+            reasons.append(
+                f"UUID identity changed from {initial.uuid} to {current.uuid}"
+            )
+        if current.physical_index != initial.physical_index:
+            reasons.append(
+                "physical index identity changed from "
+                f"{initial.physical_index} to {current.physical_index}"
+            )
+        if reasons:
+            rejected[initial.uuid] = reasons
+        else:
+            rechecked_states.append(current)
+    if rejected:
+        raise RuntimeError(f"selected GPU UUID(s) failed final idle probe: {rejected}")
+    if len(rechecked_states) != len(selected):
+        raise RuntimeError("final UUID probes did not return every selected GPU")
+    return tuple(rechecked_states)
 
 
 def _python_executable() -> Path:
@@ -263,6 +438,7 @@ def build_training_command(
     checkpoint: Path | None,
     exclude_special_tokens: bool,
 ) -> list[str]:
+    gpu_count = validate_gpu_count(gpu_count)
     command = [
         str(_python_executable()),
         "-u",
@@ -286,11 +462,18 @@ def build_training_command(
     return command
 
 
-def _parse_args():
+def _parse_args(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-name", required=True)
-    parser.add_argument("--gpu-count", type=int, required=True)
-    parser.add_argument("--gpu-indices", type=int, nargs="+", required=True)
+    parser.add_argument(
+        "--gpu-count",
+        type=int,
+        required=True,
+        help=(
+            "Number of GPUs to select dynamically from the full NVIDIA inventory; "
+            "must be 1 or 2."
+        ),
+    )
     parser.add_argument("--max-steps", type=int, default=10)
     parser.add_argument("--global-batch-size", type=int, default=16)
     parser.add_argument("--micro-batch-size", type=int, default=2)
@@ -316,14 +499,14 @@ def _parse_args():
         help="May make the shared-server guard stricter, never below 30000 MiB.",
     )
     parser.add_argument("--dry-run", action="store_true")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def main():
     args = _parse_args()
     if not RUN_NAME_PATTERN.fullmatch(args.run_name):
         raise ValueError("run-name must contain only letters, digits, '.', '_', or '-'")
-    selected_indices = validate_gpu_request(args.gpu_count, args.gpu_indices)
+    gpu_count = validate_gpu_count(args.gpu_count)
     if not 1 <= args.max_steps <= 1_000:
         raise ValueError("pilot max-steps must be in [1, 1000]")
     if min(args.global_batch_size, args.micro_batch_size) <= 0:
@@ -331,7 +514,7 @@ def main():
     accumulation_steps = exact_accumulation_steps(
         args.global_batch_size,
         args.micro_batch_size,
-        args.gpu_count,
+        gpu_count,
     )
     if args.num_workers < 0:
         raise ValueError("num-workers cannot be negative")
@@ -354,7 +537,7 @@ def main():
             f"refusing to overwrite an existing pilot: {run_dir} or {log_path}"
         )
     command = build_training_command(
-        gpu_count=args.gpu_count,
+        gpu_count=gpu_count,
         run_dir=run_dir,
         max_steps=args.max_steps,
         global_batch_size=args.global_batch_size,
@@ -376,37 +559,63 @@ def main():
 
     checkpoint_sha256 = None if checkpoint is None else sha256_file(checkpoint)
 
-    # This is deliberately the final substantive check before recording and
-    # launching. A cooperative nvidia-smi check cannot provide an atomic lease.
-    gpu_states = probe_gpus(selected_indices)
-    rejected = {
-        state.physical_index: state.rejection_reasons(
-            max_utilization_percent=args.max_utilization_percent,
-            min_free_memory_mib=args.min_free_memory_mib,
-        )
-        for state in gpu_states
-    }
-    rejected = {index: reasons for index, reasons in rejected.items() if reasons}
-    if rejected:
-        raise RuntimeError(f"selected GPU(s) are not genuinely idle: {rejected}")
+    # Inventory every NVIDIA GPU only after all potentially expensive source and
+    # checkpoint checks. Select from that point-in-time snapshot, then address
+    # each chosen GPU by UUID for the final pre-launch safety probe. A cooperative
+    # nvidia-smi check cannot provide an atomic lease, so any failed re-probe
+    # aborts instead of using or interrupting a newly occupied device.
+    gpu_inventory = probe_all_gpus()
+    inventory_snapshot_completed_at_utc = datetime.now(timezone.utc).isoformat()
+    initially_selected = select_idle_gpus(
+        gpu_inventory,
+        gpu_count=gpu_count,
+        max_utilization_percent=args.max_utilization_percent,
+        min_free_memory_mib=args.min_free_memory_mib,
+    )
+    gpu_states = reprobe_selected_gpus(
+        initially_selected,
+        max_utilization_percent=args.max_utilization_percent,
+        min_free_memory_mib=args.min_free_memory_mib,
+    )
+    final_uuid_probes_completed_at_utc = datetime.now(timezone.utc).isoformat()
 
     visible_uuids = ",".join(state.uuid for state in gpu_states)
     environment_command = [
         "env",
+        "CUDA_DEVICE_ORDER=PCI_BUS_ID",
         f"CUDA_VISIBLE_DEVICES={visible_uuids}",
-        f"PYTHONPATH={REPOSITORY_ROOT}:{REPOSITORY_ROOT / 'src'}",
+        f"PYTHONPATH={REPOSITORY_ROOT / 'src'}:{REPOSITORY_ROOT}",
         *command,
     ]
     manifest = {
         "created_at": datetime.now(timezone.utc).isoformat(),
         "purpose": "bounded UDLM training pilot",
+        "gpu_selection_schema_version": 2,
         "git_sha": git_sha,
         "run_name": args.run_name,
         "tmux_session": session_name,
-        "physical_gpu_indices": list(selected_indices),
-        "logical_cuda_devices": list(range(args.gpu_count)),
+        "user_requested_gpu_count": gpu_count,
+        "gpu_selection_method": "dynamic_idle_discovery",
+        "gpu_inventory_scope": "all_nvidia_gpus",
+        "inventory_snapshot_completed_at_utc": inventory_snapshot_completed_at_utc,
+        "gpu_inventory_at_selection": [
+            asdict(state) for state in gpu_inventory
+        ],
+        "initially_selected_gpu_states": [
+            asdict(state) for state in initially_selected
+        ],
+        "physical_gpu_indices": [state.physical_index for state in gpu_states],
+        "logical_cuda_devices": list(range(gpu_count)),
         "cuda_visible_device_uuids": [state.uuid for state in gpu_states],
-        "gpu_states_at_launch": [asdict(state) for state in gpu_states],
+        "final_uuid_probes_completed_at_utc": final_uuid_probes_completed_at_utc,
+        "gpu_states_at_final_uuid_probe": [asdict(state) for state in gpu_states],
+        "gpu_safety_policy": {
+            "max_utilization_percent": args.max_utilization_percent,
+            "utilization_comparison": "strictly_less_than",
+            "min_free_memory_mib": args.min_free_memory_mib,
+            "active_compute_processes_allowed": False,
+            "compute_mode_prohibited_allowed": False,
+        },
         "command": environment_command,
         "log_path": str(log_path),
         "checkpoint": None if checkpoint is None else str(checkpoint),
@@ -417,7 +626,7 @@ def main():
         "micro_batch_size_per_process": args.micro_batch_size,
         "accumulate_grad_batches": accumulation_steps,
         "effective_global_batch_size": (
-            args.micro_batch_size * args.gpu_count * accumulation_steps
+            args.micro_batch_size * gpu_count * accumulation_steps
         ),
         "exclude_special_tokens": args.exclude_special_tokens,
         "dry_run": args.dry_run,
