@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import subprocess
 import time
 from pathlib import Path
@@ -152,6 +153,23 @@ def _sample(model: GenMol, sample_count: int, length: int, sampling_steps: int):
     )
 
 
+def _validate_smoke_gate(losses, before, after, generated):
+    """Fail before artifact creation when the declared smoke gate is not met."""
+    failures = []
+    if not losses or not all(math.isfinite(loss) for loss in losses):
+        failures.append("all training losses must be finite")
+    else:
+        window = min(5, max(1, len(losses) // 2))
+        if sum(losses[-window:]) / window >= sum(losses[:window]) / window:
+            failures.append("last-window mean loss did not fall below first-window mean")
+    if after["0.5"]["loss"] >= before["0.5"]["loss"]:
+        failures.append("fixed t=0.5 diagnostic loss did not improve")
+    if not generated:
+        failures.append("reverse chain produced no strictly decodable molecule")
+    if failures:
+        raise RuntimeError("UDLM CPU smoke gate failed: " + "; ".join(failures))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--steps", type=int, default=40)
@@ -203,6 +221,7 @@ def main():
         length=int(content_lengths.median()),
         sampling_steps=args.sampling_steps,
     )
+    _validate_smoke_gate(losses, before, after, generated)
     try:
         git_sha = subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=ROOT_DIR, text=True

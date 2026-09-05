@@ -66,6 +66,7 @@ class Sampler:
         return_token_ids=False,
         **kwargs,
     ):
+        """Generate molecules or raw IDs; ``randomness`` is MDLM-only."""
         x = x.to(self.model.device)
         attention_mask = x != self.pad_index
         if self.diffusion_type == 'udlm':
@@ -79,7 +80,7 @@ class Sampler:
             x = torch.where(editable_mask, prior, x)
             udlm_config = self.model.config.training.get('udlm', {})
             if num_steps is None:
-                num_steps = int(udlm_config.get('sampling_steps', 64))
+                num_steps = int(udlm_config.get('sampling_steps', 128))
             if num_steps <= 0:
                 raise ValueError('num_steps must be positive for UDLM sampling')
             inference_eps = float(udlm_config.get('inference_eps', 1e-5))

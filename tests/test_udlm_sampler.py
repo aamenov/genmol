@@ -151,6 +151,17 @@ def test_udlm_rejects_mdlm_specific_molecular_context_guidance():
         sampler.generate(torch.tensor([[1, 4, 2]]), gamma=0.5, w=2)
 
 
+def test_udlm_missing_sampling_step_config_uses_official_128_step_control():
+    model = _UDLMModel()
+    del model.config.training.udlm.sampling_steps
+    process = _UDLMProcess()
+    sampler = _sampler(model, process, "udlm")
+
+    sampler.generate(torch.tensor([[1, 4, 2]]))
+
+    assert len(process.steps) == 128
+
+
 def test_mdlm_confidence_loop_contract_is_preserved():
     model = _MDLMModel()
     process = _MDLMProcess()
