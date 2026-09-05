@@ -438,6 +438,112 @@ def top_k_auc(
     return trajectory_auc(trajectory, normalize_by=budget)
 
 
+def top_k_trajectory_at_calls(
+    indexed_scores: Sequence[tuple[int, float]],
+    *,
+    k: int = 10,
+    reporting_frequency: int = 100,
+    observed_oracle_calls: int,
+    budget: int = 10_000,
+) -> list[dict[str, int | float]]:
+    """Return a top-k curve on the *global* unique-oracle-call axis.
+
+    ``indexed_scores`` can be a subset of charged calls, such as children from
+    an arm that also charges parent molecules.  Retaining each global call
+    index prevents those children from being compressed into fictitious early
+    calls when computing sample-efficiency AUC.
+    """
+
+    if k <= 0:
+        raise ValueError("k must be positive")
+    if reporting_frequency <= 0:
+        raise ValueError("reporting_frequency must be positive")
+    if budget <= 0:
+        raise ValueError("budget must be positive")
+    if not 0 <= observed_oracle_calls <= budget:
+        raise ValueError("observed_oracle_calls must lie in [0, budget]")
+
+    validated: list[tuple[int, float]] = []
+    previous_call = 0
+    for raw_call, raw_score in indexed_scores:
+        call = int(raw_call)
+        score = float(raw_score)
+        if call != raw_call or call <= previous_call:
+            raise ValueError("indexed score call indices must be strictly increasing integers")
+        if call > observed_oracle_calls:
+            raise ValueError("indexed score exceeds observed_oracle_calls")
+        if not math.isfinite(score):
+            raise ValueError("scores must be finite")
+        validated.append((call, score))
+        previous_call = call
+
+    checkpoints = list(range(reporting_frequency, observed_oracle_calls + 1, reporting_frequency))
+    if observed_oracle_calls and (not checkpoints or checkpoints[-1] != observed_oracle_calls):
+        checkpoints.append(observed_oracle_calls)
+    if observed_oracle_calls < budget:
+        checkpoints.append(budget)
+
+    points: list[dict[str, int | float]] = [{"oracle_calls": 0, "top_k_mean": 0.0}]
+    seen: list[float] = []
+    score_index = 0
+    for checkpoint in checkpoints:
+        while score_index < len(validated) and validated[score_index][0] <= checkpoint:
+            seen.append(validated[score_index][1])
+            score_index += 1
+        points.append(
+            {
+                "oracle_calls": checkpoint,
+                "top_k_mean": 0.0 if not seen else top_k_mean(seen, k),
+            }
+        )
+    return points
+
+
+def summarize_indexed_scores(
+    indexed_scores: Sequence[tuple[int, float]],
+    *,
+    observed_oracle_calls: int,
+    ks: Sequence[int] = (1, 10, 100),
+    reporting_frequency: int = 100,
+    budget: int = 10_000,
+) -> dict[str, Any]:
+    """Summarize a score subset on the global unique-call budget axis."""
+
+    rows = list(indexed_scores)
+    # Validate once even when ``ks`` is empty and obtain JSON-ready values.
+    validation_trajectory = top_k_trajectory_at_calls(
+        rows,
+        k=1,
+        reporting_frequency=reporting_frequency,
+        observed_oracle_calls=observed_oracle_calls,
+        budget=budget,
+    )
+    del validation_trajectory
+    values = [float(score) for _, score in rows]
+    summary: dict[str, Any] = {
+        "axis": "total_unique_oracle_calls",
+        "score_count": len(values),
+        "oracle_calls": observed_oracle_calls,
+        "oracle_budget": budget,
+        "reporting_frequency": reporting_frequency,
+    }
+    for k in ks:
+        if k <= 0:
+            raise ValueError("all k values must be positive")
+        label = f"top_{k}"
+        trajectory = top_k_trajectory_at_calls(
+            rows,
+            k=k,
+            reporting_frequency=reporting_frequency,
+            observed_oracle_calls=observed_oracle_calls,
+            budget=budget,
+        )
+        summary[label] = None if not values else top_k_mean(values, k)
+        summary[f"auc_{label}"] = trajectory_auc(trajectory, normalize_by=budget)
+        summary[f"trajectory_{label}"] = trajectory
+    return summary
+
+
 def summarize_scores(
     scores: Sequence[float],
     *,
@@ -481,10 +587,12 @@ __all__ = [
     "save_checkpoint",
     "sha256_config",
     "sha256_file",
+    "summarize_indexed_scores",
     "summarize_scores",
     "top_k_auc",
     "top_k_mean",
     "top_k_trajectory",
+    "top_k_trajectory_at_calls",
     "trajectory_auc",
     "write_manifest",
 ]

@@ -168,6 +168,48 @@ class MetricTests(unittest.TestCase):
         self.assertEqual(summary["top_2"], 0.30000000000000004)
         json.dumps(summary, allow_nan=False)
 
+    def test_indexed_child_trajectory_uses_global_call_positions(self):
+        rows = [(2, 0.5), (4, 0.9)]
+        trajectory = experiment_io.top_k_trajectory_at_calls(
+            rows,
+            k=1,
+            reporting_frequency=2,
+            observed_oracle_calls=4,
+            budget=4,
+        )
+        self.assertEqual(
+            trajectory,
+            [
+                {"oracle_calls": 0, "top_k_mean": 0.0},
+                {"oracle_calls": 2, "top_k_mean": 0.5},
+                {"oracle_calls": 4, "top_k_mean": 0.9},
+            ],
+        )
+        summary = experiment_io.summarize_indexed_scores(
+            rows,
+            ks=(1,),
+            reporting_frequency=2,
+            observed_oracle_calls=4,
+            budget=4,
+        )
+        self.assertEqual(summary["score_count"], 2)
+        self.assertEqual(summary["oracle_calls"], 4)
+        self.assertAlmostEqual(summary["auc_top_1"], 0.475)
+
+    def test_indexed_scores_reject_invalid_global_positions(self):
+        with self.assertRaises(ValueError):
+            experiment_io.top_k_trajectory_at_calls(
+                [(2, 0.4), (1, 0.5)],
+                observed_oracle_calls=2,
+                budget=2,
+            )
+        with self.assertRaises(ValueError):
+            experiment_io.top_k_trajectory_at_calls(
+                [(3, 0.4)],
+                observed_oracle_calls=2,
+                budget=3,
+            )
+
     def test_invalid_metric_inputs_are_rejected(self):
         with self.assertRaises(ValueError):
             experiment_io.top_k_mean([], 10)

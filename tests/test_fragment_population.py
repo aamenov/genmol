@@ -78,8 +78,47 @@ class ReleasedPopulationTests(unittest.TestCase):
         )
         self.assertEqual(population.sample(2), expected)
 
+    def test_sampling_canonicalizes_cross_policy_tie_order(self):
+        # The released constructor preserves CSV order, while statistical
+        # ranking normalizes equal-score rows to the released boundary rule.
+        seeds = [FragmentSeed("A", 0.8), FragmentSeed("B", 0.8), FragmentSeed("C", 0.7)]
+        released = FragmentPopulation(
+            seeds,
+            capacity=3,
+            mode="released",
+            fragmenter=MappingFragmenter({}),
+            rng=random.Random(23),
+        )
+        statistical = FragmentPopulation(
+            seeds,
+            capacity=3,
+            mode="mean",
+            fragmenter=MappingFragmenter({}),
+            rng=random.Random(23),
+            legacy_seed_count=1,
+        )
+
+        self.assertNotEqual(released.active_fragments, statistical.active_fragments)
+        self.assertEqual(released.sample(2), statistical.sample(2))
+
 
 class StatisticalPopulationTests(unittest.TestCase):
+    def test_direct_construction_limits_seed_registry_to_capacity(self):
+        population = FragmentPopulation(
+            [
+                FragmentSeed("first", 0.9),
+                FragmentSeed("second", 0.8),
+                FragmentSeed("hidden", 1.0),
+            ],
+            capacity=2,
+            mode="mean",
+            fragmenter=MappingFragmenter({}),
+            legacy_seed_count=1,
+        )
+
+        self.assertEqual(set(population.active_fragments), {"first", "second"})
+        self.assertIsNone(population.get_stats("hidden"))
+
     def test_running_mean_updates_every_observation_and_deduplicates(self):
         fragmenter = MappingFragmenter(
             {"one": ("f", "f"), "two": ("f",), "three": ("f",)}
@@ -171,13 +210,37 @@ class StatisticalPopulationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "parent_score"):
             strict.observe(observation)
 
-    def test_statistical_ties_are_fragment_ascending(self):
+    def test_statistical_ties_match_released_fragment_descending_rule(self):
         fragmenter = MappingFragmenter({"x": ("z", "a")})
         population = FragmentPopulation(
             [], capacity=2, mode="mean", fragmenter=fragmenter
         )
         population.observe(FragmentObservation("1", "x", 0.5))
-        self.assertEqual(population.active_fragments, ["a", "z"])
+        self.assertEqual(population.active_fragments, ["z", "a"])
+
+    def test_cross_policy_boundary_ties_retain_the_same_fragments(self):
+        fragmenter = MappingFragmenter({"child": ("a", "b", "c")})
+        seeds = [FragmentSeed("seed-1", 0.2), FragmentSeed("seed-2", 0.1)]
+        released = FragmentPopulation(
+            seeds,
+            capacity=2,
+            mode="released",
+            fragmenter=fragmenter,
+        )
+        statistical = FragmentPopulation(
+            seeds,
+            capacity=2,
+            mode="mean",
+            fragmenter=fragmenter,
+            legacy_seed_count=1,
+        )
+        observation = FragmentObservation("child", "child", 0.9)
+
+        released.observe(observation)
+        statistical.observe(observation)
+
+        self.assertEqual(set(released.active_fragments), {"b", "c"})
+        self.assertEqual(set(statistical.active_fragments), {"b", "c"})
 
 
 class PersistenceAndLegacyTests(unittest.TestCase):

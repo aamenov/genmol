@@ -68,7 +68,13 @@ S(f) = {x : f is a subgraph/fragment of x}.
 Algorithm 1 repeatedly attaches two uniformly sampled population fragments,
 remasks a finer fragment region, scores the child, decomposes it, and retains
 the top `V` fragments. Scores determine top-`V` membership only; sampling within
-the retained population remains uniform in every arm.
+the retained population remains uniform in every arm. The controlled harness
+sorts active fragment strings canonically immediately before drawing uniform
+RNG indices. This leaves the sampling distribution unchanged while keeping
+paired arms on the same proposal stream whenever their active fragment sets
+are equal. Equal ranking scores use the released implementation's reverse-tuple
+rule (fragment string descending) in every arm, so a capacity-boundary tie does
+not itself change those active sets.
 
 Only the first occurrence of a canonical molecule updates sufficient statistics
 in the statistical arms. Cached duplicate proposals consume no oracle call and
@@ -209,6 +215,16 @@ secondary endpoint as primary.
   differences, aggregate mean difference, a 95% hierarchical bootstrap
   confidence interval over tasks and paired seeds, and task win/tie/loss counts.
 
+For parent-scoring arms, the primary curve includes every charged parent and
+child molecule, because both spend oracle budget. Two child diagnostics must be
+reported separately: child quality on the true total-call axis (retaining each
+charged child's global call index), and child quality on a dense child-count
+axis. Never compress child calls to the beginning of the total budget and pad
+that curve; doing so overstates sample efficiency. Dense child-count AUCs from
+runs with different numbers of children have different horizons and are not
+directly comparable; any scalar comparison must use a predeclared common child
+count.
+
 Use paired seeds and at least five seeds in the full study. Record exact seeds.
 No task-specific variant parameters or post-hoc exclusions are allowed.
 
@@ -229,7 +245,9 @@ No task-specific variant parameters or post-hoc exclusions are allowed.
   eligible-fragment coverage, and the censoring rate from fragments never seen
   again. Never evaluate a running mean on observations already used to fit it.
 - `Var(y(x) | f in F(x))`, stratified by fragment support, to measure the context
-  variability driving the hypothesis.
+  variability driving the hypothesis. Here support means appearances in the
+  sampled three-cut decomposition, not every generated molecule that could
+  chemically contain the fragment.
 - Top-`V` support distribution, fraction with dynamic support one, admissions,
   evictions, re-entries, occupancy lifetime, turnover, and Jaccard overlap across
   adjacent checkpoints and seeds.
@@ -242,7 +260,16 @@ No task-specific variant parameters or post-hoc exclusions are allowed.
 Save molecule-level traces containing call and attempt index, canonical parent
 and child, scores, seed, fragment sets, population membership, raw sufficient
 statistics, ranking score, and admission/eviction reason. Record checkpoint and
-initial-vocabulary hashes plus the full configuration.
+initial-vocabulary hashes plus the full configuration. Launcher runs also bind
+the resolved configuration to the exact matrix path and SHA-256. Collection
+recomputes metrics from checkpoint/event evidence rather than trusting summary
+fields and publishes a hash-named immutable CSV behind an atomic manifest.
+
+The deterministic contextual simulation is only a premise diagnostic. Its
+configured `context_scale` is the pre-clipping noise scale; achieved mean and
+pooled within-fragment sample SD and the clipping fraction must be reported.
+Even a strong synthetic winner's-curse result cannot establish improved PMO
+sample efficiency or fewer oracle calls.
 
 ## Execution gates
 
@@ -251,7 +278,8 @@ initial-vocabulary hashes plus the full configuration.
 Run one representative oracle and one seed with a debug budget and shortened
 warmup, clearly marked non-scientific. Proceed only if:
 
-- `released` reproduces the unmodified update trace for the same inputs;
+- `released` reproduces the unmodified admission/update decisions for a fixed
+  scored-molecule and decomposition trace;
 - budgets count unique canonical molecules correctly;
 - repeated molecules do not update statistics;
 - support and shrinkage equations match hand calculations;
@@ -292,10 +320,11 @@ and benchmark PDF from immutable outputs.
 - **Oracle accounting.** Target-specific initial ZINC scoring is not charged by
   the released PMO run and remains a shared offline prior. Delta parent calls are
   charged online and require the matched control above.
-- **Random fragmentation.** `cut` consumes Python's global RNG, also used for
-  fragment selection. Extra decomposition calls can change later proposals.
-  Precompute decomposition per canonical molecule or use independent locked RNG
-  streams for proposals, reactions, diffusion, and fragmentation.
+- **Random fragmentation.** The released runner interleaves Python randomness
+  for selection and decomposition, so extra cuts can change later proposals.
+  The ablation harness instead locks independent streams for population draws,
+  reactions, diffusion, and fragmentation; its `released` arm is therefore an
+  update-policy reference, not an exact released RNG trajectory.
 - **Duplicates and identity.** Canonicalize before oracle lookup, count each
   molecule-fragment pair once, use a set within a molecule, and retain fragment
   history across eviction. Log repaired/disconnected outputs separately.
@@ -315,8 +344,15 @@ and benchmark PDF from immutable outputs.
   `iter > warmup` boundary (1,001 zero-indexed attachment-only iterations),
   while the paper describes 1,000; any paper-boundary sensitivity uses
   `iteration >= warmup` and a new run ID. Preserve task-specific molecule-size and
-  MCG settings, initial ordering/tie-breaking, uniform population sampling, and
-  oracle score direction.
+  MCG settings, canonical pre-sampling population order, uniform population
+  sampling, and oracle score direction.
 - **Multiplicity.** `support = 3` and `lambda = 10` are locked. Any later sweep is
   a new preregistration and must use disjoint development tasks or multiplicity-
   adjusted intervals; it cannot replace these results.
+- **GPU sharing.** The launcher defaults to rejecting a GPU with any existing
+  compute process. A direct user authorization to share a low-utilization GPU
+  must be represented by `--allow-shared-low-utilization`; the launch record
+  then preserves every pre-existing process, the strict utilization and memory
+  thresholds, whether sharing actually occurred, and the measured GPU state.
+  Eligibility is strict (`utilization < threshold`, not `<=`). Scores remain
+  usable, but shared-device wall times are marked non-comparable.

@@ -223,6 +223,7 @@ class RunnerIntegrationTests(unittest.TestCase):
                 run_dir = run(self._args(root / "output", model, vocab))
 
             summary = __import__("json").loads((run_dir / "summary.json").read_text())
+            self.assertEqual(summary["schema_version"], 2)
             self.assertEqual(summary["status"], "completed")
             self.assertEqual(summary["scores"]["all_charged_molecules"]["oracle_calls"], 5)
             self.assertTrue(summary["checkpoint_consistent"])
@@ -253,9 +254,16 @@ class RunnerIntegrationTests(unittest.TestCase):
 
             summary = __import__("json").loads((run_dir / "summary.json").read_text())
             self.assertEqual(summary["scores"]["all_charged_molecules"]["oracle_calls"], 3)
-            self.assertEqual(summary["scores"]["charged_children_only"]["oracle_calls"], 1)
+            total_axis = summary["scores"]["charged_children_total_call_axis"]
+            child_axis = summary["scores"]["charged_children_child_count_axis"]
+            self.assertEqual(total_axis["oracle_calls"], 3)
+            self.assertEqual(total_axis["score_count"], 1)
+            self.assertEqual(child_axis["score_count"], 1)
+            self.assertEqual(child_axis["child_count_horizon"], 1)
             events = [__import__("json").loads(line) for line in (run_dir / "events.jsonl").read_text().splitlines()]
             self.assertEqual(events[-1]["population_update"]["reason"], "budget_after_parent")
+            self.assertIn("elapsed_seconds", events[-1])
+            self.assertIn("population_cutoff_after", events[-1])
 
 
 if __name__ == "__main__":

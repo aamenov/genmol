@@ -223,7 +223,10 @@ class FragmentPopulation:
             ]
             return
 
-        for order, seed in enumerate(seeds):
+        # Every policy starts from exactly the caller-provided first V rows.
+        # Retaining later seed rows as a hidden registry would let statistical
+        # arms backfill from fragments unavailable to the released arm.
+        for order, seed in enumerate(seeds[: self.capacity]):
             if self.mode == "delta":
                 # Offline absolute scores bootstrap deterministic ties but are
                 # not mixed into the delta estimand.
@@ -344,8 +347,8 @@ class FragmentPopulation:
             # Absolute seed quality is only a tie-break for neutral delta
             # estimates; it is never added to the delta value.
             seed_score = record.seed_score if record.seed_score is not None else -math.inf
-            return (-rank, -seed_score, record.fragment)
-        return (-rank, record.fragment)
+            return (-rank, -seed_score)
+        return (-rank,)
 
     def _active_statistical_records(self) -> list[FragmentStats]:
         if self._active_cache is not None:
@@ -355,11 +358,15 @@ class FragmentPopulation:
             for record in self._records.values()
             if record.seed_score is not None or record.count >= self.min_support
         ]
+        # Released GenMol sorts ``(score, fragment)`` tuples in reverse order.
+        # A stable primary-score sort after this descending fragment sort gives
+        # every policy the same boundary tie-break without changing its score.
+        eligible.sort(key=lambda record: record.fragment, reverse=True)
         self._active_cache = sorted(eligible, key=self._statistical_sort_key)[: self.capacity]
         return self._active_cache
 
     def active_rows(self) -> list[tuple[float, str]]:
-        """Return active ``(ranking score, fragment)`` rows in sampling order."""
+        """Return active ``(ranking score, fragment)`` rows in ranking order."""
 
         if self.mode == "released":
             return list(self._released_population)
@@ -378,11 +385,17 @@ class FragmentPopulation:
         return None if record is None else replace(record)
 
     def sample(self, k: int = 2) -> list[str]:
-        """Uniformly sample distinct active fragments using the injected RNG."""
+        """Uniformly sample distinct active fragments using the injected RNG.
+
+        Canonicalizing the population order before mapping RNG indices to
+        fragments keeps paired ablation arms on the same proposal stream for
+        as long as their active fragment *sets* agree.  It does not alter the
+        uniform sampling distribution.
+        """
 
         if k < 0:
             raise ValueError("k must be nonnegative")
-        fragments = self.active_fragments
+        fragments = sorted(self.active_fragments)
         if k > len(fragments):
             raise ValueError(f"cannot sample {k} fragments from active population of size {len(fragments)}")
         return list(self.rng.sample(fragments, k))

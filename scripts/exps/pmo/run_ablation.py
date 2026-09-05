@@ -46,6 +46,7 @@ from scripts.exps.pmo.main.genmol.experiment_io import (
     save_checkpoint,
     sha256_config,
     sha256_file,
+    summarize_indexed_scores,
     summarize_scores,
     write_manifest,
 )
@@ -462,6 +463,17 @@ def _parse_args() -> argparse.Namespace:
         help="Explicit maturity/comparability label stored in the immutable run config.",
     )
     parser.add_argument(
+        "--matrix-path",
+        type=Path,
+        default=None,
+        help="Optional launcher matrix source recorded in the resolved configuration.",
+    )
+    parser.add_argument(
+        "--matrix-sha256",
+        default=None,
+        help="SHA-256 of --matrix-path; required together with that path.",
+    )
+    parser.add_argument(
         "--output-root",
         type=Path,
         default=REPOSITORY_ROOT / "output" / "pmo_ablation",
@@ -496,6 +508,15 @@ def _validate_args(args: argparse.Namespace) -> None:
         )
     if not args.scientific_status.strip():
         raise ValueError("scientific-status must be nonempty")
+    matrix_path = getattr(args, "matrix_path", None)
+    matrix_sha256 = getattr(args, "matrix_sha256", None)
+    if (matrix_path is None) != (matrix_sha256 is None):
+        raise ValueError("matrix-path and matrix-sha256 must be provided together")
+    if matrix_path is not None:
+        if not re.fullmatch(r"[0-9a-f]{64}", str(matrix_sha256)):
+            raise ValueError("matrix-sha256 must be a lowercase SHA-256 digest")
+        if sha256_file(matrix_path.expanduser().resolve()) != matrix_sha256:
+            raise ValueError("matrix-sha256 does not match matrix-path")
     settings = VARIANT_SETTINGS[args.variant]
     vocab_path = args.vocab_path or (
         REPOSITORY_ROOT / "scripts" / "exps" / "pmo" / "vocab" / f"{args.oracle}.csv"
@@ -526,9 +547,14 @@ def _resolved_config(args: argparse.Namespace) -> dict[str, Any]:
     min_size, max_size = _molecule_size_bounds(
         args.oracle, args.min_mol_size, args.max_mol_size
     )
+    matrix_path = getattr(args, "matrix_path", None)
     return {
         "experiment_id": args.experiment_id,
         "scientific_status": args.scientific_status,
+        "matrix_path": (
+            None if matrix_path is None else str(matrix_path.expanduser().resolve())
+        ),
+        "matrix_sha256": getattr(args, "matrix_sha256", None),
         "oracle": args.oracle,
         "variant": args.variant,
         "policy_mode": settings["mode"],
@@ -556,6 +582,7 @@ def _resolved_config(args: argparse.Namespace) -> dict[str, Any]:
         "prior_mean_source": args.prior_mean_source,
         "legacy_seed_count": args.legacy_seed_count,
         "delta_attribution": args.delta_attribution,
+        "population_sampling_order": "canonical fragment string before uniform sampling",
         "statistical_duplicate_policy": "one update per unique canonical child",
         "released_duplicate_policy": "repeat cached-child decomposition, matching release",
     }
@@ -815,6 +842,8 @@ def _run_locked(
             if remask_enabled and bool(config["parent_control"]):
                 parent_outcome = oracle.score(candidate["parent_smiles"])
                 if oracle.finished:
+                    while oracle.calls >= next_checkpoint_call:
+                        next_checkpoint_call += int(config["checkpoint_every"])
                     event = {
                         "event_index": event_count,
                         "iteration": iteration,
@@ -822,8 +851,12 @@ def _run_locked(
                         "parent_oracle": _score_row(parent_outcome),
                         "child_oracle": None,
                         "population_update": {"updated": False, "reason": "budget_after_parent"},
+                        "fragment_statistics_after": {},
+                        "population_cutoff_after": population.active_rows()[-1][0],
+                        "population_size_after": len(population.active_rows()),
                         "oracle_calls": oracle.calls,
                         **_top_means(oracle),
+                        "elapsed_seconds": elapsed_before_resume + (time.monotonic() - started),
                     }
                     event_log.append(event)
                     event_count += 1
@@ -913,20 +946,50 @@ def _run_locked(
             if events_path.exists()
             else []
         )
-        child_scores = [
-            float(event["child_oracle"]["score"])
+        child_indexed_scores = [
+            (
+                int(event["child_oracle"]["call_index"]),
+                float(event["child_oracle"]["score"]),
+            )
             for event in logged_events
             if event.get("child_oracle")
             and event["child_oracle"].get("charged")
             and event["child_oracle"].get("score") is not None
         ]
-        child_score_summary = summarize_scores(
-            child_scores,
+        child_total_call_summary = summarize_indexed_scores(
+            child_indexed_scores,
+            observed_oracle_calls=oracle.calls,
             reporting_frequency=int(config["reporting_frequency"]),
             budget=int(config["max_oracle_calls"]),
         )
+        child_scores = [score for _, score in child_indexed_scores]
+        if child_scores:
+            child_count_summary = summarize_scores(
+                child_scores,
+                reporting_frequency=int(config["reporting_frequency"]),
+                budget=len(child_scores),
+            )
+            child_count_summary["axis"] = "charged_child_count"
+            child_count_summary["score_count"] = child_count_summary.pop("oracle_calls")
+            child_count_summary["child_count_horizon"] = child_count_summary.pop(
+                "oracle_budget"
+            )
+        else:
+            child_count_summary = {
+                "axis": "charged_child_count",
+                "score_count": 0,
+                "child_count_horizon": 0,
+                "reporting_frequency": int(config["reporting_frequency"]),
+            }
+            for k in (1, 10, 100):
+                label = f"top_{k}"
+                child_count_summary[label] = None
+                child_count_summary[f"auc_{label}"] = None
+                child_count_summary[f"trajectory_{label}"] = [
+                    {"oracle_calls": 0, "top_k_mean": 0.0}
+                ]
         summary = {
-            "schema_version": 1,
+            "schema_version": 2,
             "run_id": run_id,
             "status": terminal_status,
             "error": terminal_error,
@@ -935,10 +998,13 @@ def _run_locked(
             "elapsed_seconds": elapsed_before_resume + (time.monotonic() - started),
             "scores": {
                 "all_charged_molecules": score_summary,
-                "charged_children_only": child_score_summary,
+                "charged_children_total_call_axis": child_total_call_summary,
+                "charged_children_child_count_axis": child_count_summary,
                 "interpretation": (
                     "Parent-control arms include charged parents in the primary all-molecule PMO "
-                    "trajectory; the child-only trajectory exposes their lower child throughput."
+                    "trajectory. The total-call child trajectory retains each charged child's "
+                    "actual global call position; the child-count trajectory measures proposal "
+                    "quality without parent-call throughput."
                 ),
             },
             "population": {
