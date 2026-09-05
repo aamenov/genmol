@@ -109,15 +109,59 @@ PAPER_GAMMA = {
 }
 
 VARIANT_SETTINGS: dict[str, dict[str, Any]] = {
-    "released": {"mode": "released", "min_support": 1, "parent_control": False},
-    "running_mean": {"mode": "mean", "min_support": 1, "parent_control": False},
-    "support3": {"mode": "mean", "min_support": 3, "parent_control": False},
-    "shrink10": {"mode": "bayes", "min_support": 1, "parent_control": False},
-    "delta": {"mode": "delta", "min_support": 1, "parent_control": True},
+    "released": {
+        "mode": "released",
+        "min_support": 1,
+        "parent_control": False,
+        "prior_strength": 0.0,
+    },
+    "running_mean": {
+        "mode": "mean",
+        "min_support": 1,
+        "parent_control": False,
+        "prior_strength": 0.0,
+    },
+    "support3": {
+        "mode": "mean",
+        "min_support": 3,
+        "parent_control": False,
+        "prior_strength": 0.0,
+    },
+    "shrink1": {
+        "mode": "bayes",
+        "min_support": 1,
+        "parent_control": False,
+        "prior_strength": 1.0,
+    },
+    "shrink3": {
+        "mode": "bayes",
+        "min_support": 1,
+        "parent_control": False,
+        "prior_strength": 3.0,
+    },
+    "shrink10": {
+        "mode": "bayes",
+        "min_support": 1,
+        "parent_control": False,
+        "prior_strength": 10.0,
+    },
+    "shrink30": {
+        "mode": "bayes",
+        "min_support": 1,
+        "parent_control": False,
+        "prior_strength": 30.0,
+    },
+    "delta": {
+        "mode": "delta",
+        "min_support": 1,
+        "parent_control": True,
+        "prior_strength": 0.0,
+    },
     "running_mean_parent_control": {
         "mode": "mean",
         "min_support": 1,
         "parent_control": True,
+        "prior_strength": 0.0,
     },
 }
 
@@ -533,13 +577,17 @@ def _validate_args(args: argparse.Namespace) -> None:
             "statistical variants require an enriched vocabulary or an explicit "
             "--legacy-seed-count; use 1 only as a declared approximation"
         )
-    if args.variant == "shrink10":
+    if settings["mode"] == "bayes":
         if args.prior_mean is None or not math.isfinite(args.prior_mean):
-            raise ValueError("shrink10 requires a finite frozen --prior-mean")
-        if not args.prior_mean_source:
-            raise ValueError("shrink10 requires --prior-mean-source provenance")
+            raise ValueError(
+                f"{args.variant} requires a finite frozen --prior-mean"
+            )
+        if not str(args.prior_mean_source or "").strip():
+            raise ValueError(
+                f"{args.variant} requires --prior-mean-source provenance"
+            )
     elif args.prior_mean is not None or args.prior_mean_source is not None:
-        raise ValueError("prior mean and source are only valid for shrink10")
+        raise ValueError("prior mean and source are only valid for Bayesian variants")
 
 
 def _resolved_config(args: argparse.Namespace) -> dict[str, Any]:
@@ -580,7 +628,7 @@ def _resolved_config(args: argparse.Namespace) -> dict[str, Any]:
         "min_mol_size": min_size,
         "max_mol_size": max_size,
         "min_support": settings["min_support"],
-        "prior_strength": 10.0 if args.variant == "shrink10" else 0.0,
+        "prior_strength": float(settings["prior_strength"]),
         "prior_mean": args.prior_mean,
         "prior_mean_source": args.prior_mean_source,
         "legacy_seed_count": args.legacy_seed_count,

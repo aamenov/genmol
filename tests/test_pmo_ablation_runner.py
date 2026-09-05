@@ -16,6 +16,7 @@ from scripts.exps.pmo.run_ablation import (
     ORACLES,
     PAPER_GAMMA,
     SAFE_EXPERIMENT_ID,
+    VARIANT_SETTINGS,
     CachedOracle,
     _attach_fragments,
     _derived_seed,
@@ -23,6 +24,7 @@ from scripts.exps.pmo.run_ablation import (
     _molecule_size_bounds,
     _repair_event_tail,
     _resolved_config,
+    _validate_args,
     _vocabulary_has_sufficient_statistics,
     run,
 )
@@ -232,6 +234,57 @@ class RunnerIntegrationTests(unittest.TestCase):
             self.assertIs(_resolved_config(args)["durable_events"], True)
             args.durable_events = False
             self.assertIs(_resolved_config(args)["durable_events"], False)
+
+    def test_bayesian_variant_metadata_controls_strength_and_prior_validation(self):
+        expected_strengths = {
+            "shrink1": 1.0,
+            "shrink3": 3.0,
+            "shrink10": 10.0,
+            "shrink30": 30.0,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model, vocab = self._files(root)
+            for variant, strength in expected_strengths.items():
+                with self.subTest(variant=variant):
+                    args = self._args(
+                        root,
+                        model,
+                        vocab,
+                        variant=variant,
+                        prior_mean=0.5,
+                        prior_mean_source="frozen unit-test prior",
+                    )
+                    _validate_args(args)
+                    config = _resolved_config(args)
+                    self.assertEqual(VARIANT_SETTINGS[variant]["mode"], "bayes")
+                    self.assertEqual(
+                        VARIANT_SETTINGS[variant]["prior_strength"], strength
+                    )
+                    self.assertEqual(config["prior_strength"], strength)
+                    self.assertEqual(config["prior_mean"], 0.5)
+
+            missing_prior = self._args(
+                root,
+                model,
+                vocab,
+                variant="shrink1",
+                prior_mean=None,
+                prior_mean_source=None,
+            )
+            with self.assertRaisesRegex(ValueError, "shrink1 requires"):
+                _validate_args(missing_prior)
+
+            non_bayesian = self._args(
+                root,
+                model,
+                vocab,
+                variant="running_mean",
+                prior_mean=0.5,
+                prior_mean_source="not allowed",
+            )
+            with self.assertRaisesRegex(ValueError, "Bayesian variants"):
+                _validate_args(non_bayesian)
 
     def test_end_to_end_mocked_run_reaches_exact_budget_and_checkpoints(self):
         with tempfile.TemporaryDirectory() as directory:

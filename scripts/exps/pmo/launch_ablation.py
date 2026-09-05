@@ -2,7 +2,7 @@
 
 Run this controller inside ``tmux``.  It checks utilization and free memory
 immediately before every child launch, maps one physical GPU to each process,
-and never creates more than four concurrent GPU workers.
+and enforces an explicit project-wide active-GPU limit (four by default).
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import itertools
 import json
+import math
 import os
 import subprocess
 import sys
@@ -24,6 +25,17 @@ import yaml
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 MATRIX_SCHEMA_VERSION = 1
+VARIANT_SETTINGS: dict[str, dict[str, Any]] = {
+    "released": {"mode": "released", "prior_strength": 0.0},
+    "running_mean": {"mode": "mean", "prior_strength": 0.0},
+    "support3": {"mode": "mean", "prior_strength": 0.0},
+    "shrink1": {"mode": "bayes", "prior_strength": 1.0},
+    "shrink3": {"mode": "bayes", "prior_strength": 3.0},
+    "shrink10": {"mode": "bayes", "prior_strength": 10.0},
+    "shrink30": {"mode": "bayes", "prior_strength": 30.0},
+    "delta": {"mode": "delta", "prior_strength": 0.0},
+    "running_mean_parent_control": {"mode": "mean", "prior_strength": 0.0},
+}
 
 
 @dataclass(frozen=True)
@@ -60,11 +72,19 @@ class RunningJob:
     log_path: Path
 
 
-def _parse_args() -> argparse.Namespace:
+def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--matrix", type=Path, required=True)
     parser.add_argument("--gpu-indices", type=int, nargs="+", required=True)
     parser.add_argument("--reserved-active-gpus", type=int, default=0)
+    parser.add_argument(
+        "--max-total-active-gpus",
+        type=int,
+        default=4,
+        help=(
+            "Maximum selected plus reserved active project GPUs (default: 4)."
+        ),
+    )
     parser.add_argument("--utilization-threshold", type=int, default=10)
     parser.add_argument("--min-free-memory-mib", type=int, default=20_000)
     parser.add_argument(
@@ -77,7 +97,26 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--poll-seconds", type=int, default=30)
     parser.add_argument("--dry-run", action="store_true")
-    return parser.parse_args()
+    return parser.parse_args(argv)
+
+
+def _validate_gpu_request(
+    gpu_indices: list[int],
+    reserved_active_gpus: int,
+    max_total_active_gpus: int,
+) -> None:
+    unique_gpu_indices = set(gpu_indices)
+    if len(unique_gpu_indices) != len(gpu_indices):
+        raise ValueError("GPU indices must be unique")
+    if reserved_active_gpus < 0:
+        raise ValueError("reserved-active-gpus cannot be negative")
+    if max_total_active_gpus <= 0:
+        raise ValueError("max-total-active-gpus must be positive")
+    if len(unique_gpu_indices) + reserved_active_gpus > max_total_active_gpus:
+        raise ValueError(
+            "requested plus reserved active GPUs exceeds max-total-active-gpus "
+            f"({max_total_active_gpus})"
+        )
 
 
 def _gpu_states() -> dict[int, GPUState]:
@@ -336,12 +375,22 @@ def _command(
 
     if "gamma" in job.task_config:
         command.extend(["--gamma", str(job.task_config["gamma"])])
-    if job.variant == "shrink10":
+    settings = VARIANT_SETTINGS.get(job.variant)
+    if settings is None:
+        raise ValueError(f"unsupported ablation variant {job.variant!r}")
+    if settings["mode"] == "bayes":
         prior_mean = job.task_config.get("prior_mean")
         prior_source = job.task_config.get("prior_mean_source")
-        if prior_mean is None or not prior_source:
+        try:
+            finite_prior_mean = not isinstance(prior_mean, bool) and math.isfinite(
+                float(prior_mean)
+            )
+        except (TypeError, ValueError):
+            finite_prior_mean = False
+        if not finite_prior_mean or not str(prior_source or "").strip():
             raise ValueError(
-                f"shrink10 task {job.oracle} is missing prior_mean or prior_mean_source"
+                f"{job.variant} task {job.oracle} requires a finite prior_mean "
+                "and nonempty prior_mean_source"
             )
         command.extend(["--prior-mean", str(prior_mean)])
         command.extend(["--prior-mean-source", str(prior_source)])
@@ -353,12 +402,11 @@ def _command(
 
 def main() -> None:
     args = _parse_args()
-    if len(set(args.gpu_indices)) != len(args.gpu_indices):
-        raise ValueError("GPU indices must be unique")
-    if args.reserved_active_gpus < 0:
-        raise ValueError("reserved-active-gpus cannot be negative")
-    if len(args.gpu_indices) + args.reserved_active_gpus > 4:
-        raise ValueError("requested plus reserved active GPUs exceeds the user limit of four")
+    _validate_gpu_request(
+        args.gpu_indices,
+        args.reserved_active_gpus,
+        args.max_total_active_gpus,
+    )
     if not 1 <= args.utilization_threshold <= 100:
         raise ValueError("utilization threshold must lie in [1, 100]")
     if args.poll_seconds < 1:
@@ -382,6 +430,7 @@ def main() -> None:
                 "pending_jobs": len(pending),
                 "gpu_indices": args.gpu_indices,
                 "reserved_active_gpus": args.reserved_active_gpus,
+                "max_total_active_gpus": args.max_total_active_gpus,
                 "utilization_threshold": args.utilization_threshold,
                 "min_free_memory_mib": args.min_free_memory_mib,
                 "allow_shared_low_utilization": args.allow_shared_low_utilization,

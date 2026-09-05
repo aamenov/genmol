@@ -639,6 +639,55 @@ class AblationCollectorTests(unittest.TestCase):
             self.assertTrue(collected.row["durable_events_provenance_complete"])
             self.assertIs(collected.row["durable_events"], False)
 
+    def test_launch_reconstruction_preserves_every_bayesian_strength(self):
+        expected_strengths = {
+            "shrink1": 1.0,
+            "shrink3": 3.0,
+            "shrink10": 10.0,
+            "shrink30": 30.0,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            matrix_path = self._write_matrix(root)
+            matrix = launcher._load_matrix(matrix_path)
+            matrix["variants"] = list(expected_strengths)
+            matrix["tasks"][0].update(
+                prior_mean=0.42,
+                prior_mean_source="frozen unit-test prior",
+            )
+            matrix_path.write_text(json.dumps(matrix), encoding="utf-8")
+            matrix_hash = sha256_file(matrix_path)
+
+            for job in launcher._jobs(matrix):
+                with self.subTest(variant=job.variant):
+                    command = launcher._command(
+                        matrix_path, matrix_hash, matrix, job
+                    )
+                    parsed = collector._parse_launch_command(command)
+                    resolved = collector._resolved_launch_config(parsed)
+                    self.assertEqual(resolved["policy_mode"], "bayes")
+                    self.assertEqual(
+                        resolved["prior_strength"], expected_strengths[job.variant]
+                    )
+                    self.assertEqual(resolved["prior_mean"], 0.42)
+                    self.assertEqual(
+                        resolved["prior_mean_source"], "frozen unit-test prior"
+                    )
+
+            missing_prior_command = launcher._command(
+                matrix_path,
+                matrix_hash,
+                matrix,
+                launcher._jobs(matrix)[0],
+            )
+            for flag in ("--prior-mean", "--prior-mean-source"):
+                index = missing_prior_command.index(flag)
+                del missing_prior_command[index : index + 2]
+            with self.assertRaisesRegex(collector.CollectionError, "requires"):
+                collector._resolved_launch_config(
+                    collector._parse_launch_command(missing_prior_command)
+                )
+
     def test_schema_gates_explicit_pair_and_nonempty_null_metrics(self):
         with tempfile.TemporaryDirectory() as directory:
             _, run_dir = self._completed_run(directory, summary_schema=2)

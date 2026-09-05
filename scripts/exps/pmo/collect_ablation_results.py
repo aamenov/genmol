@@ -180,13 +180,61 @@ PAPER_GAMMA = {
     "valsartan_smarts": 0.4,
     "zaleplon_mpo": 0.4,
 }
-VARIANT_SETTINGS = {
-    "released": ("released", 1, False),
-    "running_mean": ("mean", 1, False),
-    "support3": ("mean", 3, False),
-    "shrink10": ("bayes", 1, False),
-    "delta": ("delta", 1, True),
-    "running_mean_parent_control": ("mean", 1, True),
+VARIANT_SETTINGS: dict[str, dict[str, Any]] = {
+    "released": {
+        "mode": "released",
+        "min_support": 1,
+        "parent_control": False,
+        "prior_strength": 0.0,
+    },
+    "running_mean": {
+        "mode": "mean",
+        "min_support": 1,
+        "parent_control": False,
+        "prior_strength": 0.0,
+    },
+    "support3": {
+        "mode": "mean",
+        "min_support": 3,
+        "parent_control": False,
+        "prior_strength": 0.0,
+    },
+    "shrink1": {
+        "mode": "bayes",
+        "min_support": 1,
+        "parent_control": False,
+        "prior_strength": 1.0,
+    },
+    "shrink3": {
+        "mode": "bayes",
+        "min_support": 1,
+        "parent_control": False,
+        "prior_strength": 3.0,
+    },
+    "shrink10": {
+        "mode": "bayes",
+        "min_support": 1,
+        "parent_control": False,
+        "prior_strength": 10.0,
+    },
+    "shrink30": {
+        "mode": "bayes",
+        "min_support": 1,
+        "parent_control": False,
+        "prior_strength": 30.0,
+    },
+    "delta": {
+        "mode": "delta",
+        "min_support": 1,
+        "parent_control": True,
+        "prior_strength": 0.0,
+    },
+    "running_mean_parent_control": {
+        "mode": "mean",
+        "min_support": 1,
+        "parent_control": True,
+        "prior_strength": 0.0,
+    },
 }
 SMALL_MOLECULE_ORACLES = {
     "albuterol_similarity",
@@ -533,14 +581,30 @@ def _resolved_launch_config(parsed: Mapping[str, Any]) -> dict[str, Any]:
         min_size, max_size = 30, 80
     else:
         min_size, max_size = raw_min, raw_max
-    mode, min_support, parent_control = VARIANT_SETTINGS[variant]
+    settings = VARIANT_SETTINGS[variant]
+    mode = settings["mode"]
+    prior_mean = _optional(parsed, "--prior-mean", float, None)
+    prior_mean_source = _optional(parsed, "--prior-mean-source", str, None)
+    if mode == "bayes":
+        if prior_mean is None or not math.isfinite(prior_mean):
+            raise CollectionError(
+                f"{variant} launch requires a finite --prior-mean"
+            )
+        if not str(prior_mean_source or "").strip():
+            raise CollectionError(
+                f"{variant} launch requires --prior-mean-source provenance"
+            )
+    elif "--prior-mean" in parsed or "--prior-mean-source" in parsed:
+        raise CollectionError(
+            "launch prior mean and source are only valid for Bayesian variants"
+        )
     resolved = {
         "experiment_id": str(parsed["--experiment-id"]),
         "scientific_status": str(parsed["--scientific-status"]),
         "oracle": oracle,
         "variant": variant,
         "policy_mode": mode,
-        "parent_control": parent_control,
+        "parent_control": settings["parent_control"],
         "model_path": str(model_path),
         "vocab_path": str(vocab_path),
         "device": _optional(parsed, "--device", str, "cuda:0"),
@@ -560,10 +624,10 @@ def _resolved_launch_config(parsed: Mapping[str, Any]) -> dict[str, Any]:
         "guidance_scale": _optional(parsed, "--guidance-scale", float, 2.0),
         "min_mol_size": min_size,
         "max_mol_size": max_size,
-        "min_support": min_support,
-        "prior_strength": 10.0 if variant == "shrink10" else 0.0,
-        "prior_mean": _optional(parsed, "--prior-mean", float, None),
-        "prior_mean_source": _optional(parsed, "--prior-mean-source", str, None),
+        "min_support": settings["min_support"],
+        "prior_strength": float(settings["prior_strength"]),
+        "prior_mean": prior_mean,
+        "prior_mean_source": prior_mean_source,
         "legacy_seed_count": _optional(parsed, "--legacy-seed-count", int, None),
         "delta_attribution": _optional(
             parsed,

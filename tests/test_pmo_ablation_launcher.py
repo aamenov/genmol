@@ -35,6 +35,42 @@ class LauncherTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "schema_version"):
                 launcher._load_matrix(path)
 
+    def test_gpu_total_limit_defaults_to_four_and_must_be_positive(self):
+        args = launcher._parse_args(
+            ["--matrix", "matrix.yaml", "--gpu-indices", "3", "4"]
+        )
+
+        self.assertEqual(args.max_total_active_gpus, 4)
+        launcher._validate_gpu_request([3, 4], 2, args.max_total_active_gpus)
+        with self.assertRaisesRegex(ValueError, "must be positive"):
+            launcher._validate_gpu_request([3], 0, 0)
+
+    def test_gpu_total_limit_allows_explicit_five(self):
+        args = launcher._parse_args(
+            [
+                "--matrix",
+                "matrix.yaml",
+                "--gpu-indices",
+                "3",
+                "4",
+                "--reserved-active-gpus",
+                "3",
+                "--max-total-active-gpus",
+                "5",
+            ]
+        )
+
+        self.assertEqual(args.max_total_active_gpus, 5)
+        launcher._validate_gpu_request(
+            args.gpu_indices,
+            args.reserved_active_gpus,
+            args.max_total_active_gpus,
+        )
+
+    def test_gpu_total_limit_rejects_excess_total(self):
+        with self.assertRaisesRegex(ValueError, r"max-total-active-gpus \(4\)"):
+            launcher._validate_gpu_request([3, 4], 3, 4)
+
     def test_command_records_exact_matrix_source(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -48,6 +84,55 @@ class LauncherTests(unittest.TestCase):
 
             self.assertEqual(command[command.index("--matrix-path") + 1], str(matrix_path))
             self.assertEqual(command[command.index("--matrix-sha256") + 1], digest)
+
+    def test_command_forwards_prior_for_every_bayesian_strength(self):
+        expected_strengths = {
+            "shrink1": 1.0,
+            "shrink3": 3.0,
+            "shrink10": 10.0,
+            "shrink30": 30.0,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            matrix_path = (root / "matrix.yaml").resolve()
+            matrix = self._matrix(root)
+            matrix["tasks"][0].update(
+                prior_mean=0.42,
+                prior_mean_source="frozen unit-test prior",
+            )
+            matrix["variants"] = list(expected_strengths)
+            matrix_path.write_text(yaml.safe_dump(matrix))
+
+            for job in launcher._jobs(matrix):
+                with self.subTest(variant=job.variant):
+                    command = launcher._command(matrix_path, "a" * 64, matrix, job)
+                    self.assertEqual(
+                        launcher.VARIANT_SETTINGS[job.variant]["prior_strength"],
+                        expected_strengths[job.variant],
+                    )
+                    self.assertEqual(
+                        command[command.index("--prior-mean") + 1], "0.42"
+                    )
+                    self.assertEqual(
+                        command[command.index("--prior-mean-source") + 1],
+                        "frozen unit-test prior",
+                    )
+
+    def test_each_bayesian_variant_requires_finite_sourced_prior(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            matrix_path = (root / "matrix.yaml").resolve()
+            for variant in ("shrink1", "shrink3", "shrink10", "shrink30"):
+                with self.subTest(variant=variant):
+                    matrix = self._matrix(root)
+                    matrix["variants"] = [variant]
+                    matrix["tasks"][0].update(
+                        prior_mean=float("nan"),
+                        prior_mean_source="",
+                    )
+                    job = launcher._jobs(matrix)[0]
+                    with self.assertRaisesRegex(ValueError, f"{variant} task"):
+                        launcher._command(matrix_path, "a" * 64, matrix, job)
 
     def test_completed_requires_matching_matrix_and_consistent_checkpoint(self):
         with tempfile.TemporaryDirectory() as directory:
