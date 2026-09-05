@@ -1,0 +1,38 @@
+schema_version: 1
+experiment_id: fragment_vocab_qed_40k_multiseed_1k_v1
+scientific_status: >-
+  Exploratory three-seed QED pilot using the preliminary 40k checkpoint, a
+  1,000-call budget, a 100-iteration warmup, the legacy count-one approximation,
+  and a fixed neutral shrinkage prior. It is not comparable with the paper and
+  is not a confirmatory efficacy experiment.
+model_path: outputs/paper_v1/checkpoints/40000.ckpt
+tasks:
+  - oracle: qed
+    gamma: 0.0
+    prior_mean: 0.5
+    prior_mean_source: >-
+      fixed neutral exploratory proxy; initial ZINC molecule-level scores are unavailable
+variants:
+  - released
+  - running_mean
+  - support3
+  - shrink10
+  - running_mean_parent_control
+  - delta
+seeds: [0, 1, 2]
+stop_on_failure: true
+common:
+  output_root: output/pmo_ablation
+  max_oracle_calls: 1000
+  reporting_frequency: 100
+  checkpoint_every: 100
+  max_iterations: 10000
+  population_size: 100
+  warmup: 100
+  legacy_warmup_off_by_one: true
+  softmax_temp: 1.2
+  randomness: 2.0
+  guidance_scale: 2.0
+  legacy_seed_count: 1
+  delta_attribution: novel_vs_parent
+  durable_events: true

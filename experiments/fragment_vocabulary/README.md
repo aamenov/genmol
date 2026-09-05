@@ -289,6 +289,16 @@ warmup, clearly marked non-scientific. Proceed only if:
 
 ### Pilot gate
 
+Before the final checkpoint and exact initial-corpus priors are available, the
+versioned `configs/qed_40k_multiseed_1k_v1.yaml` matrix may be used as an
+exploratory reliability run: one oracle, three seeds, 1,000 calls, and a
+100-iteration warmup. It does not satisfy or replace the pilot gate. Its
+preliminary 40k checkpoint, neutral shrinkage-prior proxy, approximate seed
+support, reduced budget, and shortened warmup must remain attached to every
+result and comparison. Because parent-scoring arms can charge both a parent and
+a child per iteration, warmup does not end at the same oracle-call index in all
+arms; report that as an additional exploratory-design limitation.
+
 Run five preregistered task types (similarity, MPO, rediscovery, isomer, and
 activity), three paired seeds, 3,000 unique calls, and the paper warmup/config.
 This gate is for identifiability and operation, not selecting favorable results.

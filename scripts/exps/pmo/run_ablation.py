@@ -256,7 +256,10 @@ def _git_output(*args: str) -> str:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    return completed.stdout.strip()
+    # Preserve the two-column prefix emitted by ``git status --porcelain``.
+    # ``str.strip()`` silently removes the leading index/worktree status space
+    # from the first path, corrupting the recorded provenance for that entry.
+    return completed.stdout.rstrip("\r\n")
 
 
 def _git_metadata() -> dict[str, Any]:
@@ -585,6 +588,7 @@ def _resolved_config(args: argparse.Namespace) -> dict[str, Any]:
         "population_sampling_order": "canonical fragment string before uniform sampling",
         "statistical_duplicate_policy": "one update per unique canonical child",
         "released_duplicate_policy": "repeat cached-child decomposition, matching release",
+        "durable_events": bool(args.durable_events),
     }
 
 

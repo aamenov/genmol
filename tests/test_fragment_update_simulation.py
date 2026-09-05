@@ -2,16 +2,26 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from scripts.exps.pmo.main.genmol.experiment_io import sha256_config, sha256_file
 from scripts.exps.pmo.simulate_fragment_updates import (
     SimulationConfig,
+    _git_output,
     _one_replicate,
     run_simulation,
 )
 
 
 class FragmentUpdateSimulationTests(unittest.TestCase):
+    def test_git_output_preserves_porcelain_status_prefix(self):
+        completed = mock.Mock(stdout=" M first.py\n?? second.py\n")
+        with mock.patch(
+            "scripts.exps.pmo.simulate_fragment_updates.subprocess.run",
+            return_value=completed,
+        ):
+            self.assertEqual(_git_output("status"), " M first.py\n?? second.py")
+
     def test_records_zero_baseline_and_exact_statistical_endpoint(self):
         config = SimulationConfig(
             fragments=6,

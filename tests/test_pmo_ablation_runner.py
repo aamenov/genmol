@@ -19,8 +19,10 @@ from scripts.exps.pmo.run_ablation import (
     CachedOracle,
     _attach_fragments,
     _derived_seed,
+    _git_output,
     _molecule_size_bounds,
     _repair_event_tail,
+    _resolved_config,
     _vocabulary_has_sufficient_statistics,
     run,
 )
@@ -70,6 +72,14 @@ class CachedOracleTests(unittest.TestCase):
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_git_output_preserves_porcelain_status_prefix(self):
+        completed = mock.Mock(stdout=" M first.py\n?? second.py\n")
+        with mock.patch(
+            "scripts.exps.pmo.run_ablation.subprocess.run",
+            return_value=completed,
+        ):
+            self.assertEqual(_git_output("status"), " M first.py\n?? second.py")
+
     def test_paper_gamma_covers_every_cli_oracle(self):
         self.assertEqual(set(PAPER_GAMMA), set(ORACLES))
         self.assertTrue(all(0 <= value <= 1 for value in PAPER_GAMMA.values()))
@@ -208,6 +218,20 @@ class RunnerIntegrationTests(unittest.TestCase):
             "[1*]CO,0.7,2\n"
         )
         return model, vocab
+
+    def test_resolved_config_records_event_durability(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model, vocab = self._files(root)
+            args = self._args(
+                root,
+                model_path=model,
+                vocab_path=vocab,
+                durable_events=True,
+            )
+            self.assertIs(_resolved_config(args)["durable_events"], True)
+            args.durable_events = False
+            self.assertIs(_resolved_config(args)["durable_events"], False)
 
     def test_end_to_end_mocked_run_reaches_exact_budget_and_checkpoints(self):
         with tempfile.TemporaryDirectory() as directory:

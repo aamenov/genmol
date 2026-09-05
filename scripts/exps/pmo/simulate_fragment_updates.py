@@ -125,7 +125,10 @@ def _git_output(*args: str) -> str:
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-    ).stdout.strip()
+    # Preserve the two-column prefix emitted by ``git status --porcelain``.
+    # ``str.strip()`` silently removes the leading index/worktree status space
+    # from the first path, corrupting the recorded provenance for that entry.
+    ).stdout.rstrip("\r\n")
 
 
 def _git_metadata() -> dict[str, Any]:
