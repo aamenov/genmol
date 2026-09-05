@@ -1,0 +1,11 @@
+# Inference settings for a UDLM checkpoint. Keep inference_eps identical to the
+# value stored in the checkpoint; change num_steps only as an explicit NFE ablation.
+model_path: model.ckpt
+num_samples: 1000
+diffusion_type: udlm
+softmax_temp: 1.0
+randomness: 0.0  # recorded for API parity; UDLM sampling does not use this value
+min_add_len: 40
+num_steps: 128
+inference_eps: 1.0e-5
+exclude_special_tokens: false

@@ -1,5 +1,9 @@
 model_path: model.ckpt
 num_samples: 1000
+diffusion_type: mdlm
 softmax_temp: 0.5
 randomness: 0.5
 min_add_len: 40
+num_steps: null
+inference_eps: null
+exclude_special_tokens: null
