@@ -1,0 +1,4222 @@
+{
+  "aggregates": {
+    "delta": {
+      "charged_child_count": {
+        "by_seed": {
+          "0": 536.0,
+          "1": 535.0,
+          "2": 530.0
+        },
+        "mean": 533.6666666666666,
+        "sample_sd": 3.2145502536643185
+      },
+      "diagnostics_by_seed": {
+        "0": {
+          "attribution": {
+            "any_credit_fraction": 0.8792079207920792,
+            "applicable_unique_transitions": 505,
+            "credited_fragment_observations": 4235,
+            "mean_fragment_level_coverage": 0.5276709182362596,
+            "unique_credited_fragments": 3620,
+            "unique_transitions_with_any_credit": 444
+          },
+          "cached_child_lookups": 70,
+          "cached_parent_lookup_rate": 0.08300395256916997,
+          "cached_parent_lookups": 42,
+          "charged_child_calls": 536,
+          "charged_parent_calls": 464,
+          "delta_y_unique_transitions": {
+            "count": 505,
+            "maximum": 0.394890128131797,
+            "mean": -0.03883819965867086,
+            "median": -0.018596167474573377,
+            "minimum": -0.5376292203678363,
+            "negative": 288,
+            "positive": 160,
+            "sample_sd": 0.11902557393967554,
+            "zero": 57
+          },
+          "duplicate_transition_events": 0,
+          "events": 607,
+          "paired_events": 505,
+          "population_updates": 444,
+          "total_parent_lookups": 506,
+          "unique_parent_child_transitions": 505
+        },
+        "1": {
+          "attribution": {
+            "any_credit_fraction": 0.9168399168399168,
+            "applicable_unique_transitions": 481,
+            "credited_fragment_observations": 4118,
+            "mean_fragment_level_coverage": 0.5503253049321375,
+            "unique_credited_fragments": 3525,
+            "unique_transitions_with_any_credit": 441
+          },
+          "cached_child_lookups": 47,
+          "cached_parent_lookup_rate": 0.033264033264033266,
+          "cached_parent_lookups": 16,
+          "charged_child_calls": 535,
+          "charged_parent_calls": 465,
+          "delta_y_unique_transitions": {
+            "count": 481,
+            "maximum": 0.4710386861987342,
+            "mean": -0.02245340141437341,
+            "median": -0.014164329024966116,
+            "minimum": -0.4738342068604392,
+            "negative": 270,
+            "positive": 170,
+            "sample_sd": 0.13717421722325837,
+            "zero": 41
+          },
+          "duplicate_transition_events": 0,
+          "events": 582,
+          "paired_events": 481,
+          "population_updates": 441,
+          "total_parent_lookups": 481,
+          "unique_parent_child_transitions": 481
+        },
+        "2": {
+          "attribution": {
+            "any_credit_fraction": 0.9233954451345756,
+            "applicable_unique_transitions": 483,
+            "credited_fragment_observations": 5497,
+            "mean_fragment_level_coverage": 0.5568937927384741,
+            "unique_credited_fragments": 4696,
+            "unique_transitions_with_any_credit": 446
+          },
+          "cached_child_lookups": 55,
+          "cached_parent_lookup_rate": 0.030927835051546393,
+          "cached_parent_lookups": 15,
+          "charged_child_calls": 530,
+          "charged_parent_calls": 470,
+          "delta_y_unique_transitions": {
+            "count": 483,
+            "maximum": 0.48393303547052413,
+            "mean": 0.015213640016939194,
+            "median": 0.0,
+            "minimum": -0.4235461289899487,
+            "negative": 227,
+            "positive": 218,
+            "sample_sd": 0.14107248167117337,
+            "zero": 38
+          },
+          "duplicate_transition_events": 1,
+          "events": 586,
+          "paired_events": 484,
+          "population_updates": 446,
+          "total_parent_lookups": 485,
+          "unique_parent_child_transitions": 483
+        }
+      },
+      "event_accounting_by_seed": {
+        "0": {
+          "cached_child_lookups": 70,
+          "cached_parent_lookups": 42,
+          "charged_child_evaluations": 536,
+          "charged_parent_evaluations": 464,
+          "logged_events": 607,
+          "runner_iterations_represented": 607
+        },
+        "1": {
+          "cached_child_lookups": 47,
+          "cached_parent_lookups": 16,
+          "charged_child_evaluations": 535,
+          "charged_parent_evaluations": 465,
+          "logged_events": 582,
+          "runner_iterations_represented": 582
+        },
+        "2": {
+          "cached_child_lookups": 55,
+          "cached_parent_lookups": 15,
+          "charged_child_evaluations": 530,
+          "charged_parent_evaluations": 470,
+          "logged_events": 586,
+          "runner_iterations_represented": 586
+        }
+      },
+      "metrics": {
+        "all_charged_molecules": {
+          "auc_top_1": {
+            "by_seed": {
+              "0": 0.8985540317439887,
+              "1": 0.8975789333729156,
+              "2": 0.8945831593593023
+            },
+            "mean": 0.8969053748254022,
+            "sample_sd": 0.0020693520028169537
+          },
+          "auc_top_10": {
+            "by_seed": {
+              "0": 0.8852839525502291,
+              "1": 0.8793339344476374,
+              "2": 0.8737121099066226
+            },
+            "mean": 0.8794433323014964,
+            "sample_sd": 0.005786696938661887
+          },
+          "auc_top_100": {
+            "by_seed": {
+              "0": 0.8295515512178496,
+              "1": 0.8231802365472005,
+              "2": 0.8098520620733786
+            },
+            "mean": 0.8208612832794762,
+            "sample_sd": 0.01005239405971036
+          },
+          "top_1": {
+            "by_seed": {
+              "0": 0.9461696148228578,
+              "1": 0.9471471236039319,
+              "2": 0.9416664835361078
+            },
+            "mean": 0.9449944073209658,
+            "sample_sd": 0.0029232154201558743
+          },
+          "top_10": {
+            "by_seed": {
+              "0": 0.9412019017517428,
+              "1": 0.9321057159894657,
+              "2": 0.9223029652949635
+            },
+            "mean": 0.9318701943453908,
+            "sample_sd": 0.009451669304041822
+          },
+          "top_100": {
+            "by_seed": {
+              "0": 0.9010418495070724,
+              "1": 0.8936060817154297,
+              "2": 0.8708115383305937
+            },
+            "mean": 0.888486489851032,
+            "sample_sd": 0.01575200285996007
+          }
+        },
+        "charged_children_total_call_axis": {
+          "auc_top_1": {
+            "by_seed": {
+              "0": 0.8983748887136487,
+              "1": 0.892063365341769,
+              "2": 0.8945831593593023
+            },
+            "mean": 0.8950071378049067,
+            "sample_sd": 0.0031770505362991417
+          },
+          "auc_top_10": {
+            "by_seed": {
+              "0": 0.8780297179122566,
+              "1": 0.8677694338270102,
+              "2": 0.8660715662932856
+            },
+            "mean": 0.8706235726775174,
+            "sample_sd": 0.006469847677422987
+          },
+          "auc_top_100": {
+            "by_seed": {
+              "0": 0.8122362885757282,
+              "1": 0.7985643622039457,
+              "2": 0.7883471088938828
+            },
+            "mean": 0.7997159198911855,
+            "sample_sd": 0.011986149936412192
+          },
+          "top_1": {
+            "by_seed": {
+              "0": 0.9456577775933143,
+              "1": 0.9397930328957363,
+              "2": 0.9416664835361078
+            },
+            "mean": 0.9423724313417194,
+            "sample_sd": 0.0029954264003857626
+          },
+          "top_10": {
+            "by_seed": {
+              "0": 0.9304374966767902,
+              "1": 0.9242534498310008,
+              "2": 0.9134138857766148
+            },
+            "mean": 0.9227016107614686,
+            "sample_sd": 0.00861724929391265
+          },
+          "top_100": {
+            "by_seed": {
+              "0": 0.8815010308508243,
+              "1": 0.8663689292892114,
+              "2": 0.8509060166941389
+            },
+            "mean": 0.8662586589447249,
+            "sample_sd": 0.01529780515216481
+          }
+        },
+        "first_500_charged_children": {
+          "auc_top_1": {
+            "by_seed": {
+              "0": 0.8510919998339828,
+              "1": 0.8450737136969821,
+              "2": 0.847499835182497
+            },
+            "mean": 0.8478885162378207,
+            "sample_sd": 0.003027911281523792
+          },
+          "auc_top_10": {
+            "by_seed": {
+              "0": 0.8303906805581595,
+              "1": 0.8203807859387752,
+              "2": 0.8203853686559622
+            },
+            "mean": 0.8237189450509655,
+            "sample_sd": 0.005777892890906463
+          },
+          "auc_top_100": {
+            "by_seed": {
+              "0": 0.7620480485345251,
+              "1": 0.7509426746270664,
+              "2": 0.7414397071451008
+            },
+            "mean": 0.7514768101022308,
+            "sample_sd": 0.01031454842613757
+          },
+          "top_1": {
+            "by_seed": {
+              "0": 0.9456577775933143,
+              "1": 0.9397930328957363,
+              "2": 0.9416664835361078
+            },
+            "mean": 0.9423724313417194,
+            "sample_sd": 0.0029954264003857626
+          },
+          "top_10": {
+            "by_seed": {
+              "0": 0.9304374966767902,
+              "1": 0.9215287999795574,
+              "2": 0.9134138857766148
+            },
+            "mean": 0.9217933941443208,
+            "sample_sd": 0.00851488928725226
+          },
+          "top_100": {
+            "by_seed": {
+              "0": 0.8805940107180475,
+              "1": 0.8637403631798297,
+              "2": 0.8493817153176602
+            },
+            "mean": 0.8645720297385124,
+            "sample_sd": 0.015622758974934113
+          }
+        }
+      },
+      "run_count": 3
+    },
+    "released": {
+      "charged_child_count": {
+        "by_seed": {
+          "0": 1000.0,
+          "1": 1000.0,
+          "2": 1000.0
+        },
+        "mean": 1000.0,
+        "sample_sd": 0.0
+      },
+      "diagnostics_by_seed": {},
+      "event_accounting_by_seed": {
+        "0": {
+          "cached_child_lookups": 41,
+          "cached_parent_lookups": 0,
+          "charged_child_evaluations": 1000,
+          "charged_parent_evaluations": 0,
+          "logged_events": 1041,
+          "runner_iterations_represented": 1041
+        },
+        "1": {
+          "cached_child_lookups": 32,
+          "cached_parent_lookups": 0,
+          "charged_child_evaluations": 1000,
+          "charged_parent_evaluations": 0,
+          "logged_events": 1032,
+          "runner_iterations_represented": 1032
+        },
+        "2": {
+          "cached_child_lookups": 36,
+          "cached_parent_lookups": 0,
+          "charged_child_evaluations": 1000,
+          "charged_parent_evaluations": 0,
+          "logged_events": 1036,
+          "runner_iterations_represented": 1036
+        }
+      },
+      "metrics": {
+        "all_charged_molecules": {
+          "auc_top_1": {
+            "by_seed": {
+              "0": 0.9003446188270068,
+              "1": 0.8985942076937719,
+              "2": 0.9002433533116581
+            },
+            "mean": 0.8997273932774789,
+            "sample_sd": 0.000982672809988563
+          },
+          "auc_top_10": {
+            "by_seed": {
+              "0": 0.8945158126924158,
+              "1": 0.8921286632580077,
+              "2": 0.8954380599326016
+            },
+            "mean": 0.8940275119610083,
+            "sample_sd": 0.0017078802038413422
+          },
+          "auc_top_100": {
+            "by_seed": {
+              "0": 0.8541258933734056,
+              "1": 0.8486899156540259,
+              "2": 0.8564104479381534
+            },
+            "mean": 0.8530754189885282,
+            "sample_sd": 0.00396601525621452
+          },
+          "top_1": {
+            "by_seed": {
+              "0": 0.9483312933817938,
+              "1": 0.9479824605293081,
+              "2": 0.948442042791664
+            },
+            "mean": 0.9482519322342554,
+            "sample_sd": 0.00023984913544143561
+          },
+          "top_10": {
+            "by_seed": {
+              "0": 0.9471208601195304,
+              "1": 0.946187604196299,
+              "2": 0.9471545132542678
+            },
+            "mean": 0.9468209925233658,
+            "sample_sd": 0.000548788404594823
+          },
+          "top_100": {
+            "by_seed": {
+              "0": 0.9335118162017748,
+              "1": 0.9308346741936324,
+              "2": 0.9373827938683807
+            },
+            "mean": 0.9339097614212627,
+            "sample_sd": 0.0032921479488308954
+          }
+        },
+        "charged_children_total_call_axis": {
+          "auc_top_1": {
+            "by_seed": {
+              "0": 0.9003446188270068,
+              "1": 0.8985942076937719,
+              "2": 0.9002433533116581
+            },
+            "mean": 0.8997273932774789,
+            "sample_sd": 0.000982672809988563
+          },
+          "auc_top_10": {
+            "by_seed": {
+              "0": 0.8945158126924158,
+              "1": 0.8921286632580077,
+              "2": 0.8954380599326016
+            },
+            "mean": 0.8940275119610083,
+            "sample_sd": 0.0017078802038413422
+          },
+          "auc_top_100": {
+            "by_seed": {
+              "0": 0.8541258933734056,
+              "1": 0.8486899156540259,
+              "2": 0.8564104479381534
+            },
+            "mean": 0.8530754189885282,
+            "sample_sd": 0.00396601525621452
+          },
+          "top_1": {
+            "by_seed": {
+              "0": 0.9483312933817938,
+              "1": 0.9479824605293081,
+              "2": 0.948442042791664
+            },
+            "mean": 0.9482519322342554,
+            "sample_sd": 0.00023984913544143561
+          },
+          "top_10": {
+            "by_seed": {
+              "0": 0.9471208601195304,
+              "1": 0.946187604196299,
+              "2": 0.9471545132542678
+            },
+            "mean": 0.9468209925233658,
+            "sample_sd": 0.000548788404594823
+          },
+          "top_100": {
+            "by_seed": {
+              "0": 0.9335118162017748,
+              "1": 0.9308346741936324,
+              "2": 0.9373827938683807
+            },
+            "mean": 0.9339097614212627,
+            "sample_sd": 0.0032921479488308954
+          }
+        },
+        "first_500_charged_children": {
+          "auc_top_1": {
+            "by_seed": {
+              "0": 0.8524336338489324,
+              "1": 0.8495002328119615,
+              "2": 0.8520446638316519
+            },
+            "mean": 0.8513261768308485,
+            "sample_sd": 0.0015932288249551575
+          },
+          "auc_top_10": {
+            "by_seed": {
+              "0": 0.8424164485458889,
+              "1": 0.8385292757838702,
+              "2": 0.8443695565435294
+            },
+            "mean": 0.8417717602910962,
+            "sample_sd": 0.002973034989251275
+          },
+          "auc_top_100": {
+            "by_seed": {
+              "0": 0.7835466850234972,
+              "1": 0.7762259412615028,
+              "2": 0.7832548816878667
+            },
+            "mean": 0.7810091693242889,
+            "sample_sd": 0.004144965659946987
+          },
+          "top_1": {
+            "by_seed": {
+              "0": 0.947574397614671,
+              "1": 0.9473939046218561,
+              "2": 0.948442042791664
+            },
+            "mean": 0.9478034483427304,
+            "sample_sd": 0.0005603539798827568
+          },
+          "top_10": {
+            "by_seed": {
+              "0": 0.9454653333739953,
+              "1": 0.9449058101442521,
+              "2": 0.946148170192029
+            },
+            "mean": 0.9455064379034255,
+            "sample_sd": 0.0006221991713533597
+          },
+          "top_100": {
+            "by_seed": {
+              "0": 0.9112849670103202,
+              "1": 0.9088144135423394,
+              "2": 0.9201282377448201
+            },
+            "mean": 0.91340920609916,
+            "sample_sd": 0.005948524884462992
+          }
+        }
+      },
+      "run_count": 3
+    },
+    "running_mean": {
+      "charged_child_count": {
+        "by_seed": {
+          "0": 1000.0,
+          "1": 1000.0,
+          "2": 1000.0
+        },
+        "mean": 1000.0,
+        "sample_sd": 0.0
+      },
+      "diagnostics_by_seed": {},
+      "event_accounting_by_seed": {
+        "0": {
+          "cached_child_lookups": 48,
+          "cached_parent_lookups": 0,
+          "charged_child_evaluations": 1000,
+          "charged_parent_evaluations": 0,
+          "logged_events": 1048,
+          "runner_iterations_represented": 1048
+        },
+        "1": {
+          "cached_child_lookups": 42,
+          "cached_parent_lookups": 0,
+          "charged_child_evaluations": 1000,
+          "charged_parent_evaluations": 0,
+          "logged_events": 1042,
+          "runner_iterations_represented": 1042
+        },
+        "2": {
+          "cached_child_lookups": 53,
+          "cached_parent_lookups": 0,
+          "charged_child_evaluations": 1000,
+          "charged_parent_evaluations": 0,
+          "logged_events": 1053,
+          "runner_iterations_represented": 1053
+        }
+      },
+      "metrics": {
+        "all_charged_molecules": {
+          "auc_top_1": {
+            "by_seed": {
+              "0": 0.9005759792235912,
+              "1": 0.9007747382638959,
+              "2": 0.8982142205550067
+            },
+            "mean": 0.899854979347498,
+            "sample_sd": 0.001424409825288613
+          },
+          "auc_top_10": {
+            "by_seed": {
+              "0": 0.8964846073657152,
+              "1": 0.8978885986350827,
+              "2": 0.8932338445900956
+            },
+            "mean": 0.8958690168636312,
+            "sample_sd": 0.0023876552419734203
+          },
+          "auc_top_100": {
+            "by_seed": {
+              "0": 0.8556246787971516,
+              "1": 0.8628611542271317,
+              "2": 0.8536226774920979
+            },
+            "mean": 0.8573695035054604,
+            "sample_sd": 0.004860110394114937
+          },
+          "top_1": {
+            "by_seed": {
+              "0": 0.9483312933817938,
+              "1": 0.9483312933817938,
+              "2": 0.947784650947615
+            },
+            "mean": 0.9481490792370675,
+            "sample_sd": 0.00031560415652359675
+          },
+          "top_10": {
+            "by_seed": {
+              "0": 0.9475338873050647,
+              "1": 0.947472124464265,
+              "2": 0.9465836334320586
+            },
+            "mean": 0.9471965484004627,
+            "sample_sd": 0.0005316974995204467
+          },
+          "top_100": {
+            "by_seed": {
+              "0": 0.9404728152893783,
+              "1": 0.9391836888039584,
+              "2": 0.9370306672450036
+            },
+            "mean": 0.9388957237794467,
+            "sample_sd": 0.0017390482113370637
+          }
+        },
+        "charged_children_total_call_axis": {
+          "auc_top_1": {
+            "by_seed": {
+              "0": 0.9005759792235912,
+              "1": 0.9007747382638959,
+              "2": 0.8982142205550067
+            },
+            "mean": 0.899854979347498,
+            "sample_sd": 0.001424409825288613
+          },
+          "auc_top_10": {
+            "by_seed": {
+              "0": 0.8964846073657152,
+              "1": 0.8978885986350827,
+              "2": 0.8932338445900956
+            },
+            "mean": 0.8958690168636312,
+            "sample_sd": 0.0023876552419734203
+          },
+          "auc_top_100": {
+            "by_seed": {
+              "0": 0.8556246787971516,
+              "1": 0.8628611542271317,
+              "2": 0.8536226774920979
+            },
+            "mean": 0.8573695035054604,
+            "sample_sd": 0.004860110394114937
+          },
+          "top_1": {
+            "by_seed": {
+              "0": 0.9483312933817938,
+              "1": 0.9483312933817938,
+              "2": 0.947784650947615
+            },
+            "mean": 0.9481490792370675,
+            "sample_sd": 0.00031560415652359675
+          },
+          "top_10": {
+            "by_seed": {
+              "0": 0.9475338873050647,
+              "1": 0.947472124464265,
+              "2": 0.9465836334320586
+            },
+            "mean": 0.9471965484004627,
+            "sample_sd": 0.0005316974995204467
+          },
+          "top_100": {
+            "by_seed": {
+              "0": 0.9404728152893783,
+              "1": 0.9391836888039584,
+              "2": 0.9370306672450036
+            },
+            "mean": 0.9388957237794467,
+            "sample_sd": 0.0017390482113370637
+          }
+        },
+        "first_500_charged_children": {
+          "auc_top_1": {
+            "by_seed": {
+              "0": 0.8528206650653892,
+              "1": 0.8532461812357599,
+              "2": 0.8486437901623985
+            },
+            "mean": 0.8515702121545159,
+            "sample_sd": 0.0025432705832790915
+          },
+          "auc_top_10": {
+            "by_seed": {
+              "0": 0.8455664551109545,
+              "1": 0.8484220833924423,
+              "2": 0.8406599326952733
+            },
+            "mean": 0.84488282373289,
+            "sample_sd": 0.003925972460065927
+          },
+          "auc_top_100": {
+            "by_seed": {
+              "0": 0.7767830410526008,
+              "1": 0.7915107091562755,
+              "2": 0.7773090532748737
+            },
+            "mean": 0.7818676011612501,
+            "sample_sd": 0.008355316933982176
+          },
+          "top_1": {
+            "by_seed": {
+              "0": 0.9483312933817938,
+              "1": 0.9480513124841776,
+              "2": 0.947784650947615
+            },
+            "mean": 0.9480557522711955,
+            "sample_sd": 0.0002733482604532194
+          },
+          "top_10": {
+            "by_seed": {
+              "0": 0.9472420869252023,
+              "1": 0.9467675672106873,
+              "2": 0.9445114163828787
+            },
+            "mean": 0.9461736901729227,
+            "sample_sd": 0.0014589920680615157
+          },
+          "top_100": {
+            "by_seed": {
+              "0": 0.9224538721791115,
+              "1": 0.9254814791627014,
+              "2": 0.9187779845022306
+            },
+            "mean": 0.9222377786146811,
+            "sample_sd": 0.003356967751882843
+          }
+        }
+      },
+      "run_count": 3
+    },
+    "running_mean_delta_control": {
+      "charged_child_count": {
+        "by_seed": {
+          "0": 530.0,
+          "1": 534.0,
+          "2": 539.0
+        },
+        "mean": 534.3333333333334,
+        "sample_sd": 4.509249752822894
+      },
+      "diagnostics_by_seed": {
+        "0": {
+          "attribution": {
+            "any_credit_fraction": 0.872255489021956,
+            "applicable_unique_transitions": 501,
+            "credited_fragment_observations": 5087,
+            "mean_fragment_level_coverage": 0.5324849286043901,
+            "unique_credited_fragments": 4458,
+            "unique_transitions_with_any_credit": 437
+          },
+          "cached_child_lookups": 73,
+          "cached_parent_lookup_rate": 0.06560636182902585,
+          "cached_parent_lookups": 33,
+          "charged_child_calls": 530,
+          "charged_parent_calls": 470,
+          "delta_y_unique_transitions": {
+            "count": 501,
+            "maximum": 0.47986109582504893,
+            "mean": -0.012125365114283951,
+            "median": -0.0037362742427580198,
+            "minimum": -0.5498004065235471,
+            "negative": 255,
+            "positive": 180,
+            "sample_sd": 0.1361459087820198,
+            "zero": 66
+          },
+          "duplicate_transition_events": 1,
+          "events": 604,
+          "paired_events": 502,
+          "population_updates": 437,
+          "total_parent_lookups": 503,
+          "unique_parent_child_transitions": 501
+        },
+        "1": {
+          "attribution": {
+            "any_credit_fraction": 0.8877755511022044,
+            "applicable_unique_transitions": 499,
+            "credited_fragment_observations": 3810,
+            "mean_fragment_level_coverage": 0.5392374306965673,
+            "unique_credited_fragments": 3124,
+            "unique_transitions_with_any_credit": 443
+          },
+          "cached_child_lookups": 66,
+          "cached_parent_lookup_rate": 0.06613226452905811,
+          "cached_parent_lookups": 33,
+          "charged_child_calls": 534,
+          "charged_parent_calls": 466,
+          "delta_y_unique_transitions": {
+            "count": 499,
+            "maximum": 0.3395142259919741,
+            "mean": -0.03265331934205851,
+            "median": -0.021287066058385595,
+            "minimum": -0.4611718183378199,
+            "negative": 300,
+            "positive": 141,
+            "sample_sd": 0.10237126577302248,
+            "zero": 58
+          },
+          "duplicate_transition_events": 0,
+          "events": 600,
+          "paired_events": 499,
+          "population_updates": 443,
+          "total_parent_lookups": 499,
+          "unique_parent_child_transitions": 499
+        },
+        "2": {
+          "attribution": {
+            "any_credit_fraction": 0.9214876033057852,
+            "applicable_unique_transitions": 484,
+            "credited_fragment_observations": 4681,
+            "mean_fragment_level_coverage": 0.5568379896054244,
+            "unique_credited_fragments": 3966,
+            "unique_transitions_with_any_credit": 446
+          },
+          "cached_child_lookups": 46,
+          "cached_parent_lookup_rate": 0.049484536082474224,
+          "cached_parent_lookups": 24,
+          "charged_child_calls": 539,
+          "charged_parent_calls": 461,
+          "delta_y_unique_transitions": {
+            "count": 484,
+            "maximum": 0.5390197298998648,
+            "mean": -0.021830430728535643,
+            "median": -0.00863800061552017,
+            "minimum": -0.4779779206769534,
+            "negative": 261,
+            "positive": 185,
+            "sample_sd": 0.12021265799690838,
+            "zero": 38
+          },
+          "duplicate_transition_events": 0,
+          "events": 586,
+          "paired_events": 484,
+          "population_updates": 446,
+          "total_parent_lookups": 485,
+          "unique_parent_child_transitions": 484
+        }
+      },
+      "event_accounting_by_seed": {
+        "0": {
+          "cached_child_lookups": 73,
+          "cached_parent_lookups": 33,
+          "charged_child_evaluations": 530,
+          "charged_parent_evaluations": 470,
+          "logged_events": 604,
+          "runner_iterations_represented": 604
+        },
+        "1": {
+          "cached_child_lookups": 66,
+          "cached_parent_lookups": 33,
+          "charged_child_evaluations": 534,
+          "charged_parent_evaluations": 466,
+          "logged_events": 600,
+          "runner_iterations_represented": 600
+        },
+        "2": {
+          "cached_child_lookups": 46,
+          "cached_parent_lookups": 24,
+          "charged_child_evaluations": 539,
+          "charged_parent_evaluations": 461,
+          "logged_events": 586,
+          "runner_iterations_represented": 586
+        }
+      },
+      "metrics": {
+        "all_charged_molecules": {
+          "auc_top_1": {
+            "by_seed": {
+              "0": 0.8983748887136487,
+              "1": 0.8996030704970199,
+              "2": 0.8945831593593023
+            },
+            "mean": 0.8975203728566571,
+            "sample_sd": 0.0026167775927718817
+          },
+          "auc_top_10": {
+            "by_seed": {
+              "0": 0.8756185038449902,
+              "1": 0.8901830545077856,
+              "2": 0.8764543818165575
+            },
+            "mean": 0.8807519800564444,
+            "sample_sd": 0.00817823617755641
+          },
+          "auc_top_100": {
+            "by_seed": {
+              "0": 0.8220383051651328,
+              "1": 0.8413550121134762,
+              "2": 0.8164324838357735
+            },
+            "mean": 0.8266086003714608,
+            "sample_sd": 0.01307473910420248
+          },
+          "top_1": {
+            "by_seed": {
+              "0": 0.9456577775933143,
+              "1": 0.9482654487870716,
+              "2": 0.9416664835361078
+            },
+            "mean": 0.9451965699721646,
+            "sample_sd": 0.003323570361555763
+          },
+          "top_10": {
+            "by_seed": {
+              "0": 0.9271326182375479,
+              "1": 0.9422359199897278,
+              "2": 0.9305273367905338
+            },
+            "mean": 0.9332986250059365,
+            "sample_sd": 0.007923853843551912
+          },
+          "top_100": {
+            "by_seed": {
+              "0": 0.8953746304761749,
+              "1": 0.9164906667808138,
+              "2": 0.8973970000037914
+            },
+            "mean": 0.9030874324202601,
+            "sample_sd": 0.011651502612088476
+          }
+        },
+        "charged_children_total_call_axis": {
+          "auc_top_1": {
+            "by_seed": {
+              "0": 0.8983748887136487,
+              "1": 0.8961626841591844,
+              "2": 0.8945831593593023
+            },
+            "mean": 0.8963735774107118,
+            "sample_sd": 0.0019046416583724597
+          },
+          "auc_top_10": {
+            "by_seed": {
+              "0": 0.8712591676543723,
+              "1": 0.8799766456731736,
+              "2": 0.8738674075964074
+            },
+            "mean": 0.8750344069746511,
+            "sample_sd": 0.004474373857165587
+          },
+          "auc_top_100": {
+            "by_seed": {
+              "0": 0.8049127105109007,
+              "1": 0.8195922957756603,
+              "2": 0.799901134094719
+            },
+            "mean": 0.8081353801270934,
+            "sample_sd": 0.0102335068123098
+          },
+          "top_1": {
+            "by_seed": {
+              "0": 0.9456577775933143,
+              "1": 0.9441804574402368,
+              "2": 0.9416664835361078
+            },
+            "mean": 0.9438349061898862,
+            "sample_sd": 0.002017959690562962
+          },
+          "top_10": {
+            "by_seed": {
+              "0": 0.9215518818711403,
+              "1": 0.9329936512865367,
+              "2": 0.9283172409010809
+            },
+            "mean": 0.9276209246862527,
+            "sample_sd": 0.0057525789035917825
+          },
+          "top_100": {
+            "by_seed": {
+              "0": 0.878447475328919,
+              "1": 0.8953901659817199,
+              "2": 0.8791292209819136
+            },
+            "mean": 0.8843222874308508,
+            "sample_sd": 0.009591123291691935
+          }
+        },
+        "first_500_charged_children": {
+          "auc_top_1": {
+            "by_seed": {
+              "0": 0.8510919998339828,
+              "1": 0.8481449108781326,
+              "2": 0.847499835182497
+            },
+            "mean": 0.8489122486315375,
+            "sample_sd": 0.0019150762756862158
+          },
+          "auc_top_10": {
+            "by_seed": {
+              "0": 0.824590315133462,
+              "1": 0.831761475789036,
+              "2": 0.8270061169333162
+            },
+            "mean": 0.8277859692852715,
+            "sample_sd": 0.0036486317373983783
+          },
+          "auc_top_100": {
+            "by_seed": {
+              "0": 0.7562930783162126,
+              "1": 0.7688030265867546,
+              "2": 0.7500829115848642
+            },
+            "mean": 0.7583930054959437,
+            "sample_sd": 0.00953509030062804
+          },
+          "top_1": {
+            "by_seed": {
+              "0": 0.9456577775933143,
+              "1": 0.9441804574402368,
+              "2": 0.9416664835361078
+            },
+            "mean": 0.9438349061898862,
+            "sample_sd": 0.002017959690562962
+          },
+          "top_10": {
+            "by_seed": {
+              "0": 0.9215518818711403,
+              "1": 0.9324412849811508,
+              "2": 0.927593887111031
+            },
+            "mean": 0.9271956846544406,
+            "sample_sd": 0.0054556116907641065
+          },
+          "top_100": {
+            "by_seed": {
+              "0": 0.8756730207814303,
+              "1": 0.8934424769805395,
+              "2": 0.8747429205064234
+            },
+            "mean": 0.8812861394227977,
+            "sample_sd": 0.010537963690567252
+          }
+        }
+      },
+      "run_count": 3
+    }
+  },
+  "caveats": [
+    "This is an exploratory QED-only, 1,000-call, three-seed experiment; it is neither confirmatory nor paper-comparable.",
+    "Delta-y is an association for an adaptive parent-child proposal, not a causal fragment contribution.",
+    "The deterministic all-cut child-minus-parent mapping is approximate; several credited fragments each receive the full molecular delta.",
+    "Parent-scoring arms spend part of the fixed budget on parents and therefore evaluate fewer children than released or ordinary running mean.",
+    "Both matched arms start with neutral zero online estimates; absolute seed scores only break ties. The released and ordinary running-mean arms are contextual references, not matched causal controls.",
+    "A unique oracle call is a newly scored canonical molecule. A charged child is a unique child evaluation, not an optimizer iteration; logged events and cached-child lookups are reported separately. Cached parent lookups are free under the unique-call budget.",
+    "The first-500-child view equalizes charged child evaluations, but those children can occur at different total oracle-call positions and remain adaptively generated.",
+    "All 12 jobs shared a GPU. Score comparisons remain valid, but wall-time comparisons are suppressed."
+  ],
+  "collection_created_at": "2026-09-05T21:13:25Z",
+  "design": {
+    "calls_vs_iterations": "Unique oracle calls count newly scored canonical molecules; charged children count unique child evaluations, while runner iterations/events also include cached lookups.",
+    "common_charged_child_horizon": 500,
+    "contextual_reference_variants": [
+      "released",
+      "running_mean"
+    ],
+    "delta_attribution": "novel_vs_parent",
+    "matched_contrast": "delta - running_mean_delta_control",
+    "matched_variants": [
+      "running_mean_delta_control",
+      "delta"
+    ],
+    "oracle": "qed",
+    "run_count": 12,
+    "seeds": [
+      0,
+      1,
+      2
+    ],
+    "unique_oracle_calls_per_run": 1000,
+    "variants": [
+      "released",
+      "running_mean",
+      "running_mean_delta_control",
+      "delta"
+    ]
+  },
+  "execution": {
+    "all_jobs_shared": true,
+    "shared_job_count": 12,
+    "unique_gpu_count": 4,
+    "wall_time_comparisons_reported": false
+  },
+  "experiment_id": "fragment_vocab_qed_50k_delta_1k_v2",
+  "inputs": {
+    "collection_manifest": {
+      "path": "/home/aidar.alimbayev/Documents/genmolv2/experiments/fragment_vocabulary/results/qed_50k_delta_1k_v2/collection_manifest.json",
+      "sha256": "0f4d19d3a1e01ad99346c05415343d28ef95e54418fd89baa5c80e25b6f5ea5d"
+    },
+    "matrix": {
+      "path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/experiments/fragment_vocabulary/configs/qed_50k_delta_1k_v2.yaml",
+      "sha256": "8c62dd6c040392be48a1d6f1024179e16b2b70ff2667073658affd4d89197dc8"
+    },
+    "model_sha256": "8d00aa47b02f64bf39ff6b0b2e786f213587366fc2c3d29712a00f3f84108dd6",
+    "results_csv": {
+      "path": "/home/aidar.alimbayev/Documents/genmolv2/experiments/fragment_vocabulary/results/qed_50k_delta_1k_v2/results.7dde67317ac09075fc0510b94fe2a7635ad7ed00f17595f0b92f854caefedda7.csv",
+      "sha256": "7dde67317ac09075fc0510b94fe2a7635ad7ed00f17595f0b92f854caefedda7"
+    },
+    "vocabulary_sha256": "6b98420f3fa88835e50cb28b960225dc6c7857a29f3057fb1ca22b4211c1806c"
+  },
+  "metric_definitions": {
+    "auc_top_k": {
+      "definition": "The top-k trajectory starts at (0, 0), is evaluated every 100 axis units through the stated horizon, is integrated by the trapezoidal rule, and is divided by that horizon."
+    },
+    "top_k": {
+      "definition": "At a stated horizon, top-k is the arithmetic mean of the highest min(k, N) QED scores observed in that view, where N is the number of included scores available by that horizon.",
+      "k_values": [
+        1,
+        10,
+        100
+      ]
+    },
+    "views": {
+      "all_charged_molecules": "All charged unique parent and child QED evaluations in global unique-oracle-call order; horizon and AUC divisor are 1,000 calls.",
+      "charged_children_total_call_axis": "Only charged child QED scores, located at their original global unique-oracle-call indices; checkpoints, horizon, and AUC divisor remain 0, 100, ..., 1,000 calls. This is not an equal-child-evaluation view.",
+      "first_500_charged_children": "The first 500 charged child QED scores in event order, densely indexed as charged-child evaluations 1 through 500; checkpoints are 0, 100, ..., 500 and the trapezoidal AUC divisor is 500 charged-child evaluations."
+    }
+  },
+  "paired_delta_vs_matched_control": {
+    "charged_child_count": {
+      "by_seed": {
+        "0": 6.0,
+        "1": 1.0,
+        "2": -9.0
+      },
+      "mean": -0.6666666666666666,
+      "sample_sd": 7.637626158259733
+    },
+    "contrast": "delta - running_mean_delta_control",
+    "metrics": {
+      "all_charged_molecules": {
+        "auc_top_1": {
+          "by_seed": {
+            "0": 0.00017914303034005652,
+            "1": -0.0020241371241043193,
+            "2": 0.0
+          },
+          "mean": -0.0006149980312547543,
+          "sample_sd": 0.001223633030600893
+        },
+        "auc_top_10": {
+          "by_seed": {
+            "0": 0.009665448705238888,
+            "1": -0.010849120060148154,
+            "2": -0.0027422719099349235
+          },
+          "mean": -0.001308647754948063,
+          "sample_sd": 0.010332150868564094
+        },
+        "auc_top_100": {
+          "by_seed": {
+            "0": 0.00751324605271686,
+            "1": -0.01817477556627567,
+            "2": -0.006580421762394928
+          },
+          "mean": -0.005747317091984579,
+          "sample_sd": 0.01286425906215945
+        },
+        "top_1": {
+          "by_seed": {
+            "0": 0.0005118372295435103,
+            "1": -0.0011183251831397012,
+            "2": 0.0
+          },
+          "mean": -0.0002021626511987303,
+          "sample_sd": 0.0008336724033372232
+        },
+        "top_10": {
+          "by_seed": {
+            "0": 0.014069283514194897,
+            "1": -0.0101302040002621,
+            "2": -0.008224371495570315
+          },
+          "mean": -0.0014284306605458392,
+          "sample_sd": 0.013455200030674196
+        },
+        "top_100": {
+          "by_seed": {
+            "0": 0.005667219030897508,
+            "1": -0.022884585065384155,
+            "2": -0.026585461673197752
+          },
+          "mean": -0.014600942569228134,
+          "sample_sd": 0.01765001141368388
+        }
+      },
+      "charged_children_total_call_axis": {
+        "auc_top_1": {
+          "by_seed": {
+            "0": 0.0,
+            "1": -0.004099318817415432,
+            "2": 0.0
+          },
+          "mean": -0.0013664396058051438,
+          "sample_sd": 0.002366742822728898
+        },
+        "auc_top_10": {
+          "by_seed": {
+            "0": 0.006770550257884311,
+            "1": -0.012207211846163357,
+            "2": -0.00779584130312172
+          },
+          "mean": -0.004410834297133588,
+          "sample_sd": 0.00993139305145046
+        },
+        "auc_top_100": {
+          "by_seed": {
+            "0": 0.0073235780648274185,
+            "1": -0.02102793357171462,
+            "2": -0.011554025200836149
+          },
+          "mean": -0.008419460235907783,
+          "sample_sd": 0.01443333558671598
+        },
+        "top_1": {
+          "by_seed": {
+            "0": 0.0,
+            "1": -0.004387424544500473,
+            "2": 0.0
+          },
+          "mean": -0.0014624748481668244,
+          "sample_sd": 0.0025330807418165197
+        },
+        "top_10": {
+          "by_seed": {
+            "0": 0.008885614805649866,
+            "1": -0.00874020145553589,
+            "2": -0.014903355124466167
+          },
+          "mean": -0.004919313924784063,
+          "sample_sd": 0.01234617992441315
+        },
+        "top_100": {
+          "by_seed": {
+            "0": 0.003053555521905338,
+            "1": -0.029021236692508556,
+            "2": -0.028223204287774695
+          },
+          "mean": -0.01806362848612597,
+          "sample_sd": 0.018292370246951083
+        }
+      },
+      "first_500_charged_children": {
+        "auc_top_1": {
+          "by_seed": {
+            "0": 0.0,
+            "1": -0.0030711971811504535,
+            "2": 0.0
+          },
+          "mean": -0.001023732393716818,
+          "sample_sd": 0.0017731565192716343
+        },
+        "auc_top_10": {
+          "by_seed": {
+            "0": 0.005800365424697418,
+            "1": -0.011380689850260861,
+            "2": -0.006620748277353927
+          },
+          "mean": -0.00406702423430579,
+          "sample_sd": 0.00887064230799126
+        },
+        "auc_top_100": {
+          "by_seed": {
+            "0": 0.005754970218312505,
+            "1": -0.01786035195968816,
+            "2": -0.008643204439763408
+          },
+          "mean": -0.0069161953937130205,
+          "sample_sd": 0.01190200741793364
+        },
+        "top_1": {
+          "by_seed": {
+            "0": 0.0,
+            "1": -0.004387424544500473,
+            "2": 0.0
+          },
+          "mean": -0.0014624748481668244,
+          "sample_sd": 0.0025330807418165197
+        },
+        "top_10": {
+          "by_seed": {
+            "0": 0.008885614805649866,
+            "1": -0.010912485001593364,
+            "2": -0.014180001334416215
+          },
+          "mean": -0.005402290510119904,
+          "sample_sd": 0.01248107945975097
+        },
+        "top_100": {
+          "by_seed": {
+            "0": 0.0049209899366172705,
+            "1": -0.02970211380070975,
+            "2": -0.02536120518876328
+          },
+          "mean": -0.016714109684285255,
+          "sample_sd": 0.018861840408589514
+        }
+      }
+    }
+  },
+  "pdf": {
+    "encrypted": false,
+    "page_count": 4,
+    "path": "/home/aidar.alimbayev/Documents/genmolv2/experiments/fragment_vocabulary/results/qed_50k_delta_1k_v2/delta_ablation.54d0b68ee8a4e8c0b6e53afc101d09e94745d0c9a5a28e1b5a0c5b508c640aaf.pdf",
+    "sha256": "54d0b68ee8a4e8c0b6e53afc101d09e94745d0c9a5a28e1b5a0c5b508c640aaf",
+    "size_bytes": 15040
+  },
+  "report_type": "fixed QED delta-y credit-assignment ablation",
+  "reporter": {
+    "path": "/home/aidar.alimbayev/Documents/genmolv2/scripts/exps/pmo/report_delta_ablation.py",
+    "sha256": "ec5ac38463a34fb9edaba60fec0fd7535fde29df4c4605863f0186a861bb5072"
+  },
+  "runs": [
+    {
+      "charged_child_count": 1000,
+      "config": {
+        "checkpoint_every": 100,
+        "credit_fragment_policy": "sampled_three_cut_child",
+        "credit_value_policy": "absolute_child_score",
+        "delta_attribution": "novel_vs_parent",
+        "device": "cuda:0",
+        "durable_events": true,
+        "experiment_id": "fragment_vocab_qed_50k_delta_1k_v2",
+        "gamma": 0.0,
+        "guidance_scale": 2.0,
+        "legacy_seed_count": 1,
+        "legacy_warmup_off_by_one": true,
+        "matrix_path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/experiments/fragment_vocabulary/configs/qed_50k_delta_1k_v2.yaml",
+        "matrix_sha256": "8c62dd6c040392be48a1d6f1024179e16b2b70ff2667073658affd4d89197dc8",
+        "max_iterations": 10000,
+        "max_mol_size": 30,
+        "max_oracle_calls": 1000,
+        "min_mol_size": 10,
+        "min_support": 1,
+        "model_path": "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/50000.ckpt",
+        "observation_identity": "canonical_child_occurrence",
+        "oracle": "qed",
+        "parent_control": false,
+        "parent_domain_policy": "child_within_configured_atom_bounds",
+        "policy_mode": "released",
+        "population_sampling_order": "canonical fragment string before uniform sampling",
+        "population_size": 100,
+        "prior_mean": null,
+        "prior_mean_source": null,
+        "prior_strength": 0.0,
+        "randomness": 2.0,
+        "released_duplicate_policy": "repeat cached-child decomposition, matching release",
+        "reporting_frequency": 100,
+        "scientific_status": "Exploratory paired three-seed QED delta-y credit-assignment study using the final 50k checkpoint, a 1,000-unique-oracle-call budget, warmup parameter 100 (101 frozen iterations under the legacy iteration > warmup boundary), and neutral zero seed estimates with absolute seed scores used only for matched tie-breaking. The delta and transition-absolute control arms share parent/child oracle accounting, domains, transition deduplication, deterministic attribution, and warmup; only the post-warmup credit target differs. This QED-only reduced-budget study is not paper-comparable, causal, or confirmatory.",
+        "seed": 0,
+        "seed_initialization_policy": "released_absolute_rows",
+        "softmax_temp": 1.2,
+        "statistical_duplicate_policy": "one update per unique canonical child",
+        "variant": "released",
+        "vocab_path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/scripts/exps/pmo/vocab/qed.csv",
+        "warmup": 100,
+        "warmup_update_policy": "standard"
+      },
+      "delta_diagnostics": null,
+      "event_accounting": {
+        "cached_child_lookups": 41,
+        "cached_parent_lookups": 0,
+        "charged_child_evaluations": 1000,
+        "charged_parent_evaluations": 0,
+        "logged_events": 1041,
+        "runner_iterations_represented": 1041
+      },
+      "launch": {
+        "any_gpu_sharing": true,
+        "attempt_count": 1,
+        "attempts": [
+          {
+            "command_sha256": "573eae5aa9124349ade8c8d5bd0f5f2090b72367fcf0bf99a2f12b39ed53a5f2",
+            "line_number": 1,
+            "matrix_provenance_complete": true,
+            "path": "/home/aidar.alimbayev/Documents/genmolv2/output/logs/pmo_fragment_vocab_qed_50k_delta_1k_v2__qed__released__seed0.log",
+            "policy_complete": true,
+            "record": {
+              "command": [
+                "/home/aidar.alimbayev/Documents/genmolv2/.venv/bin/python",
+                "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/scripts/exps/pmo/run_ablation.py",
+                "--oracle",
+                "qed",
+                "--variant",
+                "released",
+                "--seed",
+                "0",
+                "--model-path",
+                "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/50000.ckpt",
+                "--device",
+                "cuda:0",
+                "--experiment-id",
+                "fragment_vocab_qed_50k_delta_1k_v2",
+                "--scientific-status",
+                "Exploratory paired three-seed QED delta-y credit-assignment study using the final 50k checkpoint, a 1,000-unique-oracle-call budget, warmup parameter 100 (101 frozen iterations under the legacy iteration > warmup boundary), and neutral zero seed estimates with absolute seed scores used only for matched tie-breaking. The delta and transition-absolute control arms share parent/child oracle accounting, domains, transition deduplication, deterministic attribution, and warmup; only the post-warmup credit target differs. This QED-only reduced-budget study is not paper-comparable, causal, or confirmatory.",
+                "--matrix-path",
+                "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/experiments/fragment_vocabulary/configs/qed_50k_delta_1k_v2.yaml",
+                "--matrix-sha256",
+                "8c62dd6c040392be48a1d6f1024179e16b2b70ff2667073658affd4d89197dc8",
+                "--output-root",
+                "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation",
+                "--max-oracle-calls",
+                "1000",
+                "--reporting-frequency",
+                "100",
+                "--checkpoint-every",
+                "100",
+                "--max-iterations",
+                "10000",
+                "--population-size",
+                "100",
+                "--warmup",
+                "100",
+                "--softmax-temp",
+                "1.2",
+                "--randomness",
+                "2.0",
+                "--guidance-scale",
+                "2.0",
+                "--legacy-seed-count",
+                "1",
+                "--delta-attribution",
+                "novel_vs_parent",
+                "--legacy-warmup-off-by-one",
+                "--durable-events",
+                "--gamma",
+                "0.0"
+              ],
+              "compute_processes": [
+                {
+                  "gpu_uuid": "GPU-997e881a-bd08-aa54-45f3-9b3c6fdf6ece",
+                  "pid": 1701406,
+                  "process_name": "/home/meir.roketlishvili/miniconda3/envs/SGPO_repro/bin/python",
+                  "used_memory_mib": 1952
+                }
+              ],
+              "event": "launch",
+              "job": "qed__released__seed0",
+              "min_free_memory_mib": 30000,
+              "physical_gpu": {
+                "index": 2,
+                "memory_total_mib": 49140,
+                "memory_used_mib": 1975,
+                "utilization_percent": 5,
+                "uuid": "GPU-997e881a-bd08-aa54-45f3-9b3c6fdf6ece"
+              },
+              "sharing_actual": true,
+              "sharing_authorized": true,
+              "time_unix": 1788642000.5644054,
+              "utilization_threshold": 10,
+              "wall_time_comparable": false
+            }
+          }
+        ],
+        "durable_events_config_complete": true,
+        "gpu_migrated": false,
+        "history_complete": true,
+        "initial_attempt_ordinal": 1,
+        "matrix_provenance_complete": true,
+        "policy_complete": true,
+        "pre_initial_attempt_count": 0,
+        "provenance_complete": true,
+        "sources": [
+          {
+            "path": "/home/aidar.alimbayev/Documents/genmolv2/output/logs/pmo_fragment_vocab_qed_50k_delta_1k_v2__qed__released__seed0.log",
+            "sha256": "f5259a6aeb628da76572fc1fff500b5aca7644fdbbe2b2f8c9486a874a4b8a25"
+          }
+        ],
+        "wall_time_comparable": false
+      },
+      "metrics": {
+        "all_charged_molecules": {
+          "auc_top_1": 0.9003446188270068,
+          "auc_top_10": 0.8945158126924158,
+          "auc_top_100": 0.8541258933734056,
+          "top_1": 0.9483312933817938,
+          "top_10": 0.9471208601195304,
+          "top_100": 0.9335118162017748
+        },
+        "charged_children_total_call_axis": {
+          "auc_top_1": 0.9003446188270068,
+          "auc_top_10": 0.8945158126924158,
+          "auc_top_100": 0.8541258933734056,
+          "top_1": 0.9483312933817938,
+          "top_10": 0.9471208601195304,
+          "top_100": 0.9335118162017748
+        },
+        "first_500_charged_children": {
+          "auc_top_1": 0.8524336338489324,
+          "auc_top_10": 0.8424164485458889,
+          "auc_top_100": 0.7835466850234972,
+          "top_1": 0.947574397614671,
+          "top_10": 0.9454653333739953,
+          "top_100": 0.9112849670103202
+        }
+      },
+      "provenance": {
+        "config_sha256": "c1de53d5607a9a43e210635a26f0c4e589846978c5377beb7ff110c2b7577e74",
+        "cuda_visible_devices": "2",
+        "durable_events_provenance_complete": true,
+        "git_branch": "",
+        "git_commit": "7f401b8217e86afce7b725c7a6a25480d230214b",
+        "git_dirty": false,
+        "gpu_logical_index": 0,
+        "gpu_name": "NVIDIA RTX A6000",
+        "hostname": "srv-01",
+        "model_path": "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/50000.ckpt",
+        "model_sha256": "8d00aa47b02f64bf39ff6b0b2e786f213587366fc2c3d29712a00f3f84108dd6",
+        "python_version": "3.10.21",
+        "rdkit_version": "2023.09.6",
+        "resume_count": 0,
+        "scientific_status": "Exploratory paired three-seed QED delta-y credit-assignment study using the final 50k checkpoint, a 1,000-unique-oracle-call budget, warmup parameter 100 (101 frozen iterations under the legacy iteration > warmup boundary), and neutral zero seed estimates with absolute seed scores used only for matched tie-breaking. The delta and transition-absolute control arms share parent/child oracle accounting, domains, transition deduplication, deterministic attribution, and warmup; only the post-warmup credit target differs. This QED-only reduced-budget study is not paper-comparable, causal, or confirmatory.",
+        "timing_provenance_complete": true,
+        "torch_version": "2.6.0+cu124",
+        "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "vocabulary_path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/scripts/exps/pmo/vocab/qed.csv",
+        "vocabulary_sha256": "6b98420f3fa88835e50cb28b960225dc6c7857a29f3057fb1ca22b4211c1806c"
+      },
+      "run_id": "fragment_vocab_qed_50k_delta_1k_v2:qed:released:seed0",
+      "seed": 0,
+      "sources": {
+        "checkpoint": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/released/seed_0/state/latest.pkl",
+          "sha256": "2344ebde402280489ccd2ee163d848080d493d2067ce42586e618477d19ada8c"
+        },
+        "events": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/released/seed_0/events.jsonl",
+          "sha256": "7f50dc611d715221ecff62237e53b0bacf2391de849406b8edbc6f82ec838c5b"
+        },
+        "manifest": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/released/seed_0/manifest.json",
+          "sha256": "7c19cfe24d69a3171a16be29c205c1db62fdf898df9f43d231680069fbd64844"
+        },
+        "summary": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/released/seed_0/summary.json",
+          "sha256": "639c0e6b15481e84bf174ae673c07a4ae5ad73b2de3453be6e34917f3d360782"
+        }
+      },
+      "variant": "released"
+    },
+    {
+      "charged_child_count": 1000,
+      "config": {
+        "checkpoint_every": 100,
+        "credit_fragment_policy": "sampled_three_cut_child",
+        "credit_value_policy": "absolute_child_score",
+        "delta_attribution": "novel_vs_parent",
+        "device": "cuda:0",
+        "durable_events": true,
+        "experiment_id": "fragment_vocab_qed_50k_delta_1k_v2",
+        "gamma": 0.0,
+        "guidance_scale": 2.0,
+        "legacy_seed_count": 1,
+        "legacy_warmup_off_by_one": true,
+        "matrix_path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/experiments/fragment_vocabulary/configs/qed_50k_delta_1k_v2.yaml",
+        "matrix_sha256": "8c62dd6c040392be48a1d6f1024179e16b2b70ff2667073658affd4d89197dc8",
+        "max_iterations": 10000,
+        "max_mol_size": 30,
+        "max_oracle_calls": 1000,
+        "min_mol_size": 10,
+        "min_support": 1,
+        "model_path": "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/50000.ckpt",
+        "observation_identity": "canonical_child_occurrence",
+        "oracle": "qed",
+        "parent_control": false,
+        "parent_domain_policy": "child_within_configured_atom_bounds",
+        "policy_mode": "released",
+        "population_sampling_order": "canonical fragment string before uniform sampling",
+        "population_size": 100,
+        "prior_mean": null,
+        "prior_mean_source": null,
+        "prior_strength": 0.0,
+        "randomness": 2.0,
+        "released_duplicate_policy": "repeat cached-child decomposition, matching release",
+        "reporting_frequency": 100,
+        "scientific_status": "Exploratory paired three-seed QED delta-y credit-assignment study using the final 50k checkpoint, a 1,000-unique-oracle-call budget, warmup parameter 100 (101 frozen iterations under the legacy iteration > warmup boundary), and neutral zero seed estimates with absolute seed scores used only for matched tie-breaking. The delta and transition-absolute control arms share parent/child oracle accounting, domains, transition deduplication, deterministic attribution, and warmup; only the post-warmup credit target differs. This QED-only reduced-budget study is not paper-comparable, causal, or confirmatory.",
+        "seed": 1,
+        "seed_initialization_policy": "released_absolute_rows",
+        "softmax_temp": 1.2,
+        "statistical_duplicate_policy": "one update per unique canonical child",
+        "variant": "released",
+        "vocab_path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/scripts/exps/pmo/vocab/qed.csv",
+        "warmup": 100,
+        "warmup_update_policy": "standard"
+      },
+      "delta_diagnostics": null,
+      "event_accounting": {
+        "cached_child_lookups": 32,
+        "cached_parent_lookups": 0,
+        "charged_child_evaluations": 1000,
+        "charged_parent_evaluations": 0,
+        "logged_events": 1032,
+        "runner_iterations_represented": 1032
+      },
+      "launch": {
+        "any_gpu_sharing": true,
+        "attempt_count": 1,
+        "attempts": [
+          {
+            "command_sha256": "90b63c83e967aca9e3b9866dac607ad11ab6dbf4c5ae8aa5110a17a81b820b75",
+            "line_number": 1,
+            "matrix_provenance_complete": true,
+            "path": "/home/aidar.alimbayev/Documents/genmolv2/output/logs/pmo_fragment_vocab_qed_50k_delta_1k_v2__qed__released__seed1.log",
+            "policy_complete": true,
+            "record": {
+              "command": [
+                "/home/aidar.alimbayev/Documents/genmolv2/.venv/bin/python",
+                "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/scripts/exps/pmo/run_ablation.py",
+                "--oracle",
+                "qed",
+                "--variant",
+                "released",
+                "--seed",
+                "1",
+                "--model-path",
+                "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/50000.ckpt",
+                "--device",
+                "cuda:0",
+                "--experiment-id",
+                "fragment_vocab_qed_50k_delta_1k_v2",
+                "--scientific-status",
+                "Exploratory paired three-seed QED delta-y credit-assignment study using the final 50k checkpoint, a 1,000-unique-oracle-call budget, warmup parameter 100 (101 frozen iterations under the legacy iteration > warmup boundary), and neutral zero seed estimates with absolute seed scores used only for matched tie-breaking. The delta and transition-absolute control arms share parent/child oracle accounting, domains, transition deduplication, deterministic attribution, and warmup; only the post-warmup credit target differs. This QED-only reduced-budget study is not paper-comparable, causal, or confirmatory.",
+                "--matrix-path",
+                "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/experiments/fragment_vocabulary/configs/qed_50k_delta_1k_v2.yaml",
+                "--matrix-sha256",
+                "8c62dd6c040392be48a1d6f1024179e16b2b70ff2667073658affd4d89197dc8",
+                "--output-root",
+                "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation",
+                "--max-oracle-calls",
+                "1000",
+                "--reporting-frequency",
+                "100",
+                "--checkpoint-every",
+                "100",
+                "--max-iterations",
+                "10000",
+                "--population-size",
+                "100",
+                "--warmup",
+                "100",
+                "--softmax-temp",
+                "1.2",
+                "--randomness",
+                "2.0",
+                "--guidance-scale",
+                "2.0",
+                "--legacy-seed-count",
+                "1",
+                "--delta-attribution",
+                "novel_vs_parent",
+                "--legacy-warmup-off-by-one",
+                "--durable-events",
+                "--gamma",
+                "0.0"
+              ],
+              "compute_processes": [
+                {
+                  "gpu_uuid": "GPU-134e9a1b-cf80-5c0e-b0c4-048fff8e6d3c",
+                  "pid": 1572384,
+                  "process_name": "/home/meir.roketlishvili/miniconda3/envs/SGPO_repro/bin/python",
+                  "used_memory_mib": 1788
+                }
+              ],
+              "event": "launch",
+              "job": "qed__released__seed1",
+              "min_free_memory_mib": 30000,
+              "physical_gpu": {
+                "index": 5,
+                "memory_total_mib": 49140,
+                "memory_used_mib": 1811,
+                "utilization_percent": 5,
+                "uuid": "GPU-134e9a1b-cf80-5c0e-b0c4-048fff8e6d3c"
+              },
+              "sharing_actual": true,
+              "sharing_authorized": true,
+              "time_unix": 1788642000.8221102,
+              "utilization_threshold": 10,
+              "wall_time_comparable": false
+            }
+          }
+        ],
+        "durable_events_config_complete": true,
+        "gpu_migrated": false,
+        "history_complete": true,
+        "initial_attempt_ordinal": 1,
+        "matrix_provenance_complete": true,
+        "policy_complete": true,
+        "pre_initial_attempt_count": 0,
+        "provenance_complete": true,
+        "sources": [
+          {
+            "path": "/home/aidar.alimbayev/Documents/genmolv2/output/logs/pmo_fragment_vocab_qed_50k_delta_1k_v2__qed__released__seed1.log",
+            "sha256": "80379e9f55abb8a2d26bdc4334d27aa8a92b3a3fe6e9f0013996c1ba99506b9a"
+          }
+        ],
+        "wall_time_comparable": false
+      },
+      "metrics": {
+        "all_charged_molecules": {
+          "auc_top_1": 0.8985942076937719,
+          "auc_top_10": 0.8921286632580077,
+          "auc_top_100": 0.8486899156540259,
+          "top_1": 0.9479824605293081,
+          "top_10": 0.946187604196299,
+          "top_100": 0.9308346741936324
+        },
+        "charged_children_total_call_axis": {
+          "auc_top_1": 0.8985942076937719,
+          "auc_top_10": 0.8921286632580077,
+          "auc_top_100": 0.8486899156540259,
+          "top_1": 0.9479824605293081,
+          "top_10": 0.946187604196299,
+          "top_100": 0.9308346741936324
+        },
+        "first_500_charged_children": {
+          "auc_top_1": 0.8495002328119615,
+          "auc_top_10": 0.8385292757838702,
+          "auc_top_100": 0.7762259412615028,
+          "top_1": 0.9473939046218561,
+          "top_10": 0.9449058101442521,
+          "top_100": 0.9088144135423394
+        }
+      },
+      "provenance": {
+        "config_sha256": "4ca5fb3810ebaaba86917949ef300053818c727e739fdd6d802fba8216189009",
+        "cuda_visible_devices": "5",
+        "durable_events_provenance_complete": true,
+        "git_branch": "",
+        "git_commit": "7f401b8217e86afce7b725c7a6a25480d230214b",
+        "git_dirty": false,
+        "gpu_logical_index": 0,
+        "gpu_name": "NVIDIA RTX A6000",
+        "hostname": "srv-01",
+        "model_path": "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/50000.ckpt",
+        "model_sha256": "8d00aa47b02f64bf39ff6b0b2e786f213587366fc2c3d29712a00f3f84108dd6",
+        "python_version": "3.10.21",
+        "rdkit_version": "2023.09.6",
+        "resume_count": 0,
+        "scientific_status": "Exploratory paired three-seed QED delta-y credit-assignment study using the final 50k checkpoint, a 1,000-unique-oracle-call budget, warmup parameter 100 (101 frozen iterations under the legacy iteration > warmup boundary), and neutral zero seed estimates with absolute seed scores used only for matched tie-breaking. The delta and transition-absolute control arms share parent/child oracle accounting, domains, transition deduplication, deterministic attribution, and warmup; only the post-warmup credit target differs. This QED-only reduced-budget study is not paper-comparable, causal, or confirmatory.",
+        "timing_provenance_complete": true,
+        "torch_version": "2.6.0+cu124",
+        "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "vocabulary_path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/scripts/exps/pmo/vocab/qed.csv",
+        "vocabulary_sha256": "6b98420f3fa88835e50cb28b960225dc6c7857a29f3057fb1ca22b4211c1806c"
+      },
+      "run_id": "fragment_vocab_qed_50k_delta_1k_v2:qed:released:seed1",
+      "seed": 1,
+      "sources": {
+        "checkpoint": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/released/seed_1/state/latest.pkl",
+          "sha256": "79092b4c70600fdb296f5f1881e8f3d8cc0dc9d5e9faf296ab2622e071dd8de0"
+        },
+        "events": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/released/seed_1/events.jsonl",
+          "sha256": "d3345750bc2b9af85e92cc7169a6331ff49477b833c7aca07900328edc5f7aea"
+        },
+        "manifest": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/released/seed_1/manifest.json",
+          "sha256": "708f5e61388cb33b84e2569dbbfa3816f2e47aebf5b77d8a40f22fa6f9f0f77c"
+        },
+        "summary": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/released/seed_1/summary.json",
+          "sha256": "fa448ae118c3bd70545af5f87c862fca6ec4361ad67a56b9a5a24ea3ebfe6251"
+        }
+      },
+      "variant": "released"
+    },
+    {
+      "charged_child_count": 1000,
+      "config": {
+        "checkpoint_every": 100,
+        "credit_fragment_policy": "sampled_three_cut_child",
+        "credit_value_policy": "absolute_child_score",
+        "delta_attribution": "novel_vs_parent",
+        "device": "cuda:0",
+        "durable_events": true,
+        "experiment_id": "fragment_vocab_qed_50k_delta_1k_v2",
+        "gamma": 0.0,
+        "guidance_scale": 2.0,
+        "legacy_seed_count": 1,
+        "legacy_warmup_off_by_one": true,
+        "matrix_path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/experiments/fragment_vocabulary/configs/qed_50k_delta_1k_v2.yaml",
+        "matrix_sha256": "8c62dd6c040392be48a1d6f1024179e16b2b70ff2667073658affd4d89197dc8",
+        "max_iterations": 10000,
+        "max_mol_size": 30,
+        "max_oracle_calls": 1000,
+        "min_mol_size": 10,
+        "min_support": 1,
+        "model_path": "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/50000.ckpt",
+        "observation_identity": "canonical_child_occurrence",
+        "oracle": "qed",
+        "parent_control": false,
+        "parent_domain_policy": "child_within_configured_atom_bounds",
+        "policy_mode": "released",
+        "population_sampling_order": "canonical fragment string before uniform sampling",
+        "population_size": 100,
+        "prior_mean": null,
+        "prior_mean_source": null,
+        "prior_strength": 0.0,
+        "randomness": 2.0,
+        "released_duplicate_policy": "repeat cached-child decomposition, matching release",
+        "reporting_frequency": 100,
+        "scientific_status": "Exploratory paired three-seed QED delta-y credit-assignment study using the final 50k checkpoint, a 1,000-unique-oracle-call budget, warmup parameter 100 (101 frozen iterations under the legacy iteration > warmup boundary), and neutral zero seed estimates with absolute seed scores used only for matched tie-breaking. The delta and transition-absolute control arms share parent/child oracle accounting, domains, transition deduplication, deterministic attribution, and warmup; only the post-warmup credit target differs. This QED-only reduced-budget study is not paper-comparable, causal, or confirmatory.",
+        "seed": 2,
+        "seed_initialization_policy": "released_absolute_rows",
+        "softmax_temp": 1.2,
+        "statistical_duplicate_policy": "one update per unique canonical child",
+        "variant": "released",
+        "vocab_path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/scripts/exps/pmo/vocab/qed.csv",
+        "warmup": 100,
+        "warmup_update_policy": "standard"
+      },
+      "delta_diagnostics": null,
+      "event_accounting": {
+        "cached_child_lookups": 36,
+        "cached_parent_lookups": 0,
+        "charged_child_evaluations": 1000,
+        "charged_parent_evaluations": 0,
+        "logged_events": 1036,
+        "runner_iterations_represented": 1036
+      },
+      "launch": {
+        "any_gpu_sharing": true,
+        "attempt_count": 1,
+        "attempts": [
+          {
+            "command_sha256": "c5ad89edf794a02010dd4b75b574b4c991dd59a0da4ffd9c96b9f6268262cbca",
+            "line_number": 1,
+            "matrix_provenance_complete": true,
+            "path": "/home/aidar.alimbayev/Documents/genmolv2/output/logs/pmo_fragment_vocab_qed_50k_delta_1k_v2__qed__released__seed2.log",
+            "policy_complete": true,
+            "record": {
+              "command": [
+                "/home/aidar.alimbayev/Documents/genmolv2/.venv/bin/python",
+                "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/scripts/exps/pmo/run_ablation.py",
+                "--oracle",
+                "qed",
+                "--variant",
+                "released",
+                "--seed",
+                "2",
+                "--model-path",
+                "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/50000.ckpt",
+                "--device",
+                "cuda:0",
+                "--experiment-id",
+                "fragment_vocab_qed_50k_delta_1k_v2",
+                "--scientific-status",
+                "Exploratory paired three-seed QED delta-y credit-assignment study using the final 50k checkpoint, a 1,000-unique-oracle-call budget, warmup parameter 100 (101 frozen iterations under the legacy iteration > warmup boundary), and neutral zero seed estimates with absolute seed scores used only for matched tie-breaking. The delta and transition-absolute control arms share parent/child oracle accounting, domains, transition deduplication, deterministic attribution, and warmup; only the post-warmup credit target differs. This QED-only reduced-budget study is not paper-comparable, causal, or confirmatory.",
+                "--matrix-path",
+                "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/experiments/fragment_vocabulary/configs/qed_50k_delta_1k_v2.yaml",
+                "--matrix-sha256",
+                "8c62dd6c040392be48a1d6f1024179e16b2b70ff2667073658affd4d89197dc8",
+                "--output-root",
+                "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation",
+                "--max-oracle-calls",
+                "1000",
+                "--reporting-frequency",
+                "100",
+                "--checkpoint-every",
+                "100",
+                "--max-iterations",
+                "10000",
+                "--population-size",
+                "100",
+                "--warmup",
+                "100",
+                "--softmax-temp",
+                "1.2",
+                "--randomness",
+                "2.0",
+                "--guidance-scale",
+                "2.0",
+                "--legacy-seed-count",
+                "1",
+                "--delta-attribution",
+                "novel_vs_parent",
+                "--legacy-warmup-off-by-one",
+                "--durable-events",
+                "--gamma",
+                "0.0"
+              ],
+              "compute_processes": [
+                {
+                  "gpu_uuid": "GPU-d7e40ce5-9260-a208-16a0-3372e3f204de",
+                  "pid": 1572385,
+                  "process_name": "/home/meir.roketlishvili/miniconda3/envs/SGPO_repro/bin/python",
+                  "used_memory_mib": 1786
+                }
+              ],
+              "event": "launch",
+              "job": "qed__released__seed2",
+              "min_free_memory_mib": 30000,
+              "physical_gpu": {
+                "index": 6,
+                "memory_total_mib": 49140,
+                "memory_used_mib": 1809,
+                "utilization_percent": 5,
+                "uuid": "GPU-d7e40ce5-9260-a208-16a0-3372e3f204de"
+              },
+              "sharing_actual": true,
+              "sharing_authorized": true,
+              "time_unix": 1788642001.062225,
+              "utilization_threshold": 10,
+              "wall_time_comparable": false
+            }
+          }
+        ],
+        "durable_events_config_complete": true,
+        "gpu_migrated": false,
+        "history_complete": true,
+        "initial_attempt_ordinal": 1,
+        "matrix_provenance_complete": true,
+        "policy_complete": true,
+        "pre_initial_attempt_count": 0,
+        "provenance_complete": true,
+        "sources": [
+          {
+            "path": "/home/aidar.alimbayev/Documents/genmolv2/output/logs/pmo_fragment_vocab_qed_50k_delta_1k_v2__qed__released__seed2.log",
+            "sha256": "e106bde46e4efd898912c3c199d3cfbdfa48e8435bfc9ea1212fa870c314a24b"
+          }
+        ],
+        "wall_time_comparable": false
+      },
+      "metrics": {
+        "all_charged_molecules": {
+          "auc_top_1": 0.9002433533116581,
+          "auc_top_10": 0.8954380599326016,
+          "auc_top_100": 0.8564104479381534,
+          "top_1": 0.948442042791664,
+          "top_10": 0.9471545132542678,
+          "top_100": 0.9373827938683807
+        },
+        "charged_children_total_call_axis": {
+          "auc_top_1": 0.9002433533116581,
+          "auc_top_10": 0.8954380599326016,
+          "auc_top_100": 0.8564104479381534,
+          "top_1": 0.948442042791664,
+          "top_10": 0.9471545132542678,
+          "top_100": 0.9373827938683807
+        },
+        "first_500_charged_children": {
+          "auc_top_1": 0.8520446638316519,
+          "auc_top_10": 0.8443695565435294,
+          "auc_top_100": 0.7832548816878667,
+          "top_1": 0.948442042791664,
+          "top_10": 0.946148170192029,
+          "top_100": 0.9201282377448201
+        }
+      },
+      "provenance": {
+        "config_sha256": "89e3fd4ed226ad791a3a55cf57e9133f281daf4281b1eec6735bc9783656e818",
+        "cuda_visible_devices": "6",
+        "durable_events_provenance_complete": true,
+        "git_branch": "",
+        "git_commit": "7f401b8217e86afce7b725c7a6a25480d230214b",
+        "git_dirty": false,
+        "gpu_logical_index": 0,
+        "gpu_name": "NVIDIA RTX A6000",
+        "hostname": "srv-01",
+        "model_path": "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/50000.ckpt",
+        "model_sha256": "8d00aa47b02f64bf39ff6b0b2e786f213587366fc2c3d29712a00f3f84108dd6",
+        "python_version": "3.10.21",
+        "rdkit_version": "2023.09.6",
+        "resume_count": 0,
+        "scientific_status": "Exploratory paired three-seed QED delta-y credit-assignment study using the final 50k checkpoint, a 1,000-unique-oracle-call budget, warmup parameter 100 (101 frozen iterations under the legacy iteration > warmup boundary), and neutral zero seed estimates with absolute seed scores used only for matched tie-breaking. The delta and transition-absolute control arms share parent/child oracle accounting, domains, transition deduplication, deterministic attribution, and warmup; only the post-warmup credit target differs. This QED-only reduced-budget study is not paper-comparable, causal, or confirmatory.",
+        "timing_provenance_complete": true,
+        "torch_version": "2.6.0+cu124",
+        "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "vocabulary_path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/scripts/exps/pmo/vocab/qed.csv",
+        "vocabulary_sha256": "6b98420f3fa88835e50cb28b960225dc6c7857a29f3057fb1ca22b4211c1806c"
+      },
+      "run_id": "fragment_vocab_qed_50k_delta_1k_v2:qed:released:seed2",
+      "seed": 2,
+      "sources": {
+        "checkpoint": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/released/seed_2/state/latest.pkl",
+          "sha256": "353ba6865ba8e1bfd0a1d5bef15607e93f58ce91e6aa8622dda722c163fbb715"
+        },
+        "events": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/released/seed_2/events.jsonl",
+          "sha256": "2777680b9008f5dac6c816b2813908e67ce6cb3b4946fe3720650b4245f71b71"
+        },
+        "manifest": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/released/seed_2/manifest.json",
+          "sha256": "b165abb9b654bf8eea47c347385452d91ed0c1adfdb44f2b912a9f5c4484d995"
+        },
+        "summary": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/released/seed_2/summary.json",
+          "sha256": "6393414432e0771aa63f66b4d232dbaf272e9ac705fa4b7a28601ed6a827bce5"
+        }
+      },
+      "variant": "released"
+    },
+    {
+      "charged_child_count": 1000,
+      "config": {
+        "checkpoint_every": 100,
+        "credit_fragment_policy": "sampled_three_cut_child",
+        "credit_value_policy": "absolute_child_score",
+        "delta_attribution": "novel_vs_parent",
+        "device": "cuda:0",
+        "durable_events": true,
+        "experiment_id": "fragment_vocab_qed_50k_delta_1k_v2",
+        "gamma": 0.0,
+        "guidance_scale": 2.0,
+        "legacy_seed_count": 1,
+        "legacy_warmup_off_by_one": true,
+        "matrix_path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/experiments/fragment_vocabulary/configs/qed_50k_delta_1k_v2.yaml",
+        "matrix_sha256": "8c62dd6c040392be48a1d6f1024179e16b2b70ff2667073658affd4d89197dc8",
+        "max_iterations": 10000,
+        "max_mol_size": 30,
+        "max_oracle_calls": 1000,
+        "min_mol_size": 10,
+        "min_support": 1,
+        "model_path": "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/50000.ckpt",
+        "observation_identity": "unique_canonical_child",
+        "oracle": "qed",
+        "parent_control": false,
+        "parent_domain_policy": "child_within_configured_atom_bounds",
+        "policy_mode": "mean",
+        "population_sampling_order": "canonical fragment string before uniform sampling",
+        "population_size": 100,
+        "prior_mean": null,
+        "prior_mean_source": null,
+        "prior_strength": 0.0,
+        "randomness": 2.0,
+        "released_duplicate_policy": "repeat cached-child decomposition, matching release",
+        "reporting_frequency": 100,
+        "scientific_status": "Exploratory paired three-seed QED delta-y credit-assignment study using the final 50k checkpoint, a 1,000-unique-oracle-call budget, warmup parameter 100 (101 frozen iterations under the legacy iteration > warmup boundary), and neutral zero seed estimates with absolute seed scores used only for matched tie-breaking. The delta and transition-absolute control arms share parent/child oracle accounting, domains, transition deduplication, deterministic attribution, and warmup; only the post-warmup credit target differs. This QED-only reduced-budget study is not paper-comparable, causal, or confirmatory.",
+        "seed": 0,
+        "seed_initialization_policy": "absolute_seed_statistics",
+        "softmax_temp": 1.2,
+        "statistical_duplicate_policy": "one update per unique canonical child",
+        "variant": "running_mean",
+        "vocab_path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/scripts/exps/pmo/vocab/qed.csv",
+        "warmup": 100,
+        "warmup_update_policy": "standard"
+      },
+      "delta_diagnostics": null,
+      "event_accounting": {
+        "cached_child_lookups": 48,
+        "cached_parent_lookups": 0,
+        "charged_child_evaluations": 1000,
+        "charged_parent_evaluations": 0,
+        "logged_events": 1048,
+        "runner_iterations_represented": 1048
+      },
+      "launch": {
+        "any_gpu_sharing": true,
+        "attempt_count": 1,
+        "attempts": [
+          {
+            "command_sha256": "45acc022f1519e7382ca85ed7d2d27e01c7d84dab811e90c4fb1b3581402dfb0",
+            "line_number": 1,
+            "matrix_provenance_complete": true,
+            "path": "/home/aidar.alimbayev/Documents/genmolv2/output/logs/pmo_fragment_vocab_qed_50k_delta_1k_v2__qed__running_mean__seed0.log",
+            "policy_complete": true,
+            "record": {
+              "command": [
+                "/home/aidar.alimbayev/Documents/genmolv2/.venv/bin/python",
+                "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/scripts/exps/pmo/run_ablation.py",
+                "--oracle",
+                "qed",
+                "--variant",
+                "running_mean",
+                "--seed",
+                "0",
+                "--model-path",
+                "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/50000.ckpt",
+                "--device",
+                "cuda:0",
+                "--experiment-id",
+                "fragment_vocab_qed_50k_delta_1k_v2",
+                "--scientific-status",
+                "Exploratory paired three-seed QED delta-y credit-assignment study using the final 50k checkpoint, a 1,000-unique-oracle-call budget, warmup parameter 100 (101 frozen iterations under the legacy iteration > warmup boundary), and neutral zero seed estimates with absolute seed scores used only for matched tie-breaking. The delta and transition-absolute control arms share parent/child oracle accounting, domains, transition deduplication, deterministic attribution, and warmup; only the post-warmup credit target differs. This QED-only reduced-budget study is not paper-comparable, causal, or confirmatory.",
+                "--matrix-path",
+                "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/experiments/fragment_vocabulary/configs/qed_50k_delta_1k_v2.yaml",
+                "--matrix-sha256",
+                "8c62dd6c040392be48a1d6f1024179e16b2b70ff2667073658affd4d89197dc8",
+                "--output-root",
+                "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation",
+                "--max-oracle-calls",
+                "1000",
+                "--reporting-frequency",
+                "100",
+                "--checkpoint-every",
+                "100",
+                "--max-iterations",
+                "10000",
+                "--population-size",
+                "100",
+                "--warmup",
+                "100",
+                "--softmax-temp",
+                "1.2",
+                "--randomness",
+                "2.0",
+                "--guidance-scale",
+                "2.0",
+                "--legacy-seed-count",
+                "1",
+                "--delta-attribution",
+                "novel_vs_parent",
+                "--legacy-warmup-off-by-one",
+                "--durable-events",
+                "--gamma",
+                "0.0"
+              ],
+              "compute_processes": [
+                {
+                  "gpu_uuid": "GPU-7ae42da2-3c8d-efa0-99ec-845b7f85399a",
+                  "pid": 1572386,
+                  "process_name": "/home/meir.roketlishvili/miniconda3/envs/SGPO_repro/bin/python",
+                  "used_memory_mib": 1956
+                }
+              ],
+              "event": "launch",
+              "job": "qed__running_mean__seed0",
+              "min_free_memory_mib": 30000,
+              "physical_gpu": {
+                "index": 7,
+                "memory_total_mib": 49140,
+                "memory_used_mib": 1979,
+                "utilization_percent": 4,
+                "uuid": "GPU-7ae42da2-3c8d-efa0-99ec-845b7f85399a"
+              },
+              "sharing_actual": true,
+              "sharing_authorized": true,
+              "time_unix": 1788642001.316795,
+              "utilization_threshold": 10,
+              "wall_time_comparable": false
+            }
+          }
+        ],
+        "durable_events_config_complete": true,
+        "gpu_migrated": false,
+        "history_complete": true,
+        "initial_attempt_ordinal": 1,
+        "matrix_provenance_complete": true,
+        "policy_complete": true,
+        "pre_initial_attempt_count": 0,
+        "provenance_complete": true,
+        "sources": [
+          {
+            "path": "/home/aidar.alimbayev/Documents/genmolv2/output/logs/pmo_fragment_vocab_qed_50k_delta_1k_v2__qed__running_mean__seed0.log",
+            "sha256": "d23d017daf7af2d89e190152c2d2dd3b147a7b271205bcc31f1fb06ad94d6572"
+          }
+        ],
+        "wall_time_comparable": false
+      },
+      "metrics": {
+        "all_charged_molecules": {
+          "auc_top_1": 0.9005759792235912,
+          "auc_top_10": 0.8964846073657152,
+          "auc_top_100": 0.8556246787971516,
+          "top_1": 0.9483312933817938,
+          "top_10": 0.9475338873050647,
+          "top_100": 0.9404728152893783
+        },
+        "charged_children_total_call_axis": {
+          "auc_top_1": 0.9005759792235912,
+          "auc_top_10": 0.8964846073657152,
+          "auc_top_100": 0.8556246787971516,
+          "top_1": 0.9483312933817938,
+          "top_10": 0.9475338873050647,
+          "top_100": 0.9404728152893783
+        },
+        "first_500_charged_children": {
+          "auc_top_1": 0.8528206650653892,
+          "auc_top_10": 0.8455664551109545,
+          "auc_top_100": 0.7767830410526008,
+          "top_1": 0.9483312933817938,
+          "top_10": 0.9472420869252023,
+          "top_100": 0.9224538721791115
+        }
+      },
+      "provenance": {
+        "config_sha256": "32dab1b737e2063d1113629fd515f6f4394219785c12c73fa1fd59b145997b8b",
+        "cuda_visible_devices": "7",
+        "durable_events_provenance_complete": true,
+        "git_branch": "",
+        "git_commit": "7f401b8217e86afce7b725c7a6a25480d230214b",
+        "git_dirty": false,
+        "gpu_logical_index": 0,
+        "gpu_name": "NVIDIA RTX A6000",
+        "hostname": "srv-01",
+        "model_path": "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/50000.ckpt",
+        "model_sha256": "8d00aa47b02f64bf39ff6b0b2e786f213587366fc2c3d29712a00f3f84108dd6",
+        "python_version": "3.10.21",
+        "rdkit_version": "2023.09.6",
+        "resume_count": 0,
+        "scientific_status": "Exploratory paired three-seed QED delta-y credit-assignment study using the final 50k checkpoint, a 1,000-unique-oracle-call budget, warmup parameter 100 (101 frozen iterations under the legacy iteration > warmup boundary), and neutral zero seed estimates with absolute seed scores used only for matched tie-breaking. The delta and transition-absolute control arms share parent/child oracle accounting, domains, transition deduplication, deterministic attribution, and warmup; only the post-warmup credit target differs. This QED-only reduced-budget study is not paper-comparable, causal, or confirmatory.",
+        "timing_provenance_complete": true,
+        "torch_version": "2.6.0+cu124",
+        "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "vocabulary_path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/scripts/exps/pmo/vocab/qed.csv",
+        "vocabulary_sha256": "6b98420f3fa88835e50cb28b960225dc6c7857a29f3057fb1ca22b4211c1806c"
+      },
+      "run_id": "fragment_vocab_qed_50k_delta_1k_v2:qed:running_mean:seed0",
+      "seed": 0,
+      "sources": {
+        "checkpoint": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/running_mean/seed_0/state/latest.pkl",
+          "sha256": "317f0c4c2a275a52dab57bf30badacbb0513a3e3853e26e1e59d0462d0a33c5a"
+        },
+        "events": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/running_mean/seed_0/events.jsonl",
+          "sha256": "a931a56a9fb61c1cad72cd6a3d578176ed9de042ff41da0b017b3bd7c5bdc233"
+        },
+        "manifest": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/running_mean/seed_0/manifest.json",
+          "sha256": "929f761e4c72ac5cfe47ddeb91134db67c56ab11bd78a6b77bd800c4458b0d6a"
+        },
+        "summary": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/running_mean/seed_0/summary.json",
+          "sha256": "46a334c0f1173afbdca0c911dc6c1c8738de5de3fc2063c76bdad068eb30f110"
+        }
+      },
+      "variant": "running_mean"
+    },
+    {
+      "charged_child_count": 1000,
+      "config": {
+        "checkpoint_every": 100,
+        "credit_fragment_policy": "sampled_three_cut_child",
+        "credit_value_policy": "absolute_child_score",
+        "delta_attribution": "novel_vs_parent",
+        "device": "cuda:0",
+        "durable_events": true,
+        "experiment_id": "fragment_vocab_qed_50k_delta_1k_v2",
+        "gamma": 0.0,
+        "guidance_scale": 2.0,
+        "legacy_seed_count": 1,
+        "legacy_warmup_off_by_one": true,
+        "matrix_path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/experiments/fragment_vocabulary/configs/qed_50k_delta_1k_v2.yaml",
+        "matrix_sha256": "8c62dd6c040392be48a1d6f1024179e16b2b70ff2667073658affd4d89197dc8",
+        "max_iterations": 10000,
+        "max_mol_size": 30,
+        "max_oracle_calls": 1000,
+        "min_mol_size": 10,
+        "min_support": 1,
+        "model_path": "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/50000.ckpt",
+        "observation_identity": "unique_canonical_child",
+        "oracle": "qed",
+        "parent_control": false,
+        "parent_domain_policy": "child_within_configured_atom_bounds",
+        "policy_mode": "mean",
+        "population_sampling_order": "canonical fragment string before uniform sampling",
+        "population_size": 100,
+        "prior_mean": null,
+        "prior_mean_source": null,
+        "prior_strength": 0.0,
+        "randomness": 2.0,
+        "released_duplicate_policy": "repeat cached-child decomposition, matching release",
+        "reporting_frequency": 100,
+        "scientific_status": "Exploratory paired three-seed QED delta-y credit-assignment study using the final 50k checkpoint, a 1,000-unique-oracle-call budget, warmup parameter 100 (101 frozen iterations under the legacy iteration > warmup boundary), and neutral zero seed estimates with absolute seed scores used only for matched tie-breaking. The delta and transition-absolute control arms share parent/child oracle accounting, domains, transition deduplication, deterministic attribution, and warmup; only the post-warmup credit target differs. This QED-only reduced-budget study is not paper-comparable, causal, or confirmatory.",
+        "seed": 1,
+        "seed_initialization_policy": "absolute_seed_statistics",
+        "softmax_temp": 1.2,
+        "statistical_duplicate_policy": "one update per unique canonical child",
+        "variant": "running_mean",
+        "vocab_path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/scripts/exps/pmo/vocab/qed.csv",
+        "warmup": 100,
+        "warmup_update_policy": "standard"
+      },
+      "delta_diagnostics": null,
+      "event_accounting": {
+        "cached_child_lookups": 42,
+        "cached_parent_lookups": 0,
+        "charged_child_evaluations": 1000,
+        "charged_parent_evaluations": 0,
+        "logged_events": 1042,
+        "runner_iterations_represented": 1042
+      },
+      "launch": {
+        "any_gpu_sharing": true,
+        "attempt_count": 1,
+        "attempts": [
+          {
+            "command_sha256": "9cf4eabeaab53ff88c5ef6d02b2ac69db86a11fca5a6c16f457de031b7a1223c",
+            "line_number": 1,
+            "matrix_provenance_complete": true,
+            "path": "/home/aidar.alimbayev/Documents/genmolv2/output/logs/pmo_fragment_vocab_qed_50k_delta_1k_v2__qed__running_mean__seed1.log",
+            "policy_complete": true,
+            "record": {
+              "command": [
+                "/home/aidar.alimbayev/Documents/genmolv2/.venv/bin/python",
+                "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/scripts/exps/pmo/run_ablation.py",
+                "--oracle",
+                "qed",
+                "--variant",
+                "running_mean",
+                "--seed",
+                "1",
+                "--model-path",
+                "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/50000.ckpt",
+                "--device",
+                "cuda:0",
+                "--experiment-id",
+                "fragment_vocab_qed_50k_delta_1k_v2",
+                "--scientific-status",
+                "Exploratory paired three-seed QED delta-y credit-assignment study using the final 50k checkpoint, a 1,000-unique-oracle-call budget, warmup parameter 100 (101 frozen iterations under the legacy iteration > warmup boundary), and neutral zero seed estimates with absolute seed scores used only for matched tie-breaking. The delta and transition-absolute control arms share parent/child oracle accounting, domains, transition deduplication, deterministic attribution, and warmup; only the post-warmup credit target differs. This QED-only reduced-budget study is not paper-comparable, causal, or confirmatory.",
+                "--matrix-path",
+                "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/experiments/fragment_vocabulary/configs/qed_50k_delta_1k_v2.yaml",
+                "--matrix-sha256",
+                "8c62dd6c040392be48a1d6f1024179e16b2b70ff2667073658affd4d89197dc8",
+                "--output-root",
+                "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation",
+                "--max-oracle-calls",
+                "1000",
+                "--reporting-frequency",
+                "100",
+                "--checkpoint-every",
+                "100",
+                "--max-iterations",
+                "10000",
+                "--population-size",
+                "100",
+                "--warmup",
+                "100",
+                "--softmax-temp",
+                "1.2",
+                "--randomness",
+                "2.0",
+                "--guidance-scale",
+                "2.0",
+                "--legacy-seed-count",
+                "1",
+                "--delta-attribution",
+                "novel_vs_parent",
+                "--legacy-warmup-off-by-one",
+                "--durable-events",
+                "--gamma",
+                "0.0"
+              ],
+              "compute_processes": [
+                {
+                  "gpu_uuid": "GPU-997e881a-bd08-aa54-45f3-9b3c6fdf6ece",
+                  "pid": 1701406,
+                  "process_name": "/home/meir.roketlishvili/miniconda3/envs/SGPO_repro/bin/python",
+                  "used_memory_mib": 1952
+                }
+              ],
+              "event": "launch",
+              "job": "qed__running_mean__seed1",
+              "min_free_memory_mib": 30000,
+              "physical_gpu": {
+                "index": 2,
+                "memory_total_mib": 49140,
+                "memory_used_mib": 1975,
+                "utilization_percent": 5,
+                "uuid": "GPU-997e881a-bd08-aa54-45f3-9b3c6fdf6ece"
+              },
+              "sharing_actual": true,
+              "sharing_authorized": true,
+              "time_unix": 1788642226.7836726,
+              "utilization_threshold": 10,
+              "wall_time_comparable": false
+            }
+          }
+        ],
+        "durable_events_config_complete": true,
+        "gpu_migrated": false,
+        "history_complete": true,
+        "initial_attempt_ordinal": 1,
+        "matrix_provenance_complete": true,
+        "policy_complete": true,
+        "pre_initial_attempt_count": 0,
+        "provenance_complete": true,
+        "sources": [
+          {
+            "path": "/home/aidar.alimbayev/Documents/genmolv2/output/logs/pmo_fragment_vocab_qed_50k_delta_1k_v2__qed__running_mean__seed1.log",
+            "sha256": "82861e59dea27bbbb77cf9c1c5aa152c2c1269bc0b3fef70f2dc05d855bbafdc"
+          }
+        ],
+        "wall_time_comparable": false
+      },
+      "metrics": {
+        "all_charged_molecules": {
+          "auc_top_1": 0.9007747382638959,
+          "auc_top_10": 0.8978885986350827,
+          "auc_top_100": 0.8628611542271317,
+          "top_1": 0.9483312933817938,
+          "top_10": 0.947472124464265,
+          "top_100": 0.9391836888039584
+        },
+        "charged_children_total_call_axis": {
+          "auc_top_1": 0.9007747382638959,
+          "auc_top_10": 0.8978885986350827,
+          "auc_top_100": 0.8628611542271317,
+          "top_1": 0.9483312933817938,
+          "top_10": 0.947472124464265,
+          "top_100": 0.9391836888039584
+        },
+        "first_500_charged_children": {
+          "auc_top_1": 0.8532461812357599,
+          "auc_top_10": 0.8484220833924423,
+          "auc_top_100": 0.7915107091562755,
+          "top_1": 0.9480513124841776,
+          "top_10": 0.9467675672106873,
+          "top_100": 0.9254814791627014
+        }
+      },
+      "provenance": {
+        "config_sha256": "4995444cb572be74477020a3d0fa7f36a8809b7295c6ecfea65958ab7d155fc2",
+        "cuda_visible_devices": "2",
+        "durable_events_provenance_complete": true,
+        "git_branch": "",
+        "git_commit": "7f401b8217e86afce7b725c7a6a25480d230214b",
+        "git_dirty": false,
+        "gpu_logical_index": 0,
+        "gpu_name": "NVIDIA RTX A6000",
+        "hostname": "srv-01",
+        "model_path": "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/50000.ckpt",
+        "model_sha256": "8d00aa47b02f64bf39ff6b0b2e786f213587366fc2c3d29712a00f3f84108dd6",
+        "python_version": "3.10.21",
+        "rdkit_version": "2023.09.6",
+        "resume_count": 0,
+        "scientific_status": "Exploratory paired three-seed QED delta-y credit-assignment study using the final 50k checkpoint, a 1,000-unique-oracle-call budget, warmup parameter 100 (101 frozen iterations under the legacy iteration > warmup boundary), and neutral zero seed estimates with absolute seed scores used only for matched tie-breaking. The delta and transition-absolute control arms share parent/child oracle accounting, domains, transition deduplication, deterministic attribution, and warmup; only the post-warmup credit target differs. This QED-only reduced-budget study is not paper-comparable, causal, or confirmatory.",
+        "timing_provenance_complete": true,
+        "torch_version": "2.6.0+cu124",
+        "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "vocabulary_path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/scripts/exps/pmo/vocab/qed.csv",
+        "vocabulary_sha256": "6b98420f3fa88835e50cb28b960225dc6c7857a29f3057fb1ca22b4211c1806c"
+      },
+      "run_id": "fragment_vocab_qed_50k_delta_1k_v2:qed:running_mean:seed1",
+      "seed": 1,
+      "sources": {
+        "checkpoint": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/running_mean/seed_1/state/latest.pkl",
+          "sha256": "871402715327dec9dcd89cba76997828f44cb6ea5ef949b9b2d63f15ca78f89c"
+        },
+        "events": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/running_mean/seed_1/events.jsonl",
+          "sha256": "92a32ccd151c42f9332ba44ca7cd24470e428e8f956df03c751ce9929eecb4c8"
+        },
+        "manifest": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/running_mean/seed_1/manifest.json",
+          "sha256": "5e861e9f5d72e13b666a8533b1648daad84edfa5f5296a5f15acfde0f62c66d2"
+        },
+        "summary": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/running_mean/seed_1/summary.json",
+          "sha256": "dc54897fa676560e303406a0208afc5d71bdeecc7dad66f9b3270f1a5beccbc7"
+        }
+      },
+      "variant": "running_mean"
+    },
+    {
+      "charged_child_count": 1000,
+      "config": {
+        "checkpoint_every": 100,
+        "credit_fragment_policy": "sampled_three_cut_child",
+        "credit_value_policy": "absolute_child_score",
+        "delta_attribution": "novel_vs_parent",
+        "device": "cuda:0",
+        "durable_events": true,
+        "experiment_id": "fragment_vocab_qed_50k_delta_1k_v2",
+        "gamma": 0.0,
+        "guidance_scale": 2.0,
+        "legacy_seed_count": 1,
+        "legacy_warmup_off_by_one": true,
+        "matrix_path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/experiments/fragment_vocabulary/configs/qed_50k_delta_1k_v2.yaml",
+        "matrix_sha256": "8c62dd6c040392be48a1d6f1024179e16b2b70ff2667073658affd4d89197dc8",
+        "max_iterations": 10000,
+        "max_mol_size": 30,
+        "max_oracle_calls": 1000,
+        "min_mol_size": 10,
+        "min_support": 1,
+        "model_path": "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/50000.ckpt",
+        "observation_identity": "unique_canonical_child",
+        "oracle": "qed",
+        "parent_control": false,
+        "parent_domain_policy": "child_within_configured_atom_bounds",
+        "policy_mode": "mean",
+        "population_sampling_order": "canonical fragment string before uniform sampling",
+        "population_size": 100,
+        "prior_mean": null,
+        "prior_mean_source": null,
+        "prior_strength": 0.0,
+        "randomness": 2.0,
+        "released_duplicate_policy": "repeat cached-child decomposition, matching release",
+        "reporting_frequency": 100,
+        "scientific_status": "Exploratory paired three-seed QED delta-y credit-assignment study using the final 50k checkpoint, a 1,000-unique-oracle-call budget, warmup parameter 100 (101 frozen iterations under the legacy iteration > warmup boundary), and neutral zero seed estimates with absolute seed scores used only for matched tie-breaking. The delta and transition-absolute control arms share parent/child oracle accounting, domains, transition deduplication, deterministic attribution, and warmup; only the post-warmup credit target differs. This QED-only reduced-budget study is not paper-comparable, causal, or confirmatory.",
+        "seed": 2,
+        "seed_initialization_policy": "absolute_seed_statistics",
+        "softmax_temp": 1.2,
+        "statistical_duplicate_policy": "one update per unique canonical child",
+        "variant": "running_mean",
+        "vocab_path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/scripts/exps/pmo/vocab/qed.csv",
+        "warmup": 100,
+        "warmup_update_policy": "standard"
+      },
+      "delta_diagnostics": null,
+      "event_accounting": {
+        "cached_child_lookups": 53,
+        "cached_parent_lookups": 0,
+        "charged_child_evaluations": 1000,
+        "charged_parent_evaluations": 0,
+        "logged_events": 1053,
+        "runner_iterations_represented": 1053
+      },
+      "launch": {
+        "any_gpu_sharing": true,
+        "attempt_count": 1,
+        "attempts": [
+          {
+            "command_sha256": "d734a81d0ddc9d1484bfd6343ab491724877486ab53d5079821172323cbe6888",
+            "line_number": 1,
+            "matrix_provenance_complete": true,
+            "path": "/home/aidar.alimbayev/Documents/genmolv2/output/logs/pmo_fragment_vocab_qed_50k_delta_1k_v2__qed__running_mean__seed2.log",
+            "policy_complete": true,
+            "record": {
+              "command": [
+                "/home/aidar.alimbayev/Documents/genmolv2/.venv/bin/python",
+                "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/scripts/exps/pmo/run_ablation.py",
+                "--oracle",
+                "qed",
+                "--variant",
+                "running_mean",
+                "--seed",
+                "2",
+                "--model-path",
+                "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/50000.ckpt",
+                "--device",
+                "cuda:0",
+                "--experiment-id",
+                "fragment_vocab_qed_50k_delta_1k_v2",
+                "--scientific-status",
+                "Exploratory paired three-seed QED delta-y credit-assignment study using the final 50k checkpoint, a 1,000-unique-oracle-call budget, warmup parameter 100 (101 frozen iterations under the legacy iteration > warmup boundary), and neutral zero seed estimates with absolute seed scores used only for matched tie-breaking. The delta and transition-absolute control arms share parent/child oracle accounting, domains, transition deduplication, deterministic attribution, and warmup; only the post-warmup credit target differs. This QED-only reduced-budget study is not paper-comparable, causal, or confirmatory.",
+                "--matrix-path",
+                "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/experiments/fragment_vocabulary/configs/qed_50k_delta_1k_v2.yaml",
+                "--matrix-sha256",
+                "8c62dd6c040392be48a1d6f1024179e16b2b70ff2667073658affd4d89197dc8",
+                "--output-root",
+                "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation",
+                "--max-oracle-calls",
+                "1000",
+                "--reporting-frequency",
+                "100",
+                "--checkpoint-every",
+                "100",
+                "--max-iterations",
+                "10000",
+                "--population-size",
+                "100",
+                "--warmup",
+                "100",
+                "--softmax-temp",
+                "1.2",
+                "--randomness",
+                "2.0",
+                "--guidance-scale",
+                "2.0",
+                "--legacy-seed-count",
+                "1",
+                "--delta-attribution",
+                "novel_vs_parent",
+                "--legacy-warmup-off-by-one",
+                "--durable-events",
+                "--gamma",
+                "0.0"
+              ],
+              "compute_processes": [
+                {
+                  "gpu_uuid": "GPU-d7e40ce5-9260-a208-16a0-3372e3f204de",
+                  "pid": 1572385,
+                  "process_name": "/home/meir.roketlishvili/miniconda3/envs/SGPO_repro/bin/python",
+                  "used_memory_mib": 1786
+                }
+              ],
+              "event": "launch",
+              "job": "qed__running_mean__seed2",
+              "min_free_memory_mib": 30000,
+              "physical_gpu": {
+                "index": 6,
+                "memory_total_mib": 49140,
+                "memory_used_mib": 1809,
+                "utilization_percent": 5,
+                "uuid": "GPU-d7e40ce5-9260-a208-16a0-3372e3f204de"
+              },
+              "sharing_actual": true,
+              "sharing_authorized": true,
+              "time_unix": 1788642227.0627022,
+              "utilization_threshold": 10,
+              "wall_time_comparable": false
+            }
+          }
+        ],
+        "durable_events_config_complete": true,
+        "gpu_migrated": false,
+        "history_complete": true,
+        "initial_attempt_ordinal": 1,
+        "matrix_provenance_complete": true,
+        "policy_complete": true,
+        "pre_initial_attempt_count": 0,
+        "provenance_complete": true,
+        "sources": [
+          {
+            "path": "/home/aidar.alimbayev/Documents/genmolv2/output/logs/pmo_fragment_vocab_qed_50k_delta_1k_v2__qed__running_mean__seed2.log",
+            "sha256": "60892435e1445e25b6816a1aeb7d0ae700de87a4470a84bf2a189f0cb2db2cad"
+          }
+        ],
+        "wall_time_comparable": false
+      },
+      "metrics": {
+        "all_charged_molecules": {
+          "auc_top_1": 0.8982142205550067,
+          "auc_top_10": 0.8932338445900956,
+          "auc_top_100": 0.8536226774920979,
+          "top_1": 0.947784650947615,
+          "top_10": 0.9465836334320586,
+          "top_100": 0.9370306672450036
+        },
+        "charged_children_total_call_axis": {
+          "auc_top_1": 0.8982142205550067,
+          "auc_top_10": 0.8932338445900956,
+          "auc_top_100": 0.8536226774920979,
+          "top_1": 0.947784650947615,
+          "top_10": 0.9465836334320586,
+          "top_100": 0.9370306672450036
+        },
+        "first_500_charged_children": {
+          "auc_top_1": 0.8486437901623985,
+          "auc_top_10": 0.8406599326952733,
+          "auc_top_100": 0.7773090532748737,
+          "top_1": 0.947784650947615,
+          "top_10": 0.9445114163828787,
+          "top_100": 0.9187779845022306
+        }
+      },
+      "provenance": {
+        "config_sha256": "60cdab4705904be138d5ebdafb4ce110f4df4c926ff01b86d2a01fe7e29241e2",
+        "cuda_visible_devices": "6",
+        "durable_events_provenance_complete": true,
+        "git_branch": "",
+        "git_commit": "7f401b8217e86afce7b725c7a6a25480d230214b",
+        "git_dirty": false,
+        "gpu_logical_index": 0,
+        "gpu_name": "NVIDIA RTX A6000",
+        "hostname": "srv-01",
+        "model_path": "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/50000.ckpt",
+        "model_sha256": "8d00aa47b02f64bf39ff6b0b2e786f213587366fc2c3d29712a00f3f84108dd6",
+        "python_version": "3.10.21",
+        "rdkit_version": "2023.09.6",
+        "resume_count": 0,
+        "scientific_status": "Exploratory paired three-seed QED delta-y credit-assignment study using the final 50k checkpoint, a 1,000-unique-oracle-call budget, warmup parameter 100 (101 frozen iterations under the legacy iteration > warmup boundary), and neutral zero seed estimates with absolute seed scores used only for matched tie-breaking. The delta and transition-absolute control arms share parent/child oracle accounting, domains, transition deduplication, deterministic attribution, and warmup; only the post-warmup credit target differs. This QED-only reduced-budget study is not paper-comparable, causal, or confirmatory.",
+        "timing_provenance_complete": true,
+        "torch_version": "2.6.0+cu124",
+        "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "vocabulary_path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/scripts/exps/pmo/vocab/qed.csv",
+        "vocabulary_sha256": "6b98420f3fa88835e50cb28b960225dc6c7857a29f3057fb1ca22b4211c1806c"
+      },
+      "run_id": "fragment_vocab_qed_50k_delta_1k_v2:qed:running_mean:seed2",
+      "seed": 2,
+      "sources": {
+        "checkpoint": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/running_mean/seed_2/state/latest.pkl",
+          "sha256": "53571424f69763e8de554068e91f638095109cb4d9a36f8c837e7b857f2b293b"
+        },
+        "events": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/running_mean/seed_2/events.jsonl",
+          "sha256": "9d0f59c5b7f0e2e01753ea70defc0c7c2de4d4addb8a74ae29a5db13c02e1d8f"
+        },
+        "manifest": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/running_mean/seed_2/manifest.json",
+          "sha256": "2a2559816e748e2afdb195c6b73b9ff892657f293a713636c32d313380a92988"
+        },
+        "summary": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/running_mean/seed_2/summary.json",
+          "sha256": "d4061eaed6b0f68939561cb470709929889c7fb537546653278d179325750265"
+        }
+      },
+      "variant": "running_mean"
+    },
+    {
+      "charged_child_count": 530,
+      "config": {
+        "checkpoint_every": 100,
+        "credit_fragment_policy": "deterministic_cut_all_child_minus_parent",
+        "credit_value_policy": "absolute_child_score",
+        "delta_attribution": "novel_vs_parent",
+        "device": "cuda:0",
+        "durable_events": true,
+        "experiment_id": "fragment_vocab_qed_50k_delta_1k_v2",
+        "gamma": 0.0,
+        "guidance_scale": 2.0,
+        "legacy_seed_count": 1,
+        "legacy_warmup_off_by_one": true,
+        "matrix_path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/experiments/fragment_vocabulary/configs/qed_50k_delta_1k_v2.yaml",
+        "matrix_sha256": "8c62dd6c040392be48a1d6f1024179e16b2b70ff2667073658affd4d89197dc8",
+        "max_iterations": 10000,
+        "max_mol_size": 30,
+        "max_oracle_calls": 1000,
+        "min_mol_size": 10,
+        "min_support": 1,
+        "model_path": "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/50000.ckpt",
+        "observation_identity": "unique_canonical_parent_child_transition",
+        "oracle": "qed",
+        "parent_control": true,
+        "parent_domain_policy": "parent_and_child_within_configured_atom_bounds",
+        "policy_mode": "delta_control",
+        "population_sampling_order": "canonical fragment string before uniform sampling",
+        "population_size": 100,
+        "prior_mean": null,
+        "prior_mean_source": null,
+        "prior_strength": 0.0,
+        "randomness": 2.0,
+        "released_duplicate_policy": "repeat cached-child decomposition, matching release",
+        "reporting_frequency": 100,
+        "scientific_status": "Exploratory paired three-seed QED delta-y credit-assignment study using the final 50k checkpoint, a 1,000-unique-oracle-call budget, warmup parameter 100 (101 frozen iterations under the legacy iteration > warmup boundary), and neutral zero seed estimates with absolute seed scores used only for matched tie-breaking. The delta and transition-absolute control arms share parent/child oracle accounting, domains, transition deduplication, deterministic attribution, and warmup; only the post-warmup credit target differs. This QED-only reduced-budget study is not paper-comparable, causal, or confirmatory.",
+        "seed": 0,
+        "seed_initialization_policy": "neutral_zero_with_seed_score_tiebreak",
+        "softmax_temp": 1.2,
+        "statistical_duplicate_policy": "one update per unique canonical parent-child transition",
+        "variant": "running_mean_delta_control",
+        "vocab_path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/scripts/exps/pmo/vocab/qed.csv",
+        "warmup": 100,
+        "warmup_update_policy": "frozen"
+      },
+      "delta_diagnostics": {
+        "attribution": {
+          "any_credit_fraction": 0.872255489021956,
+          "applicable_unique_transitions": 501,
+          "credited_fragment_observations": 5087,
+          "mean_fragment_level_coverage": 0.5324849286043901,
+          "unique_credited_fragments": 4458,
+          "unique_transitions_with_any_credit": 437
+        },
+        "cached_child_lookups": 73,
+        "cached_parent_lookup_rate": 0.06560636182902585,
+        "cached_parent_lookups": 33,
+        "charged_child_calls": 530,
+        "charged_parent_calls": 470,
+        "delta_y_unique_transitions": {
+          "count": 501,
+          "maximum": 0.47986109582504893,
+          "mean": -0.012125365114283951,
+          "median": -0.0037362742427580198,
+          "minimum": -0.5498004065235471,
+          "negative": 255,
+          "positive": 180,
+          "sample_sd": 0.1361459087820198,
+          "zero": 66
+        },
+        "duplicate_transition_events": 1,
+        "events": 604,
+        "paired_events": 502,
+        "population_updates": 437,
+        "total_parent_lookups": 503,
+        "unique_parent_child_transitions": 501
+      },
+      "event_accounting": {
+        "cached_child_lookups": 73,
+        "cached_parent_lookups": 33,
+        "charged_child_evaluations": 530,
+        "charged_parent_evaluations": 470,
+        "logged_events": 604,
+        "runner_iterations_represented": 604
+      },
+      "launch": {
+        "any_gpu_sharing": true,
+        "attempt_count": 1,
+        "attempts": [
+          {
+            "command_sha256": "8bef9ba56105da3c7201e3ed06e039ad1e8487a9c18c07ab1aa6fd24b299f9cb",
+            "line_number": 1,
+            "matrix_provenance_complete": true,
+            "path": "/home/aidar.alimbayev/Documents/genmolv2/output/logs/pmo_fragment_vocab_qed_50k_delta_1k_v2__qed__running_mean_delta_control__seed0.log",
+            "policy_complete": true,
+            "record": {
+              "command": [
+                "/home/aidar.alimbayev/Documents/genmolv2/.venv/bin/python",
+                "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/scripts/exps/pmo/run_ablation.py",
+                "--oracle",
+                "qed",
+                "--variant",
+                "running_mean_delta_control",
+                "--seed",
+                "0",
+                "--model-path",
+                "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/50000.ckpt",
+                "--device",
+                "cuda:0",
+                "--experiment-id",
+                "fragment_vocab_qed_50k_delta_1k_v2",
+                "--scientific-status",
+                "Exploratory paired three-seed QED delta-y credit-assignment study using the final 50k checkpoint, a 1,000-unique-oracle-call budget, warmup parameter 100 (101 frozen iterations under the legacy iteration > warmup boundary), and neutral zero seed estimates with absolute seed scores used only for matched tie-breaking. The delta and transition-absolute control arms share parent/child oracle accounting, domains, transition deduplication, deterministic attribution, and warmup; only the post-warmup credit target differs. This QED-only reduced-budget study is not paper-comparable, causal, or confirmatory.",
+                "--matrix-path",
+                "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/experiments/fragment_vocabulary/configs/qed_50k_delta_1k_v2.yaml",
+                "--matrix-sha256",
+                "8c62dd6c040392be48a1d6f1024179e16b2b70ff2667073658affd4d89197dc8",
+                "--output-root",
+                "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation",
+                "--max-oracle-calls",
+                "1000",
+                "--reporting-frequency",
+                "100",
+                "--checkpoint-every",
+                "100",
+                "--max-iterations",
+                "10000",
+                "--population-size",
+                "100",
+                "--warmup",
+                "100",
+                "--softmax-temp",
+                "1.2",
+                "--randomness",
+                "2.0",
+                "--guidance-scale",
+                "2.0",
+                "--legacy-seed-count",
+                "1",
+                "--delta-attribution",
+                "novel_vs_parent",
+                "--legacy-warmup-off-by-one",
+                "--durable-events",
+                "--gamma",
+                "0.0"
+              ],
+              "compute_processes": [
+                {
+                  "gpu_uuid": "GPU-134e9a1b-cf80-5c0e-b0c4-048fff8e6d3c",
+                  "pid": 1572384,
+                  "process_name": "/home/meir.roketlishvili/miniconda3/envs/SGPO_repro/bin/python",
+                  "used_memory_mib": 1788
+                }
+              ],
+              "event": "launch",
+              "job": "qed__running_mean_delta_control__seed0",
+              "min_free_memory_mib": 30000,
+              "physical_gpu": {
+                "index": 5,
+                "memory_total_mib": 49140,
+                "memory_used_mib": 1811,
+                "utilization_percent": 5,
+                "uuid": "GPU-134e9a1b-cf80-5c0e-b0c4-048fff8e6d3c"
+              },
+              "sharing_actual": true,
+              "sharing_authorized": true,
+              "time_unix": 1788642242.3368723,
+              "utilization_threshold": 10,
+              "wall_time_comparable": false
+            }
+          }
+        ],
+        "durable_events_config_complete": true,
+        "gpu_migrated": false,
+        "history_complete": true,
+        "initial_attempt_ordinal": 1,
+        "matrix_provenance_complete": true,
+        "policy_complete": true,
+        "pre_initial_attempt_count": 0,
+        "provenance_complete": true,
+        "sources": [
+          {
+            "path": "/home/aidar.alimbayev/Documents/genmolv2/output/logs/pmo_fragment_vocab_qed_50k_delta_1k_v2__qed__running_mean_delta_control__seed0.log",
+            "sha256": "af1cb31d3bc4342ecab2d8e0cb57711ec8f5d5d0d0ec2e01d6246f3af58436f2"
+          }
+        ],
+        "wall_time_comparable": false
+      },
+      "metrics": {
+        "all_charged_molecules": {
+          "auc_top_1": 0.8983748887136487,
+          "auc_top_10": 0.8756185038449902,
+          "auc_top_100": 0.8220383051651328,
+          "top_1": 0.9456577775933143,
+          "top_10": 0.9271326182375479,
+          "top_100": 0.8953746304761749
+        },
+        "charged_children_total_call_axis": {
+          "auc_top_1": 0.8983748887136487,
+          "auc_top_10": 0.8712591676543723,
+          "auc_top_100": 0.8049127105109007,
+          "top_1": 0.9456577775933143,
+          "top_10": 0.9215518818711403,
+          "top_100": 0.878447475328919
+        },
+        "first_500_charged_children": {
+          "auc_top_1": 0.8510919998339828,
+          "auc_top_10": 0.824590315133462,
+          "auc_top_100": 0.7562930783162126,
+          "top_1": 0.9456577775933143,
+          "top_10": 0.9215518818711403,
+          "top_100": 0.8756730207814303
+        }
+      },
+      "provenance": {
+        "config_sha256": "ad9192cce162897ab8c5397d672fb93ee69cefd6cc3b07708c5cdb394b4052f9",
+        "cuda_visible_devices": "5",
+        "durable_events_provenance_complete": true,
+        "git_branch": "",
+        "git_commit": "7f401b8217e86afce7b725c7a6a25480d230214b",
+        "git_dirty": false,
+        "gpu_logical_index": 0,
+        "gpu_name": "NVIDIA RTX A6000",
+        "hostname": "srv-01",
+        "model_path": "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/50000.ckpt",
+        "model_sha256": "8d00aa47b02f64bf39ff6b0b2e786f213587366fc2c3d29712a00f3f84108dd6",
+        "python_version": "3.10.21",
+        "rdkit_version": "2023.09.6",
+        "resume_count": 0,
+        "scientific_status": "Exploratory paired three-seed QED delta-y credit-assignment study using the final 50k checkpoint, a 1,000-unique-oracle-call budget, warmup parameter 100 (101 frozen iterations under the legacy iteration > warmup boundary), and neutral zero seed estimates with absolute seed scores used only for matched tie-breaking. The delta and transition-absolute control arms share parent/child oracle accounting, domains, transition deduplication, deterministic attribution, and warmup; only the post-warmup credit target differs. This QED-only reduced-budget study is not paper-comparable, causal, or confirmatory.",
+        "timing_provenance_complete": true,
+        "torch_version": "2.6.0+cu124",
+        "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "vocabulary_path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/scripts/exps/pmo/vocab/qed.csv",
+        "vocabulary_sha256": "6b98420f3fa88835e50cb28b960225dc6c7857a29f3057fb1ca22b4211c1806c"
+      },
+      "run_id": "fragment_vocab_qed_50k_delta_1k_v2:qed:running_mean_delta_control:seed0",
+      "seed": 0,
+      "sources": {
+        "checkpoint": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/running_mean_delta_control/seed_0/state/latest.pkl",
+          "sha256": "d15dce29947bbe37e841ad89b870d1fbab7e41dff51c54d785bbc2be6fe9e42c"
+        },
+        "events": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/running_mean_delta_control/seed_0/events.jsonl",
+          "sha256": "ba1b8bd106a1f8f42066ca95aef6ec86a053631663d16d1852da03189efe6902"
+        },
+        "manifest": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/running_mean_delta_control/seed_0/manifest.json",
+          "sha256": "c01ef8c97bd022f4f426946f60b0004dd78b704f3d3021fa8f1051a9a2d606e5"
+        },
+        "summary": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/running_mean_delta_control/seed_0/summary.json",
+          "sha256": "76b20c9e76ef52d4100bb0cfcc9154f410a430d06c940dae916aa1bcbc533716"
+        }
+      },
+      "variant": "running_mean_delta_control"
+    },
+    {
+      "charged_child_count": 534,
+      "config": {
+        "checkpoint_every": 100,
+        "credit_fragment_policy": "deterministic_cut_all_child_minus_parent",
+        "credit_value_policy": "absolute_child_score",
+        "delta_attribution": "novel_vs_parent",
+        "device": "cuda:0",
+        "durable_events": true,
+        "experiment_id": "fragment_vocab_qed_50k_delta_1k_v2",
+        "gamma": 0.0,
+        "guidance_scale": 2.0,
+        "legacy_seed_count": 1,
+        "legacy_warmup_off_by_one": true,
+        "matrix_path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/experiments/fragment_vocabulary/configs/qed_50k_delta_1k_v2.yaml",
+        "matrix_sha256": "8c62dd6c040392be48a1d6f1024179e16b2b70ff2667073658affd4d89197dc8",
+        "max_iterations": 10000,
+        "max_mol_size": 30,
+        "max_oracle_calls": 1000,
+        "min_mol_size": 10,
+        "min_support": 1,
+        "model_path": "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/50000.ckpt",
+        "observation_identity": "unique_canonical_parent_child_transition",
+        "oracle": "qed",
+        "parent_control": true,
+        "parent_domain_policy": "parent_and_child_within_configured_atom_bounds",
+        "policy_mode": "delta_control",
+        "population_sampling_order": "canonical fragment string before uniform sampling",
+        "population_size": 100,
+        "prior_mean": null,
+        "prior_mean_source": null,
+        "prior_strength": 0.0,
+        "randomness": 2.0,
+        "released_duplicate_policy": "repeat cached-child decomposition, matching release",
+        "reporting_frequency": 100,
+        "scientific_status": "Exploratory paired three-seed QED delta-y credit-assignment study using the final 50k checkpoint, a 1,000-unique-oracle-call budget, warmup parameter 100 (101 frozen iterations under the legacy iteration > warmup boundary), and neutral zero seed estimates with absolute seed scores used only for matched tie-breaking. The delta and transition-absolute control arms share parent/child oracle accounting, domains, transition deduplication, deterministic attribution, and warmup; only the post-warmup credit target differs. This QED-only reduced-budget study is not paper-comparable, causal, or confirmatory.",
+        "seed": 1,
+        "seed_initialization_policy": "neutral_zero_with_seed_score_tiebreak",
+        "softmax_temp": 1.2,
+        "statistical_duplicate_policy": "one update per unique canonical parent-child transition",
+        "variant": "running_mean_delta_control",
+        "vocab_path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/scripts/exps/pmo/vocab/qed.csv",
+        "warmup": 100,
+        "warmup_update_policy": "frozen"
+      },
+      "delta_diagnostics": {
+        "attribution": {
+          "any_credit_fraction": 0.8877755511022044,
+          "applicable_unique_transitions": 499,
+          "credited_fragment_observations": 3810,
+          "mean_fragment_level_coverage": 0.5392374306965673,
+          "unique_credited_fragments": 3124,
+          "unique_transitions_with_any_credit": 443
+        },
+        "cached_child_lookups": 66,
+        "cached_parent_lookup_rate": 0.06613226452905811,
+        "cached_parent_lookups": 33,
+        "charged_child_calls": 534,
+        "charged_parent_calls": 466,
+        "delta_y_unique_transitions": {
+          "count": 499,
+          "maximum": 0.3395142259919741,
+          "mean": -0.03265331934205851,
+          "median": -0.021287066058385595,
+          "minimum": -0.4611718183378199,
+          "negative": 300,
+          "positive": 141,
+          "sample_sd": 0.10237126577302248,
+          "zero": 58
+        },
+        "duplicate_transition_events": 0,
+        "events": 600,
+        "paired_events": 499,
+        "population_updates": 443,
+        "total_parent_lookups": 499,
+        "unique_parent_child_transitions": 499
+      },
+      "event_accounting": {
+        "cached_child_lookups": 66,
+        "cached_parent_lookups": 33,
+        "charged_child_evaluations": 534,
+        "charged_parent_evaluations": 466,
+        "logged_events": 600,
+        "runner_iterations_represented": 600
+      },
+      "launch": {
+        "any_gpu_sharing": true,
+        "attempt_count": 1,
+        "attempts": [
+          {
+            "command_sha256": "619b6d0aa5007cb6502bd0c6c1b96016d67bca8eb230723df4ec2afad89f03ba",
+            "line_number": 1,
+            "matrix_provenance_complete": true,
+            "path": "/home/aidar.alimbayev/Documents/genmolv2/output/logs/pmo_fragment_vocab_qed_50k_delta_1k_v2__qed__running_mean_delta_control__seed1.log",
+            "policy_complete": true,
+            "record": {
+              "command": [
+                "/home/aidar.alimbayev/Documents/genmolv2/.venv/bin/python",
+                "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/scripts/exps/pmo/run_ablation.py",
+                "--oracle",
+                "qed",
+                "--variant",
+                "running_mean_delta_control",
+                "--seed",
+                "1",
+                "--model-path",
+                "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/50000.ckpt",
+                "--device",
+                "cuda:0",
+                "--experiment-id",
+                "fragment_vocab_qed_50k_delta_1k_v2",
+                "--scientific-status",
+                "Exploratory paired three-seed QED delta-y credit-assignment study using the final 50k checkpoint, a 1,000-unique-oracle-call budget, warmup parameter 100 (101 frozen iterations under the legacy iteration > warmup boundary), and neutral zero seed estimates with absolute seed scores used only for matched tie-breaking. The delta and transition-absolute control arms share parent/child oracle accounting, domains, transition deduplication, deterministic attribution, and warmup; only the post-warmup credit target differs. This QED-only reduced-budget study is not paper-comparable, causal, or confirmatory.",
+                "--matrix-path",
+                "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/experiments/fragment_vocabulary/configs/qed_50k_delta_1k_v2.yaml",
+                "--matrix-sha256",
+                "8c62dd6c040392be48a1d6f1024179e16b2b70ff2667073658affd4d89197dc8",
+                "--output-root",
+                "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation",
+                "--max-oracle-calls",
+                "1000",
+                "--reporting-frequency",
+                "100",
+                "--checkpoint-every",
+                "100",
+                "--max-iterations",
+                "10000",
+                "--population-size",
+                "100",
+                "--warmup",
+                "100",
+                "--softmax-temp",
+                "1.2",
+                "--randomness",
+                "2.0",
+                "--guidance-scale",
+                "2.0",
+                "--legacy-seed-count",
+                "1",
+                "--delta-attribution",
+                "novel_vs_parent",
+                "--legacy-warmup-off-by-one",
+                "--durable-events",
+                "--gamma",
+                "0.0"
+              ],
+              "compute_processes": [
+                {
+                  "gpu_uuid": "GPU-7ae42da2-3c8d-efa0-99ec-845b7f85399a",
+                  "pid": 1572386,
+                  "process_name": "/home/meir.roketlishvili/miniconda3/envs/SGPO_repro/bin/python",
+                  "used_memory_mib": 1956
+                }
+              ],
+              "event": "launch",
+              "job": "qed__running_mean_delta_control__seed1",
+              "min_free_memory_mib": 30000,
+              "physical_gpu": {
+                "index": 7,
+                "memory_total_mib": 49140,
+                "memory_used_mib": 1979,
+                "utilization_percent": 6,
+                "uuid": "GPU-7ae42da2-3c8d-efa0-99ec-845b7f85399a"
+              },
+              "sharing_actual": true,
+              "sharing_authorized": true,
+              "time_unix": 1788642332.958333,
+              "utilization_threshold": 10,
+              "wall_time_comparable": false
+            }
+          }
+        ],
+        "durable_events_config_complete": true,
+        "gpu_migrated": false,
+        "history_complete": true,
+        "initial_attempt_ordinal": 1,
+        "matrix_provenance_complete": true,
+        "policy_complete": true,
+        "pre_initial_attempt_count": 0,
+        "provenance_complete": true,
+        "sources": [
+          {
+            "path": "/home/aidar.alimbayev/Documents/genmolv2/output/logs/pmo_fragment_vocab_qed_50k_delta_1k_v2__qed__running_mean_delta_control__seed1.log",
+            "sha256": "eae3c00f8c0c87e5f2ac0d7f80b8e0013351feaff92383352cd50698eea358e5"
+          }
+        ],
+        "wall_time_comparable": false
+      },
+      "metrics": {
+        "all_charged_molecules": {
+          "auc_top_1": 0.8996030704970199,
+          "auc_top_10": 0.8901830545077856,
+          "auc_top_100": 0.8413550121134762,
+          "top_1": 0.9482654487870716,
+          "top_10": 0.9422359199897278,
+          "top_100": 0.9164906667808138
+        },
+        "charged_children_total_call_axis": {
+          "auc_top_1": 0.8961626841591844,
+          "auc_top_10": 0.8799766456731736,
+          "auc_top_100": 0.8195922957756603,
+          "top_1": 0.9441804574402368,
+          "top_10": 0.9329936512865367,
+          "top_100": 0.8953901659817199
+        },
+        "first_500_charged_children": {
+          "auc_top_1": 0.8481449108781326,
+          "auc_top_10": 0.831761475789036,
+          "auc_top_100": 0.7688030265867546,
+          "top_1": 0.9441804574402368,
+          "top_10": 0.9324412849811508,
+          "top_100": 0.8934424769805395
+        }
+      },
+      "provenance": {
+        "config_sha256": "8b68753e822d01ece62ba0fc2958bd765ce3dbee8ce8bd3467c68edaaecb71ee",
+        "cuda_visible_devices": "7",
+        "durable_events_provenance_complete": true,
+        "git_branch": "",
+        "git_commit": "7f401b8217e86afce7b725c7a6a25480d230214b",
+        "git_dirty": false,
+        "gpu_logical_index": 0,
+        "gpu_name": "NVIDIA RTX A6000",
+        "hostname": "srv-01",
+        "model_path": "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/50000.ckpt",
+        "model_sha256": "8d00aa47b02f64bf39ff6b0b2e786f213587366fc2c3d29712a00f3f84108dd6",
+        "python_version": "3.10.21",
+        "rdkit_version": "2023.09.6",
+        "resume_count": 0,
+        "scientific_status": "Exploratory paired three-seed QED delta-y credit-assignment study using the final 50k checkpoint, a 1,000-unique-oracle-call budget, warmup parameter 100 (101 frozen iterations under the legacy iteration > warmup boundary), and neutral zero seed estimates with absolute seed scores used only for matched tie-breaking. The delta and transition-absolute control arms share parent/child oracle accounting, domains, transition deduplication, deterministic attribution, and warmup; only the post-warmup credit target differs. This QED-only reduced-budget study is not paper-comparable, causal, or confirmatory.",
+        "timing_provenance_complete": true,
+        "torch_version": "2.6.0+cu124",
+        "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "vocabulary_path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/scripts/exps/pmo/vocab/qed.csv",
+        "vocabulary_sha256": "6b98420f3fa88835e50cb28b960225dc6c7857a29f3057fb1ca22b4211c1806c"
+      },
+      "run_id": "fragment_vocab_qed_50k_delta_1k_v2:qed:running_mean_delta_control:seed1",
+      "seed": 1,
+      "sources": {
+        "checkpoint": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/running_mean_delta_control/seed_1/state/latest.pkl",
+          "sha256": "96337a0384d270e4c4d16ddcac752bc7f6fd5134650d166b8c8f044b750e7637"
+        },
+        "events": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/running_mean_delta_control/seed_1/events.jsonl",
+          "sha256": "f92da8c66b2b787de9325aad1ab906902dbf7bbbcb6562a0eeef65601ef6f150"
+        },
+        "manifest": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/running_mean_delta_control/seed_1/manifest.json",
+          "sha256": "46192d634c7ead177d411330d5d828a49eec34d82b09db819ff01e8ddf0d28d2"
+        },
+        "summary": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/running_mean_delta_control/seed_1/summary.json",
+          "sha256": "c7fbba53310da45ef6ad5ab93f09ad33d73c1c91a482f64c7ac7f4f353d28783"
+        }
+      },
+      "variant": "running_mean_delta_control"
+    },
+    {
+      "charged_child_count": 539,
+      "config": {
+        "checkpoint_every": 100,
+        "credit_fragment_policy": "deterministic_cut_all_child_minus_parent",
+        "credit_value_policy": "absolute_child_score",
+        "delta_attribution": "novel_vs_parent",
+        "device": "cuda:0",
+        "durable_events": true,
+        "experiment_id": "fragment_vocab_qed_50k_delta_1k_v2",
+        "gamma": 0.0,
+        "guidance_scale": 2.0,
+        "legacy_seed_count": 1,
+        "legacy_warmup_off_by_one": true,
+        "matrix_path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/experiments/fragment_vocabulary/configs/qed_50k_delta_1k_v2.yaml",
+        "matrix_sha256": "8c62dd6c040392be48a1d6f1024179e16b2b70ff2667073658affd4d89197dc8",
+        "max_iterations": 10000,
+        "max_mol_size": 30,
+        "max_oracle_calls": 1000,
+        "min_mol_size": 10,
+        "min_support": 1,
+        "model_path": "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/50000.ckpt",
+        "observation_identity": "unique_canonical_parent_child_transition",
+        "oracle": "qed",
+        "parent_control": true,
+        "parent_domain_policy": "parent_and_child_within_configured_atom_bounds",
+        "policy_mode": "delta_control",
+        "population_sampling_order": "canonical fragment string before uniform sampling",
+        "population_size": 100,
+        "prior_mean": null,
+        "prior_mean_source": null,
+        "prior_strength": 0.0,
+        "randomness": 2.0,
+        "released_duplicate_policy": "repeat cached-child decomposition, matching release",
+        "reporting_frequency": 100,
+        "scientific_status": "Exploratory paired three-seed QED delta-y credit-assignment study using the final 50k checkpoint, a 1,000-unique-oracle-call budget, warmup parameter 100 (101 frozen iterations under the legacy iteration > warmup boundary), and neutral zero seed estimates with absolute seed scores used only for matched tie-breaking. The delta and transition-absolute control arms share parent/child oracle accounting, domains, transition deduplication, deterministic attribution, and warmup; only the post-warmup credit target differs. This QED-only reduced-budget study is not paper-comparable, causal, or confirmatory.",
+        "seed": 2,
+        "seed_initialization_policy": "neutral_zero_with_seed_score_tiebreak",
+        "softmax_temp": 1.2,
+        "statistical_duplicate_policy": "one update per unique canonical parent-child transition",
+        "variant": "running_mean_delta_control",
+        "vocab_path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/scripts/exps/pmo/vocab/qed.csv",
+        "warmup": 100,
+        "warmup_update_policy": "frozen"
+      },
+      "delta_diagnostics": {
+        "attribution": {
+          "any_credit_fraction": 0.9214876033057852,
+          "applicable_unique_transitions": 484,
+          "credited_fragment_observations": 4681,
+          "mean_fragment_level_coverage": 0.5568379896054244,
+          "unique_credited_fragments": 3966,
+          "unique_transitions_with_any_credit": 446
+        },
+        "cached_child_lookups": 46,
+        "cached_parent_lookup_rate": 0.049484536082474224,
+        "cached_parent_lookups": 24,
+        "charged_child_calls": 539,
+        "charged_parent_calls": 461,
+        "delta_y_unique_transitions": {
+          "count": 484,
+          "maximum": 0.5390197298998648,
+          "mean": -0.021830430728535643,
+          "median": -0.00863800061552017,
+          "minimum": -0.4779779206769534,
+          "negative": 261,
+          "positive": 185,
+          "sample_sd": 0.12021265799690838,
+          "zero": 38
+        },
+        "duplicate_transition_events": 0,
+        "events": 586,
+        "paired_events": 484,
+        "population_updates": 446,
+        "total_parent_lookups": 485,
+        "unique_parent_child_transitions": 484
+      },
+      "event_accounting": {
+        "cached_child_lookups": 46,
+        "cached_parent_lookups": 24,
+        "charged_child_evaluations": 539,
+        "charged_parent_evaluations": 461,
+        "logged_events": 586,
+        "runner_iterations_represented": 586
+      },
+      "launch": {
+        "any_gpu_sharing": true,
+        "attempt_count": 1,
+        "attempts": [
+          {
+            "command_sha256": "a15249f57f642a89a22bcb9aabe38df41a76851ff0e55b6c7e5b7ac6e05dc7b5",
+            "line_number": 1,
+            "matrix_provenance_complete": true,
+            "path": "/home/aidar.alimbayev/Documents/genmolv2/output/logs/pmo_fragment_vocab_qed_50k_delta_1k_v2__qed__running_mean_delta_control__seed2.log",
+            "policy_complete": true,
+            "record": {
+              "command": [
+                "/home/aidar.alimbayev/Documents/genmolv2/.venv/bin/python",
+                "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/scripts/exps/pmo/run_ablation.py",
+                "--oracle",
+                "qed",
+                "--variant",
+                "running_mean_delta_control",
+                "--seed",
+                "2",
+                "--model-path",
+                "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/50000.ckpt",
+                "--device",
+                "cuda:0",
+                "--experiment-id",
+                "fragment_vocab_qed_50k_delta_1k_v2",
+                "--scientific-status",
+                "Exploratory paired three-seed QED delta-y credit-assignment study using the final 50k checkpoint, a 1,000-unique-oracle-call budget, warmup parameter 100 (101 frozen iterations under the legacy iteration > warmup boundary), and neutral zero seed estimates with absolute seed scores used only for matched tie-breaking. The delta and transition-absolute control arms share parent/child oracle accounting, domains, transition deduplication, deterministic attribution, and warmup; only the post-warmup credit target differs. This QED-only reduced-budget study is not paper-comparable, causal, or confirmatory.",
+                "--matrix-path",
+                "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/experiments/fragment_vocabulary/configs/qed_50k_delta_1k_v2.yaml",
+                "--matrix-sha256",
+                "8c62dd6c040392be48a1d6f1024179e16b2b70ff2667073658affd4d89197dc8",
+                "--output-root",
+                "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation",
+                "--max-oracle-calls",
+                "1000",
+                "--reporting-frequency",
+                "100",
+                "--checkpoint-every",
+                "100",
+                "--max-iterations",
+                "10000",
+                "--population-size",
+                "100",
+                "--warmup",
+                "100",
+                "--softmax-temp",
+                "1.2",
+                "--randomness",
+                "2.0",
+                "--guidance-scale",
+                "2.0",
+                "--legacy-seed-count",
+                "1",
+                "--delta-attribution",
+                "novel_vs_parent",
+                "--legacy-warmup-off-by-one",
+                "--durable-events",
+                "--gamma",
+                "0.0"
+              ],
+              "compute_processes": [
+                {
+                  "gpu_uuid": "GPU-134e9a1b-cf80-5c0e-b0c4-048fff8e6d3c",
+                  "pid": 1572384,
+                  "process_name": "/home/meir.roketlishvili/miniconda3/envs/SGPO_repro/bin/python",
+                  "used_memory_mib": 1788
+                }
+              ],
+              "event": "launch",
+              "job": "qed__running_mean_delta_control__seed2",
+              "min_free_memory_mib": 30000,
+              "physical_gpu": {
+                "index": 5,
+                "memory_total_mib": 49140,
+                "memory_used_mib": 1811,
+                "utilization_percent": 5,
+                "uuid": "GPU-134e9a1b-cf80-5c0e-b0c4-048fff8e6d3c"
+              },
+              "sharing_actual": true,
+              "sharing_authorized": true,
+              "time_unix": 1788642423.2854583,
+              "utilization_threshold": 10,
+              "wall_time_comparable": false
+            }
+          }
+        ],
+        "durable_events_config_complete": true,
+        "gpu_migrated": false,
+        "history_complete": true,
+        "initial_attempt_ordinal": 1,
+        "matrix_provenance_complete": true,
+        "policy_complete": true,
+        "pre_initial_attempt_count": 0,
+        "provenance_complete": true,
+        "sources": [
+          {
+            "path": "/home/aidar.alimbayev/Documents/genmolv2/output/logs/pmo_fragment_vocab_qed_50k_delta_1k_v2__qed__running_mean_delta_control__seed2.log",
+            "sha256": "de2533859667baeae0fcda644939c8c6e655e9f8f96ca7c804aea2e50f8843e2"
+          }
+        ],
+        "wall_time_comparable": false
+      },
+      "metrics": {
+        "all_charged_molecules": {
+          "auc_top_1": 0.8945831593593023,
+          "auc_top_10": 0.8764543818165575,
+          "auc_top_100": 0.8164324838357735,
+          "top_1": 0.9416664835361078,
+          "top_10": 0.9305273367905338,
+          "top_100": 0.8973970000037914
+        },
+        "charged_children_total_call_axis": {
+          "auc_top_1": 0.8945831593593023,
+          "auc_top_10": 0.8738674075964074,
+          "auc_top_100": 0.799901134094719,
+          "top_1": 0.9416664835361078,
+          "top_10": 0.9283172409010809,
+          "top_100": 0.8791292209819136
+        },
+        "first_500_charged_children": {
+          "auc_top_1": 0.847499835182497,
+          "auc_top_10": 0.8270061169333162,
+          "auc_top_100": 0.7500829115848642,
+          "top_1": 0.9416664835361078,
+          "top_10": 0.927593887111031,
+          "top_100": 0.8747429205064234
+        }
+      },
+      "provenance": {
+        "config_sha256": "5629a433ebeaf15c17f5bea5a5771f0d8901cf8ba3e21081f646c2d33686f9bc",
+        "cuda_visible_devices": "5",
+        "durable_events_provenance_complete": true,
+        "git_branch": "",
+        "git_commit": "7f401b8217e86afce7b725c7a6a25480d230214b",
+        "git_dirty": false,
+        "gpu_logical_index": 0,
+        "gpu_name": "NVIDIA RTX A6000",
+        "hostname": "srv-01",
+        "model_path": "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/50000.ckpt",
+        "model_sha256": "8d00aa47b02f64bf39ff6b0b2e786f213587366fc2c3d29712a00f3f84108dd6",
+        "python_version": "3.10.21",
+        "rdkit_version": "2023.09.6",
+        "resume_count": 0,
+        "scientific_status": "Exploratory paired three-seed QED delta-y credit-assignment study using the final 50k checkpoint, a 1,000-unique-oracle-call budget, warmup parameter 100 (101 frozen iterations under the legacy iteration > warmup boundary), and neutral zero seed estimates with absolute seed scores used only for matched tie-breaking. The delta and transition-absolute control arms share parent/child oracle accounting, domains, transition deduplication, deterministic attribution, and warmup; only the post-warmup credit target differs. This QED-only reduced-budget study is not paper-comparable, causal, or confirmatory.",
+        "timing_provenance_complete": true,
+        "torch_version": "2.6.0+cu124",
+        "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "vocabulary_path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/scripts/exps/pmo/vocab/qed.csv",
+        "vocabulary_sha256": "6b98420f3fa88835e50cb28b960225dc6c7857a29f3057fb1ca22b4211c1806c"
+      },
+      "run_id": "fragment_vocab_qed_50k_delta_1k_v2:qed:running_mean_delta_control:seed2",
+      "seed": 2,
+      "sources": {
+        "checkpoint": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/running_mean_delta_control/seed_2/state/latest.pkl",
+          "sha256": "bf677e022110a5a38f193fa1ea14e8cdf01f8c197961a2080f168ece23ea372f"
+        },
+        "events": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/running_mean_delta_control/seed_2/events.jsonl",
+          "sha256": "ab792b6b6427432a94d5c028c11abb1244182e378daf3f74700d24b5999d08f7"
+        },
+        "manifest": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/running_mean_delta_control/seed_2/manifest.json",
+          "sha256": "0c2e4359645d8ac1292803a9a708fdf3051e1d81c225392081a0bcf6fdd786e7"
+        },
+        "summary": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/running_mean_delta_control/seed_2/summary.json",
+          "sha256": "0f224a5b0d9a2d28cca7c8cc04a8e3fa083b7c3d935b7f22613785f6d57d85cf"
+        }
+      },
+      "variant": "running_mean_delta_control"
+    },
+    {
+      "charged_child_count": 536,
+      "config": {
+        "checkpoint_every": 100,
+        "credit_fragment_policy": "deterministic_cut_all_child_minus_parent",
+        "credit_value_policy": "child_score_minus_parent_score",
+        "delta_attribution": "novel_vs_parent",
+        "device": "cuda:0",
+        "durable_events": true,
+        "experiment_id": "fragment_vocab_qed_50k_delta_1k_v2",
+        "gamma": 0.0,
+        "guidance_scale": 2.0,
+        "legacy_seed_count": 1,
+        "legacy_warmup_off_by_one": true,
+        "matrix_path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/experiments/fragment_vocabulary/configs/qed_50k_delta_1k_v2.yaml",
+        "matrix_sha256": "8c62dd6c040392be48a1d6f1024179e16b2b70ff2667073658affd4d89197dc8",
+        "max_iterations": 10000,
+        "max_mol_size": 30,
+        "max_oracle_calls": 1000,
+        "min_mol_size": 10,
+        "min_support": 1,
+        "model_path": "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/50000.ckpt",
+        "observation_identity": "unique_canonical_parent_child_transition",
+        "oracle": "qed",
+        "parent_control": true,
+        "parent_domain_policy": "parent_and_child_within_configured_atom_bounds",
+        "policy_mode": "delta",
+        "population_sampling_order": "canonical fragment string before uniform sampling",
+        "population_size": 100,
+        "prior_mean": null,
+        "prior_mean_source": null,
+        "prior_strength": 0.0,
+        "randomness": 2.0,
+        "released_duplicate_policy": "repeat cached-child decomposition, matching release",
+        "reporting_frequency": 100,
+        "scientific_status": "Exploratory paired three-seed QED delta-y credit-assignment study using the final 50k checkpoint, a 1,000-unique-oracle-call budget, warmup parameter 100 (101 frozen iterations under the legacy iteration > warmup boundary), and neutral zero seed estimates with absolute seed scores used only for matched tie-breaking. The delta and transition-absolute control arms share parent/child oracle accounting, domains, transition deduplication, deterministic attribution, and warmup; only the post-warmup credit target differs. This QED-only reduced-budget study is not paper-comparable, causal, or confirmatory.",
+        "seed": 0,
+        "seed_initialization_policy": "neutral_zero_with_seed_score_tiebreak",
+        "softmax_temp": 1.2,
+        "statistical_duplicate_policy": "one update per unique canonical parent-child transition",
+        "variant": "delta",
+        "vocab_path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/scripts/exps/pmo/vocab/qed.csv",
+        "warmup": 100,
+        "warmup_update_policy": "frozen"
+      },
+      "delta_diagnostics": {
+        "attribution": {
+          "any_credit_fraction": 0.8792079207920792,
+          "applicable_unique_transitions": 505,
+          "credited_fragment_observations": 4235,
+          "mean_fragment_level_coverage": 0.5276709182362596,
+          "unique_credited_fragments": 3620,
+          "unique_transitions_with_any_credit": 444
+        },
+        "cached_child_lookups": 70,
+        "cached_parent_lookup_rate": 0.08300395256916997,
+        "cached_parent_lookups": 42,
+        "charged_child_calls": 536,
+        "charged_parent_calls": 464,
+        "delta_y_unique_transitions": {
+          "count": 505,
+          "maximum": 0.394890128131797,
+          "mean": -0.03883819965867086,
+          "median": -0.018596167474573377,
+          "minimum": -0.5376292203678363,
+          "negative": 288,
+          "positive": 160,
+          "sample_sd": 0.11902557393967554,
+          "zero": 57
+        },
+        "duplicate_transition_events": 0,
+        "events": 607,
+        "paired_events": 505,
+        "population_updates": 444,
+        "total_parent_lookups": 506,
+        "unique_parent_child_transitions": 505
+      },
+      "event_accounting": {
+        "cached_child_lookups": 70,
+        "cached_parent_lookups": 42,
+        "charged_child_evaluations": 536,
+        "charged_parent_evaluations": 464,
+        "logged_events": 607,
+        "runner_iterations_represented": 607
+      },
+      "launch": {
+        "any_gpu_sharing": true,
+        "attempt_count": 1,
+        "attempts": [
+          {
+            "command_sha256": "bea43cf2da85151d75de0a94ca89d34b43bbf28696faf5a71acbd17d3045a630",
+            "line_number": 1,
+            "matrix_provenance_complete": true,
+            "path": "/home/aidar.alimbayev/Documents/genmolv2/output/logs/pmo_fragment_vocab_qed_50k_delta_1k_v2__qed__delta__seed0.log",
+            "policy_complete": true,
+            "record": {
+              "command": [
+                "/home/aidar.alimbayev/Documents/genmolv2/.venv/bin/python",
+                "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/scripts/exps/pmo/run_ablation.py",
+                "--oracle",
+                "qed",
+                "--variant",
+                "delta",
+                "--seed",
+                "0",
+                "--model-path",
+                "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/50000.ckpt",
+                "--device",
+                "cuda:0",
+                "--experiment-id",
+                "fragment_vocab_qed_50k_delta_1k_v2",
+                "--scientific-status",
+                "Exploratory paired three-seed QED delta-y credit-assignment study using the final 50k checkpoint, a 1,000-unique-oracle-call budget, warmup parameter 100 (101 frozen iterations under the legacy iteration > warmup boundary), and neutral zero seed estimates with absolute seed scores used only for matched tie-breaking. The delta and transition-absolute control arms share parent/child oracle accounting, domains, transition deduplication, deterministic attribution, and warmup; only the post-warmup credit target differs. This QED-only reduced-budget study is not paper-comparable, causal, or confirmatory.",
+                "--matrix-path",
+                "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/experiments/fragment_vocabulary/configs/qed_50k_delta_1k_v2.yaml",
+                "--matrix-sha256",
+                "8c62dd6c040392be48a1d6f1024179e16b2b70ff2667073658affd4d89197dc8",
+                "--output-root",
+                "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation",
+                "--max-oracle-calls",
+                "1000",
+                "--reporting-frequency",
+                "100",
+                "--checkpoint-every",
+                "100",
+                "--max-iterations",
+                "10000",
+                "--population-size",
+                "100",
+                "--warmup",
+                "100",
+                "--softmax-temp",
+                "1.2",
+                "--randomness",
+                "2.0",
+                "--guidance-scale",
+                "2.0",
+                "--legacy-seed-count",
+                "1",
+                "--delta-attribution",
+                "novel_vs_parent",
+                "--legacy-warmup-off-by-one",
+                "--durable-events",
+                "--gamma",
+                "0.0"
+              ],
+              "compute_processes": [
+                {
+                  "gpu_uuid": "GPU-997e881a-bd08-aa54-45f3-9b3c6fdf6ece",
+                  "pid": 1701406,
+                  "process_name": "/home/meir.roketlishvili/miniconda3/envs/SGPO_repro/bin/python",
+                  "used_memory_mib": 1952
+                }
+              ],
+              "event": "launch",
+              "job": "qed__delta__seed0",
+              "min_free_memory_mib": 30000,
+              "physical_gpu": {
+                "index": 2,
+                "memory_total_mib": 49140,
+                "memory_used_mib": 1975,
+                "utilization_percent": 5,
+                "uuid": "GPU-997e881a-bd08-aa54-45f3-9b3c6fdf6ece"
+              },
+              "sharing_actual": true,
+              "sharing_authorized": true,
+              "time_unix": 1788642513.6219325,
+              "utilization_threshold": 10,
+              "wall_time_comparable": false
+            }
+          }
+        ],
+        "durable_events_config_complete": true,
+        "gpu_migrated": false,
+        "history_complete": true,
+        "initial_attempt_ordinal": 1,
+        "matrix_provenance_complete": true,
+        "policy_complete": true,
+        "pre_initial_attempt_count": 0,
+        "provenance_complete": true,
+        "sources": [
+          {
+            "path": "/home/aidar.alimbayev/Documents/genmolv2/output/logs/pmo_fragment_vocab_qed_50k_delta_1k_v2__qed__delta__seed0.log",
+            "sha256": "aae8c7ddc35e423dd14562d6e2b2bcdb6d9fc9376e532e08755ba7e577958bfc"
+          }
+        ],
+        "wall_time_comparable": false
+      },
+      "metrics": {
+        "all_charged_molecules": {
+          "auc_top_1": 0.8985540317439887,
+          "auc_top_10": 0.8852839525502291,
+          "auc_top_100": 0.8295515512178496,
+          "top_1": 0.9461696148228578,
+          "top_10": 0.9412019017517428,
+          "top_100": 0.9010418495070724
+        },
+        "charged_children_total_call_axis": {
+          "auc_top_1": 0.8983748887136487,
+          "auc_top_10": 0.8780297179122566,
+          "auc_top_100": 0.8122362885757282,
+          "top_1": 0.9456577775933143,
+          "top_10": 0.9304374966767902,
+          "top_100": 0.8815010308508243
+        },
+        "first_500_charged_children": {
+          "auc_top_1": 0.8510919998339828,
+          "auc_top_10": 0.8303906805581595,
+          "auc_top_100": 0.7620480485345251,
+          "top_1": 0.9456577775933143,
+          "top_10": 0.9304374966767902,
+          "top_100": 0.8805940107180475
+        }
+      },
+      "provenance": {
+        "config_sha256": "14f6a42be8e5bdc0836825571102596f1f27438ff2f3a3185665fe86b15c15a9",
+        "cuda_visible_devices": "2",
+        "durable_events_provenance_complete": true,
+        "git_branch": "",
+        "git_commit": "7f401b8217e86afce7b725c7a6a25480d230214b",
+        "git_dirty": false,
+        "gpu_logical_index": 0,
+        "gpu_name": "NVIDIA RTX A6000",
+        "hostname": "srv-01",
+        "model_path": "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/50000.ckpt",
+        "model_sha256": "8d00aa47b02f64bf39ff6b0b2e786f213587366fc2c3d29712a00f3f84108dd6",
+        "python_version": "3.10.21",
+        "rdkit_version": "2023.09.6",
+        "resume_count": 0,
+        "scientific_status": "Exploratory paired three-seed QED delta-y credit-assignment study using the final 50k checkpoint, a 1,000-unique-oracle-call budget, warmup parameter 100 (101 frozen iterations under the legacy iteration > warmup boundary), and neutral zero seed estimates with absolute seed scores used only for matched tie-breaking. The delta and transition-absolute control arms share parent/child oracle accounting, domains, transition deduplication, deterministic attribution, and warmup; only the post-warmup credit target differs. This QED-only reduced-budget study is not paper-comparable, causal, or confirmatory.",
+        "timing_provenance_complete": true,
+        "torch_version": "2.6.0+cu124",
+        "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "vocabulary_path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/scripts/exps/pmo/vocab/qed.csv",
+        "vocabulary_sha256": "6b98420f3fa88835e50cb28b960225dc6c7857a29f3057fb1ca22b4211c1806c"
+      },
+      "run_id": "fragment_vocab_qed_50k_delta_1k_v2:qed:delta:seed0",
+      "seed": 0,
+      "sources": {
+        "checkpoint": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/delta/seed_0/state/latest.pkl",
+          "sha256": "103d8dd85d51b9797459b0601390020dd9f2b3e4dd9567944e2fef84fca2a105"
+        },
+        "events": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/delta/seed_0/events.jsonl",
+          "sha256": "acd39e0ecaeb29841abcaf253b3f2d9e38d8ef6a1c7908a1b07dbceabfc011ec"
+        },
+        "manifest": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/delta/seed_0/manifest.json",
+          "sha256": "9667abb4d58c9ebe73f20b583e0233ede049476779bc0a1ecc1e66b4f2dcf882"
+        },
+        "summary": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/delta/seed_0/summary.json",
+          "sha256": "82bb47e9d067c1b0f49869d19d6c0d8fb1db6ec5fca13b875f8617b17172c606"
+        }
+      },
+      "variant": "delta"
+    },
+    {
+      "charged_child_count": 535,
+      "config": {
+        "checkpoint_every": 100,
+        "credit_fragment_policy": "deterministic_cut_all_child_minus_parent",
+        "credit_value_policy": "child_score_minus_parent_score",
+        "delta_attribution": "novel_vs_parent",
+        "device": "cuda:0",
+        "durable_events": true,
+        "experiment_id": "fragment_vocab_qed_50k_delta_1k_v2",
+        "gamma": 0.0,
+        "guidance_scale": 2.0,
+        "legacy_seed_count": 1,
+        "legacy_warmup_off_by_one": true,
+        "matrix_path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/experiments/fragment_vocabulary/configs/qed_50k_delta_1k_v2.yaml",
+        "matrix_sha256": "8c62dd6c040392be48a1d6f1024179e16b2b70ff2667073658affd4d89197dc8",
+        "max_iterations": 10000,
+        "max_mol_size": 30,
+        "max_oracle_calls": 1000,
+        "min_mol_size": 10,
+        "min_support": 1,
+        "model_path": "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/50000.ckpt",
+        "observation_identity": "unique_canonical_parent_child_transition",
+        "oracle": "qed",
+        "parent_control": true,
+        "parent_domain_policy": "parent_and_child_within_configured_atom_bounds",
+        "policy_mode": "delta",
+        "population_sampling_order": "canonical fragment string before uniform sampling",
+        "population_size": 100,
+        "prior_mean": null,
+        "prior_mean_source": null,
+        "prior_strength": 0.0,
+        "randomness": 2.0,
+        "released_duplicate_policy": "repeat cached-child decomposition, matching release",
+        "reporting_frequency": 100,
+        "scientific_status": "Exploratory paired three-seed QED delta-y credit-assignment study using the final 50k checkpoint, a 1,000-unique-oracle-call budget, warmup parameter 100 (101 frozen iterations under the legacy iteration > warmup boundary), and neutral zero seed estimates with absolute seed scores used only for matched tie-breaking. The delta and transition-absolute control arms share parent/child oracle accounting, domains, transition deduplication, deterministic attribution, and warmup; only the post-warmup credit target differs. This QED-only reduced-budget study is not paper-comparable, causal, or confirmatory.",
+        "seed": 1,
+        "seed_initialization_policy": "neutral_zero_with_seed_score_tiebreak",
+        "softmax_temp": 1.2,
+        "statistical_duplicate_policy": "one update per unique canonical parent-child transition",
+        "variant": "delta",
+        "vocab_path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/scripts/exps/pmo/vocab/qed.csv",
+        "warmup": 100,
+        "warmup_update_policy": "frozen"
+      },
+      "delta_diagnostics": {
+        "attribution": {
+          "any_credit_fraction": 0.9168399168399168,
+          "applicable_unique_transitions": 481,
+          "credited_fragment_observations": 4118,
+          "mean_fragment_level_coverage": 0.5503253049321375,
+          "unique_credited_fragments": 3525,
+          "unique_transitions_with_any_credit": 441
+        },
+        "cached_child_lookups": 47,
+        "cached_parent_lookup_rate": 0.033264033264033266,
+        "cached_parent_lookups": 16,
+        "charged_child_calls": 535,
+        "charged_parent_calls": 465,
+        "delta_y_unique_transitions": {
+          "count": 481,
+          "maximum": 0.4710386861987342,
+          "mean": -0.02245340141437341,
+          "median": -0.014164329024966116,
+          "minimum": -0.4738342068604392,
+          "negative": 270,
+          "positive": 170,
+          "sample_sd": 0.13717421722325837,
+          "zero": 41
+        },
+        "duplicate_transition_events": 0,
+        "events": 582,
+        "paired_events": 481,
+        "population_updates": 441,
+        "total_parent_lookups": 481,
+        "unique_parent_child_transitions": 481
+      },
+      "event_accounting": {
+        "cached_child_lookups": 47,
+        "cached_parent_lookups": 16,
+        "charged_child_evaluations": 535,
+        "charged_parent_evaluations": 465,
+        "logged_events": 582,
+        "runner_iterations_represented": 582
+      },
+      "launch": {
+        "any_gpu_sharing": true,
+        "attempt_count": 1,
+        "attempts": [
+          {
+            "command_sha256": "0951c09b593a8ca04848e6252afffa6775bd3b2bd045635b2ec36e4b1f081436",
+            "line_number": 1,
+            "matrix_provenance_complete": true,
+            "path": "/home/aidar.alimbayev/Documents/genmolv2/output/logs/pmo_fragment_vocab_qed_50k_delta_1k_v2__qed__delta__seed1.log",
+            "policy_complete": true,
+            "record": {
+              "command": [
+                "/home/aidar.alimbayev/Documents/genmolv2/.venv/bin/python",
+                "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/scripts/exps/pmo/run_ablation.py",
+                "--oracle",
+                "qed",
+                "--variant",
+                "delta",
+                "--seed",
+                "1",
+                "--model-path",
+                "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/50000.ckpt",
+                "--device",
+                "cuda:0",
+                "--experiment-id",
+                "fragment_vocab_qed_50k_delta_1k_v2",
+                "--scientific-status",
+                "Exploratory paired three-seed QED delta-y credit-assignment study using the final 50k checkpoint, a 1,000-unique-oracle-call budget, warmup parameter 100 (101 frozen iterations under the legacy iteration > warmup boundary), and neutral zero seed estimates with absolute seed scores used only for matched tie-breaking. The delta and transition-absolute control arms share parent/child oracle accounting, domains, transition deduplication, deterministic attribution, and warmup; only the post-warmup credit target differs. This QED-only reduced-budget study is not paper-comparable, causal, or confirmatory.",
+                "--matrix-path",
+                "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/experiments/fragment_vocabulary/configs/qed_50k_delta_1k_v2.yaml",
+                "--matrix-sha256",
+                "8c62dd6c040392be48a1d6f1024179e16b2b70ff2667073658affd4d89197dc8",
+                "--output-root",
+                "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation",
+                "--max-oracle-calls",
+                "1000",
+                "--reporting-frequency",
+                "100",
+                "--checkpoint-every",
+                "100",
+                "--max-iterations",
+                "10000",
+                "--population-size",
+                "100",
+                "--warmup",
+                "100",
+                "--softmax-temp",
+                "1.2",
+                "--randomness",
+                "2.0",
+                "--guidance-scale",
+                "2.0",
+                "--legacy-seed-count",
+                "1",
+                "--delta-attribution",
+                "novel_vs_parent",
+                "--legacy-warmup-off-by-one",
+                "--durable-events",
+                "--gamma",
+                "0.0"
+              ],
+              "compute_processes": [
+                {
+                  "gpu_uuid": "GPU-d7e40ce5-9260-a208-16a0-3372e3f204de",
+                  "pid": 1572385,
+                  "process_name": "/home/meir.roketlishvili/miniconda3/envs/SGPO_repro/bin/python",
+                  "used_memory_mib": 1786
+                }
+              ],
+              "event": "launch",
+              "job": "qed__delta__seed1",
+              "min_free_memory_mib": 30000,
+              "physical_gpu": {
+                "index": 6,
+                "memory_total_mib": 49140,
+                "memory_used_mib": 1809,
+                "utilization_percent": 5,
+                "uuid": "GPU-d7e40ce5-9260-a208-16a0-3372e3f204de"
+              },
+              "sharing_actual": true,
+              "sharing_authorized": true,
+              "time_unix": 1788642528.9041278,
+              "utilization_threshold": 10,
+              "wall_time_comparable": false
+            }
+          }
+        ],
+        "durable_events_config_complete": true,
+        "gpu_migrated": false,
+        "history_complete": true,
+        "initial_attempt_ordinal": 1,
+        "matrix_provenance_complete": true,
+        "policy_complete": true,
+        "pre_initial_attempt_count": 0,
+        "provenance_complete": true,
+        "sources": [
+          {
+            "path": "/home/aidar.alimbayev/Documents/genmolv2/output/logs/pmo_fragment_vocab_qed_50k_delta_1k_v2__qed__delta__seed1.log",
+            "sha256": "07724f78ff04190bb8564a3cd4dd82a94fe27d462804c3d28b0d9fb4279b6e1f"
+          }
+        ],
+        "wall_time_comparable": false
+      },
+      "metrics": {
+        "all_charged_molecules": {
+          "auc_top_1": 0.8975789333729156,
+          "auc_top_10": 0.8793339344476374,
+          "auc_top_100": 0.8231802365472005,
+          "top_1": 0.9471471236039319,
+          "top_10": 0.9321057159894657,
+          "top_100": 0.8936060817154297
+        },
+        "charged_children_total_call_axis": {
+          "auc_top_1": 0.892063365341769,
+          "auc_top_10": 0.8677694338270102,
+          "auc_top_100": 0.7985643622039457,
+          "top_1": 0.9397930328957363,
+          "top_10": 0.9242534498310008,
+          "top_100": 0.8663689292892114
+        },
+        "first_500_charged_children": {
+          "auc_top_1": 0.8450737136969821,
+          "auc_top_10": 0.8203807859387752,
+          "auc_top_100": 0.7509426746270664,
+          "top_1": 0.9397930328957363,
+          "top_10": 0.9215287999795574,
+          "top_100": 0.8637403631798297
+        }
+      },
+      "provenance": {
+        "config_sha256": "b14db120ab3eee7a9751bc7c5c0930c33195be2ad4659dd18e9ac56aacc98a96",
+        "cuda_visible_devices": "6",
+        "durable_events_provenance_complete": true,
+        "git_branch": "",
+        "git_commit": "7f401b8217e86afce7b725c7a6a25480d230214b",
+        "git_dirty": false,
+        "gpu_logical_index": 0,
+        "gpu_name": "NVIDIA RTX A6000",
+        "hostname": "srv-01",
+        "model_path": "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/50000.ckpt",
+        "model_sha256": "8d00aa47b02f64bf39ff6b0b2e786f213587366fc2c3d29712a00f3f84108dd6",
+        "python_version": "3.10.21",
+        "rdkit_version": "2023.09.6",
+        "resume_count": 0,
+        "scientific_status": "Exploratory paired three-seed QED delta-y credit-assignment study using the final 50k checkpoint, a 1,000-unique-oracle-call budget, warmup parameter 100 (101 frozen iterations under the legacy iteration > warmup boundary), and neutral zero seed estimates with absolute seed scores used only for matched tie-breaking. The delta and transition-absolute control arms share parent/child oracle accounting, domains, transition deduplication, deterministic attribution, and warmup; only the post-warmup credit target differs. This QED-only reduced-budget study is not paper-comparable, causal, or confirmatory.",
+        "timing_provenance_complete": true,
+        "torch_version": "2.6.0+cu124",
+        "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "vocabulary_path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/scripts/exps/pmo/vocab/qed.csv",
+        "vocabulary_sha256": "6b98420f3fa88835e50cb28b960225dc6c7857a29f3057fb1ca22b4211c1806c"
+      },
+      "run_id": "fragment_vocab_qed_50k_delta_1k_v2:qed:delta:seed1",
+      "seed": 1,
+      "sources": {
+        "checkpoint": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/delta/seed_1/state/latest.pkl",
+          "sha256": "315c34e46deb23a988113770d807609b2b711aaab401b3c10b4611537154f392"
+        },
+        "events": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/delta/seed_1/events.jsonl",
+          "sha256": "10288c7b40e0ca2a5bbe1cfaa90e97da3d8815952a7f73e5068781768ed87c28"
+        },
+        "manifest": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/delta/seed_1/manifest.json",
+          "sha256": "f0ab559f1b70d9b2fcb962e761ee875d2872d24e6b2508d870b7c826b66023c3"
+        },
+        "summary": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/delta/seed_1/summary.json",
+          "sha256": "9bbd2ba46942af85cddbb1e30896b5ac848f0001bbe0130cd047cf891a268472"
+        }
+      },
+      "variant": "delta"
+    },
+    {
+      "charged_child_count": 530,
+      "config": {
+        "checkpoint_every": 100,
+        "credit_fragment_policy": "deterministic_cut_all_child_minus_parent",
+        "credit_value_policy": "child_score_minus_parent_score",
+        "delta_attribution": "novel_vs_parent",
+        "device": "cuda:0",
+        "durable_events": true,
+        "experiment_id": "fragment_vocab_qed_50k_delta_1k_v2",
+        "gamma": 0.0,
+        "guidance_scale": 2.0,
+        "legacy_seed_count": 1,
+        "legacy_warmup_off_by_one": true,
+        "matrix_path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/experiments/fragment_vocabulary/configs/qed_50k_delta_1k_v2.yaml",
+        "matrix_sha256": "8c62dd6c040392be48a1d6f1024179e16b2b70ff2667073658affd4d89197dc8",
+        "max_iterations": 10000,
+        "max_mol_size": 30,
+        "max_oracle_calls": 1000,
+        "min_mol_size": 10,
+        "min_support": 1,
+        "model_path": "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/50000.ckpt",
+        "observation_identity": "unique_canonical_parent_child_transition",
+        "oracle": "qed",
+        "parent_control": true,
+        "parent_domain_policy": "parent_and_child_within_configured_atom_bounds",
+        "policy_mode": "delta",
+        "population_sampling_order": "canonical fragment string before uniform sampling",
+        "population_size": 100,
+        "prior_mean": null,
+        "prior_mean_source": null,
+        "prior_strength": 0.0,
+        "randomness": 2.0,
+        "released_duplicate_policy": "repeat cached-child decomposition, matching release",
+        "reporting_frequency": 100,
+        "scientific_status": "Exploratory paired three-seed QED delta-y credit-assignment study using the final 50k checkpoint, a 1,000-unique-oracle-call budget, warmup parameter 100 (101 frozen iterations under the legacy iteration > warmup boundary), and neutral zero seed estimates with absolute seed scores used only for matched tie-breaking. The delta and transition-absolute control arms share parent/child oracle accounting, domains, transition deduplication, deterministic attribution, and warmup; only the post-warmup credit target differs. This QED-only reduced-budget study is not paper-comparable, causal, or confirmatory.",
+        "seed": 2,
+        "seed_initialization_policy": "neutral_zero_with_seed_score_tiebreak",
+        "softmax_temp": 1.2,
+        "statistical_duplicate_policy": "one update per unique canonical parent-child transition",
+        "variant": "delta",
+        "vocab_path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/scripts/exps/pmo/vocab/qed.csv",
+        "warmup": 100,
+        "warmup_update_policy": "frozen"
+      },
+      "delta_diagnostics": {
+        "attribution": {
+          "any_credit_fraction": 0.9233954451345756,
+          "applicable_unique_transitions": 483,
+          "credited_fragment_observations": 5497,
+          "mean_fragment_level_coverage": 0.5568937927384741,
+          "unique_credited_fragments": 4696,
+          "unique_transitions_with_any_credit": 446
+        },
+        "cached_child_lookups": 55,
+        "cached_parent_lookup_rate": 0.030927835051546393,
+        "cached_parent_lookups": 15,
+        "charged_child_calls": 530,
+        "charged_parent_calls": 470,
+        "delta_y_unique_transitions": {
+          "count": 483,
+          "maximum": 0.48393303547052413,
+          "mean": 0.015213640016939194,
+          "median": 0.0,
+          "minimum": -0.4235461289899487,
+          "negative": 227,
+          "positive": 218,
+          "sample_sd": 0.14107248167117337,
+          "zero": 38
+        },
+        "duplicate_transition_events": 1,
+        "events": 586,
+        "paired_events": 484,
+        "population_updates": 446,
+        "total_parent_lookups": 485,
+        "unique_parent_child_transitions": 483
+      },
+      "event_accounting": {
+        "cached_child_lookups": 55,
+        "cached_parent_lookups": 15,
+        "charged_child_evaluations": 530,
+        "charged_parent_evaluations": 470,
+        "logged_events": 586,
+        "runner_iterations_represented": 586
+      },
+      "launch": {
+        "any_gpu_sharing": true,
+        "attempt_count": 1,
+        "attempts": [
+          {
+            "command_sha256": "eb6eeb021f9376fef9567e92e1bbb4b8be943db24b0d55faa7bb7161fee7e07c",
+            "line_number": 1,
+            "matrix_provenance_complete": true,
+            "path": "/home/aidar.alimbayev/Documents/genmolv2/output/logs/pmo_fragment_vocab_qed_50k_delta_1k_v2__qed__delta__seed2.log",
+            "policy_complete": true,
+            "record": {
+              "command": [
+                "/home/aidar.alimbayev/Documents/genmolv2/.venv/bin/python",
+                "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/scripts/exps/pmo/run_ablation.py",
+                "--oracle",
+                "qed",
+                "--variant",
+                "delta",
+                "--seed",
+                "2",
+                "--model-path",
+                "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/50000.ckpt",
+                "--device",
+                "cuda:0",
+                "--experiment-id",
+                "fragment_vocab_qed_50k_delta_1k_v2",
+                "--scientific-status",
+                "Exploratory paired three-seed QED delta-y credit-assignment study using the final 50k checkpoint, a 1,000-unique-oracle-call budget, warmup parameter 100 (101 frozen iterations under the legacy iteration > warmup boundary), and neutral zero seed estimates with absolute seed scores used only for matched tie-breaking. The delta and transition-absolute control arms share parent/child oracle accounting, domains, transition deduplication, deterministic attribution, and warmup; only the post-warmup credit target differs. This QED-only reduced-budget study is not paper-comparable, causal, or confirmatory.",
+                "--matrix-path",
+                "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/experiments/fragment_vocabulary/configs/qed_50k_delta_1k_v2.yaml",
+                "--matrix-sha256",
+                "8c62dd6c040392be48a1d6f1024179e16b2b70ff2667073658affd4d89197dc8",
+                "--output-root",
+                "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation",
+                "--max-oracle-calls",
+                "1000",
+                "--reporting-frequency",
+                "100",
+                "--checkpoint-every",
+                "100",
+                "--max-iterations",
+                "10000",
+                "--population-size",
+                "100",
+                "--warmup",
+                "100",
+                "--softmax-temp",
+                "1.2",
+                "--randomness",
+                "2.0",
+                "--guidance-scale",
+                "2.0",
+                "--legacy-seed-count",
+                "1",
+                "--delta-attribution",
+                "novel_vs_parent",
+                "--legacy-warmup-off-by-one",
+                "--durable-events",
+                "--gamma",
+                "0.0"
+              ],
+              "compute_processes": [
+                {
+                  "gpu_uuid": "GPU-7ae42da2-3c8d-efa0-99ec-845b7f85399a",
+                  "pid": 1572386,
+                  "process_name": "/home/meir.roketlishvili/miniconda3/envs/SGPO_repro/bin/python",
+                  "used_memory_mib": 1956
+                }
+              ],
+              "event": "launch",
+              "job": "qed__delta__seed2",
+              "min_free_memory_mib": 30000,
+              "physical_gpu": {
+                "index": 7,
+                "memory_total_mib": 49140,
+                "memory_used_mib": 1979,
+                "utilization_percent": 5,
+                "uuid": "GPU-7ae42da2-3c8d-efa0-99ec-845b7f85399a"
+              },
+              "sharing_actual": true,
+              "sharing_authorized": true,
+              "time_unix": 1788642559.1984687,
+              "utilization_threshold": 10,
+              "wall_time_comparable": false
+            }
+          }
+        ],
+        "durable_events_config_complete": true,
+        "gpu_migrated": false,
+        "history_complete": true,
+        "initial_attempt_ordinal": 1,
+        "matrix_provenance_complete": true,
+        "policy_complete": true,
+        "pre_initial_attempt_count": 0,
+        "provenance_complete": true,
+        "sources": [
+          {
+            "path": "/home/aidar.alimbayev/Documents/genmolv2/output/logs/pmo_fragment_vocab_qed_50k_delta_1k_v2__qed__delta__seed2.log",
+            "sha256": "0fc312a89b6e23425b021c7712ceff67471f9eeadd38f5ed958019f97223b1ea"
+          }
+        ],
+        "wall_time_comparable": false
+      },
+      "metrics": {
+        "all_charged_molecules": {
+          "auc_top_1": 0.8945831593593023,
+          "auc_top_10": 0.8737121099066226,
+          "auc_top_100": 0.8098520620733786,
+          "top_1": 0.9416664835361078,
+          "top_10": 0.9223029652949635,
+          "top_100": 0.8708115383305937
+        },
+        "charged_children_total_call_axis": {
+          "auc_top_1": 0.8945831593593023,
+          "auc_top_10": 0.8660715662932856,
+          "auc_top_100": 0.7883471088938828,
+          "top_1": 0.9416664835361078,
+          "top_10": 0.9134138857766148,
+          "top_100": 0.8509060166941389
+        },
+        "first_500_charged_children": {
+          "auc_top_1": 0.847499835182497,
+          "auc_top_10": 0.8203853686559622,
+          "auc_top_100": 0.7414397071451008,
+          "top_1": 0.9416664835361078,
+          "top_10": 0.9134138857766148,
+          "top_100": 0.8493817153176602
+        }
+      },
+      "provenance": {
+        "config_sha256": "9b780ab8d774c3d1b2d21ae06ade17cb5a47eaada212ce959f3f37afe896f031",
+        "cuda_visible_devices": "7",
+        "durable_events_provenance_complete": true,
+        "git_branch": "",
+        "git_commit": "7f401b8217e86afce7b725c7a6a25480d230214b",
+        "git_dirty": false,
+        "gpu_logical_index": 0,
+        "gpu_name": "NVIDIA RTX A6000",
+        "hostname": "srv-01",
+        "model_path": "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/50000.ckpt",
+        "model_sha256": "8d00aa47b02f64bf39ff6b0b2e786f213587366fc2c3d29712a00f3f84108dd6",
+        "python_version": "3.10.21",
+        "rdkit_version": "2023.09.6",
+        "resume_count": 0,
+        "scientific_status": "Exploratory paired three-seed QED delta-y credit-assignment study using the final 50k checkpoint, a 1,000-unique-oracle-call budget, warmup parameter 100 (101 frozen iterations under the legacy iteration > warmup boundary), and neutral zero seed estimates with absolute seed scores used only for matched tie-breaking. The delta and transition-absolute control arms share parent/child oracle accounting, domains, transition deduplication, deterministic attribution, and warmup; only the post-warmup credit target differs. This QED-only reduced-budget study is not paper-comparable, causal, or confirmatory.",
+        "timing_provenance_complete": true,
+        "torch_version": "2.6.0+cu124",
+        "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "vocabulary_path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/qed_50k_delta_v2_7f401b8/scripts/exps/pmo/vocab/qed.csv",
+        "vocabulary_sha256": "6b98420f3fa88835e50cb28b960225dc6c7857a29f3057fb1ca22b4211c1806c"
+      },
+      "run_id": "fragment_vocab_qed_50k_delta_1k_v2:qed:delta:seed2",
+      "seed": 2,
+      "sources": {
+        "checkpoint": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/delta/seed_2/state/latest.pkl",
+          "sha256": "760edf800e9b90967c18ab497b9da8b135c4035eb039ff2b7e9a0fb769e30b13"
+        },
+        "events": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/delta/seed_2/events.jsonl",
+          "sha256": "c903c4c0b78bdae1756cb6df9161e22c7a1a8fbd0f43e9a6ec5fd8b0f048e8cb"
+        },
+        "manifest": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/delta/seed_2/manifest.json",
+          "sha256": "6182724ae148ed1584ef96f49e3e6350a7fc814947ecdcba79c321616d02fcc7"
+        },
+        "summary": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_qed_50k_delta_1k_v2/qed/delta/seed_2/summary.json",
+          "sha256": "0a48c2fe1a3fffb17800ab039423e7f1a535f530419a8c01fb388e00cd867c81"
+        }
+      },
+      "variant": "delta"
+    }
+  ],
+  "schema_version": 2,
+  "scientific_status": "Exploratory paired three-seed QED delta-y credit-assignment study using the final 50k checkpoint, a 1,000-unique-oracle-call budget, warmup parameter 100 (101 frozen iterations under the legacy iteration > warmup boundary), and neutral zero seed estimates with absolute seed scores used only for matched tie-breaking. The delta and transition-absolute control arms share parent/child oracle accounting, domains, transition deduplication, deterministic attribution, and warmup; only the post-warmup credit target differs. This QED-only reduced-budget study is not paper-comparable, causal, or confirmatory."
+}

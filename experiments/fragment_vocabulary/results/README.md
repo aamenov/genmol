@@ -4,6 +4,91 @@ These are immutable, validation-first snapshots of the fragment-credit
 experiments. Raw checkpoints and molecule-level traces remain under `output/`
 on the experiment host; their hashes are retained in each collection manifest.
 
+## QED 50k delta-y credit ablation, corrected v2
+
+**Result:** parent-relative delta credit did not improve QED in this exploratory
+screen. Against its transition-matched absolute-child control, delta-y had a
+lower mean for every reported top-1, top-10, and top-100 endpoint and AUC view.
+The direction was not uniform across seeds: seed 0 favored delta on most
+top-10/top-100 quantities, while seeds 1 and 2 favored the control. With only
+three seeds, this is evidence against promoting delta-y as the default for this
+setting, not evidence of a general negative effect.
+
+The primary arms were `running_mean_delta_control` and `delta`. They used the
+same neutral zero initialization, absolute seed scores only as tie-breakers,
+parent and child QED accounting, configured molecule domains, 101 frozen
+iterations for warmup parameter 100, unique canonical transition
+deduplication, and deterministic all-cut changed-fragment attribution. Their
+only behavioral difference was the post-warmup credit value: absolute child
+QED for the control and child-minus-parent QED for delta. `released` and
+ordinary `running_mean` are contextual references because they do not share
+those parent-scoring and attribution mechanics.
+
+All values below are mean +/- sample SD over paired seeds 0, 1, and 2. Each run
+used exactly 1,000 unique canonical-molecule oracle calls.
+
+| Variant | Charged children | All-call top-10 AUC | Final top-10 | All-call top-100 AUC | Final top-100 |
+|---|---:|---:|---:|---:|---:|
+| `released` (contextual) | 1000.0 +/- 0.0 | 0.894028 +/- 0.001708 | 0.946821 +/- 0.000549 | 0.853075 +/- 0.003966 | 0.933910 +/- 0.003292 |
+| `running_mean` (contextual) | 1000.0 +/- 0.0 | 0.895869 +/- 0.002388 | 0.947197 +/- 0.000532 | 0.857370 +/- 0.004860 | 0.938896 +/- 0.001739 |
+| transition-absolute control | 534.3 +/- 4.5 | 0.880752 +/- 0.008178 | 0.933299 +/- 0.007924 | 0.826609 +/- 0.013075 | 0.903087 +/- 0.011652 |
+| delta-y | 533.7 +/- 3.2 | 0.879443 +/- 0.005787 | 0.931870 +/- 0.009452 | 0.820861 +/- 0.010052 | 0.888486 +/- 0.015752 |
+
+The all-call view includes every newly scored parent and child at its real
+position in the 1,000-call budget. Two additional matched views prevent that
+single view from obscuring parent cost or unequal child counts:
+
+| Matched metric | Absolute-child control | Delta-y | Paired delta minus control |
+|---|---:|---:|---:|
+| Child-only top-10 AUC on the true 1,000-call axis | 0.875034 +/- 0.004474 | 0.870624 +/- 0.006470 | -0.004411 +/- 0.009931 |
+| Child-only final top-100 on the true 1,000-call axis | 0.884322 +/- 0.009591 | 0.866259 +/- 0.015298 | -0.018064 +/- 0.018292 |
+| First-500-child top-10 AUC | 0.827786 +/- 0.003649 | 0.823719 +/- 0.005778 | -0.004067 +/- 0.008871 |
+| First-500-child final top-100 | 0.881286 +/- 0.010538 | 0.864572 +/- 0.015623 | -0.016714 +/- 0.018862 |
+
+For all-call top-10 AUC, the paired seed differences were +0.009665,
+-0.010849, and -0.002742. For first-500-child top-10 AUC, they were +0.005800,
+-0.011381, and -0.006621. Thus the negative mean is not a stable three-seed
+effect. Parent scoring left the matched arms with approximately 534 charged
+children each; a charged child is a unique child evaluation, not an optimizer
+iteration.
+
+The implementation assigns the full molecular delta to every deterministically
+identified child fragment absent from the parent. That is still approximate
+credit assignment: it is associative rather than causal, can duplicate one
+molecular delta across several fragments, and has incomplete fragment-level
+coverage. The first-500-child view equalizes child evaluations but not their
+positions in the total oracle-call budget, and all trajectories remain adaptive.
+This QED-only, 1,000-call study is exploratory and is not comparable with the
+paper's 10,000-call PMO mean.
+
+All 12 runs completed without resumes or checkpoint inconsistencies from clean
+commit `7f401b8217e86afce7b725c7a6a25480d230214b`. Independent replay confirmed
+that the matched arms had identical 101-event frozen histories and identical
+first update transitions for every seed, that their resolved configurations
+differed only in arm labels and the scalar credit target, and that all 27,428
+stored fragment-statistic updates exactly matched their declared credit rule.
+The checkpoint SHA-256 was
+`8d00aa47b02f64bf39ff6b0b2e786f213587366fc2c3d29712a00f3f84108dd6`.
+
+The jobs used four physical RTX A6000 GPUs (2, 5, 6, and 7). Every launch was
+below the requested 10% utilization threshold and had at least 47,161 MiB free.
+Pre-existing low-utilization processes were present, as explicitly authorized,
+so wall-time comparisons are suppressed. The authoritative schema-3 manifest,
+hash-named CSV, hash-named four-page PDF, and report JSON are in
+`qed_50k_delta_1k_v2/`.
+
+## Superseded QED 50k delta-y v1
+
+The first 12-run delta-y screen completed cleanly at 1,000 calls per run from
+commit `7c1693c21ae0cdf3beed86218308e8e2179892b6`, but its intended matched
+contrast was confounded. The delta arm initialized online seed-fragment
+statistics at zero, whereas `running_mean_delta_control` initialized them with
+absolute-score pseudo-observations. Consequently, initialization and credit
+target both differed after the first post-warmup update. Its metrics are
+descriptive only and must not be cited as a credit-only delta effect. The
+validated collection manifest and CSV are retained in `qed_50k_delta_1k_v1/`;
+the misleading preliminary PDF is intentionally not an authoritative result.
+
 ## QED 50k Bayesian prior-strength ablation
 
 This exploratory sensitivity study used the final local 50,000-step checkpoint,
