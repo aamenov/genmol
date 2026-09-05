@@ -1,10 +1,11 @@
 """Evaluate a UDLM checkpoint on the frozen held-out denoising panel.
 
 This is a diagnostic, not a molecule-generation benchmark.  It measures the
-same per-token objective used by the production uniform-UDLM implementation and
-clean-token reconstruction for one deterministic corruption per row at each
-fixed time.  The grid is not an integrated or unbiased NELBO estimate.  It does
-not decode molecules or support a claim that one generator beats another.
+method-specific model-dependent loss and clean-token reconstruction for one
+deterministic corruption per row at each fixed time.  For categorical UDLM it
+also reports the parameter-independent endpoint-prior KL separately.  The grid
+is not an integrated or unbiased NELBO estimate.  It does not decode molecules
+or support a claim that one generator beats another.
 """
 
 from __future__ import annotations
@@ -37,7 +38,10 @@ for _import_root in (REPOSITORY_ROOT, REPOSITORY_ROOT / "src"):
     sys.path.insert(0, str(_import_root))
 
 from scripts.udlm.materialize_validation_panel import validate_panel  # noqa: E402
-from genmol.diffusion import ContinuousUniformDiffusion  # noqa: E402
+from genmol.diffusion import (  # noqa: E402
+    ContinuousCategoricalDiffusion,
+    ContinuousUniformDiffusion,
+)
 
 
 DEFAULT_PANEL = REPOSITORY_ROOT / "experiments/udlm/validation_panel/first_256.json"
@@ -49,7 +53,73 @@ FROZEN_FREQUENCY_SHA256 = (
     "088c78e75611f3cc42c4011e1da6f65a377e673b9cba07a28b126b0fc62f06ed"
 )
 DEFAULT_TIME_BINS = (0.1, 0.3, 0.5, 0.7, 0.9)
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+
+UDLM_PRIOR_CHECKPOINT_KEY = "udlm_prior_metadata"
+EMPIRICAL_FREQUENCY_RELATIVE_PATH = Path(
+    "experiments/udlm/token_frequency/train_first_10000.json"
+)
+EMPIRICAL_FREQUENCY_ORDERED_TEXT_SHA256 = (
+    "53aee8e5592fc96159788e86519abbbcc9f1ab7c6348a1cb59a939bd57051d8f"
+)
+UDLM_PRIOR_VARIANT_IDENTITIES = {
+    "release_uniform": {
+        "comparison_role": "faithful_release_control",
+        "process_family": "released_continuous_uniform",
+        "schedule_variant": "released_ideal_loss_residual_forward",
+        "objective_scope": "released_model_dependent_ct_integrand",
+        "prior_source": "uniform",
+    },
+    "schedule_uniform": {
+        "comparison_role": "schedule_repair_uniform_control",
+        "process_family": "rank_one_continuous_categorical",
+        "schedule_variant": "schedule_consistent_residual_forward_and_loss",
+        "objective_scope": (
+            "model_dependent_ct_integrand_without_parameter_independent_endpoint_kl"
+        ),
+        "prior_source": "uniform",
+    },
+    "empirical_frequency": {
+        "comparison_role": "empirical_prior_treatment",
+        "process_family": "rank_one_continuous_categorical",
+        "schedule_variant": "schedule_consistent_residual_forward_and_loss",
+        "objective_scope": (
+            "model_dependent_ct_integrand_without_parameter_independent_endpoint_kl"
+        ),
+        "prior_source": "pinned_frequency_artifact_uniform_mixture",
+    },
+}
+UDLM_PRIOR_METADATA_FIELDS = frozenset(
+    {
+        "schema_version",
+        "variant",
+        *next(iter(UDLM_PRIOR_VARIANT_IDENTITIES.values())),
+        "full_vocab_size",
+        "active_vocab_size",
+        "excluded_token_ids",
+        "sampling_eps",
+        "noise_eps",
+        "antithetic_sampling",
+        "active_token_ids_sha256",
+        "stationary_probs_sha256",
+        "uniform_mixture_weight",
+        "frequency_artifact_path",
+        "frequency_artifact_sha256",
+        "frequency_artifact_schema_version",
+        "frequency_example_count",
+        "frequency_content_token_count",
+        "frequency_active_token_count",
+        "frequency_dataset_repo_id",
+        "frequency_dataset_revision",
+        "frequency_dataset_split",
+        "frequency_dataset_selection",
+        "frequency_ordered_text_sha256",
+        "frequency_implementation_git_sha",
+        "tokenizer_repo_id",
+        "tokenizer_revision",
+        "tokenizer_json_sha256",
+    }
+)
 
 SOURCE_INPUTS = (
     Path("scripts/udlm/evaluate_denoising_panel.py"),
@@ -58,6 +128,8 @@ SOURCE_INPUTS = (
     Path("scripts/train.py"),
     Path("configs/base.yaml"),
     Path("configs/udlm.yaml"),
+    Path("configs/udlm_categorical.yaml"),
+    Path("scripts/udlm/token_frequency_audit.py"),
     Path("src/genmol/model.py"),
     Path("src/genmol/diffusion.py"),
     Path("src/genmol/backbone.py"),
@@ -357,6 +429,56 @@ def _merge_metric_groups(destination: dict[str, Any], source: dict[str, Any]) ->
             _merge_accumulator(destination[group_name][key], source[group_name][key])
 
 
+def _empty_endpoint_accumulator() -> dict[str, float | int]:
+    return {"denominator_tokens": 0, "endpoint_prior_kl_sum": 0.0}
+
+
+def _update_endpoint_accumulator(
+    accumulator: dict[str, float | int],
+    mask: torch.Tensor,
+    endpoint_prior_kl: torch.Tensor,
+) -> None:
+    count = int(mask.sum().item())
+    if count == 0:
+        return
+    accumulator["denominator_tokens"] += count
+    accumulator["endpoint_prior_kl_sum"] += float(
+        endpoint_prior_kl[mask].double().sum().item()
+    )
+
+
+def _finalize_endpoint_accumulator(
+    accumulator: Mapping[str, float | int],
+) -> dict[str, float | int | None]:
+    count = int(accumulator["denominator_tokens"])
+    total = float(accumulator["endpoint_prior_kl_sum"])
+    return {
+        "denominator_tokens": count,
+        "endpoint_prior_kl_sum": total,
+        "endpoint_prior_kl_mean": None if count == 0 else total / count,
+    }
+
+
+def _new_endpoint_groups() -> dict[str, Any]:
+    return {
+        "overall": _empty_endpoint_accumulator(),
+        "by_training_frequency": {
+            name: _empty_endpoint_accumulator()
+            for name, _lower, _upper in FREQUENCY_BUCKETS
+        },
+    }
+
+
+def _finalize_endpoint_groups(groups: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "overall": _finalize_endpoint_accumulator(groups["overall"]),
+        "by_training_frequency": {
+            name: _finalize_endpoint_accumulator(accumulator)
+            for name, accumulator in groups["by_training_frequency"].items()
+        },
+    }
+
+
 def _pad_rows(rows: Sequence[torch.Tensor], pad_token_id: int) -> torch.Tensor:
     max_length = max(int(row.numel()) for row in rows)
     result = torch.full(
@@ -389,33 +511,358 @@ def _ordered_token_rows_sha256(rows: Sequence[torch.Tensor]) -> str:
     return digest.hexdigest()
 
 
-def _validate_uniform_udlm_backend(model: Any) -> ContinuousUniformDiffusion:
-    """Accept only the exact uniform process this diagnostic defines.
+def _canonical_numeric_sequence_sha256(values: Sequence[int | float]) -> str:
+    """Match model.py's platform-independent ordered numeric-sequence hash."""
 
-    A categorical UDLM is also called ``udlm`` at the model level, but its
-    transition kernel and loss are different.  Silently labelling it as the
-    uniform control would invalidate the diagnostic.
-    """
+    canonical = [value.hex() if isinstance(value, float) else value for value in values]
+    return hashlib.sha256(
+        json.dumps(canonical, separators=(",", ":")).encode("ascii")
+    ).hexdigest()
+
+
+def _exact_data_equal(observed: Any, expected: Any) -> bool:
+    """Compare provenance records without Python's bool/int coercion."""
+
+    if type(observed) is not type(expected):
+        return False
+    if isinstance(expected, Mapping):
+        return set(observed) == set(expected) and all(
+            _exact_data_equal(observed[key], expected[key]) for key in expected
+        )
+    if isinstance(expected, (list, tuple)):
+        return len(observed) == len(expected) and all(
+            _exact_data_equal(left, right)
+            for left, right in zip(observed, expected, strict=True)
+        )
+    return bool(observed == expected)
+
+
+def _runtime_prior_metadata(model: Any) -> dict[str, Any] | None:
+    raw_metadata = getattr(model, "udlm_prior_metadata", None)
+    if raw_metadata is None:
+        return None
+    if hasattr(raw_metadata, "to_dict"):
+        raw_metadata = raw_metadata.to_dict()
+    if not isinstance(raw_metadata, Mapping):
+        raise ValueError(
+            "model.udlm_prior_metadata must be an immutable mapping record"
+        )
+    metadata = dict(raw_metadata)
+    if set(metadata) != UDLM_PRIOR_METADATA_FIELDS:
+        missing = sorted(UDLM_PRIOR_METADATA_FIELDS - set(metadata))
+        extra = sorted(set(metadata) - UDLM_PRIOR_METADATA_FIELDS)
+        raise ValueError(
+            "UDLM prior metadata fields do not match schema version 1; "
+            f"missing={missing}, extra={extra}"
+        )
+    if type(metadata["schema_version"]) is not int or metadata["schema_version"] != 1:
+        raise ValueError("UDLM prior metadata must use schema_version 1")
+    return metadata
+
+
+def _configured_prior_variant(model: Any) -> str | None:
+    config = getattr(model, "config", None)
+    try:
+        value = config.training.udlm.prior_variant
+    except (AttributeError, KeyError, TypeError):
+        return None
+    return str(value).lower()
+
+
+def _validate_sha256(value: Any, field: str) -> None:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"UDLM prior metadata {field} is not a lowercase SHA-256")
+
+
+def _validate_empirical_artifact_identity(
+    metadata: Mapping[str, Any],
+    frequencies: Mapping[str, Any],
+    artifact_provenance: Mapping[str, Any] | None,
+    active_token_ids: Sequence[int],
+    stationary_probs: torch.Tensor,
+) -> None:
+    if artifact_provenance is None:
+        raise ValueError(
+            "empirical_frequency evaluation requires byte-level artifact provenance"
+        )
+    frequency_provenance = artifact_provenance.get("training_frequency")
+    if not isinstance(frequency_provenance, Mapping):
+        raise ValueError("artifact provenance has no training_frequency record")
+    expected = {
+        "frequency_artifact_path": EMPIRICAL_FREQUENCY_RELATIVE_PATH.as_posix(),
+        "frequency_artifact_sha256": FROZEN_FREQUENCY_SHA256,
+        "frequency_artifact_schema_version": frequencies["schema_version"],
+        "frequency_example_count": frequencies["example_count"],
+        "frequency_content_token_count": frequencies["content_token_count"],
+        "frequency_active_token_count": sum(
+            frequencies["counts_by_token_id"][token_id] for token_id in active_token_ids
+        ),
+        "frequency_dataset_repo_id": frequencies["dataset"]["repo_id"],
+        "frequency_dataset_revision": frequencies["dataset"]["revision"],
+        "frequency_dataset_split": frequencies["dataset"]["split"],
+        "frequency_dataset_selection": frequencies["dataset"].get("selection"),
+        "frequency_ordered_text_sha256": frequencies["dataset"].get(
+            "ordered_safe_text_sha256"
+        ),
+        "frequency_implementation_git_sha": frequencies.get("git_sha"),
+    }
+    for field, expected_value in expected.items():
+        if not _exact_data_equal(metadata[field], expected_value):
+            raise ValueError(
+                f"empirical prior metadata {field} disagrees with the pinned artifact"
+            )
+    if frequency_provenance.get("sha256") != FROZEN_FREQUENCY_SHA256:
+        raise ValueError(
+            "empirical prior metadata is not bound to the evaluated frequency bytes"
+        )
+    if expected["frequency_ordered_text_sha256"] != (
+        EMPIRICAL_FREQUENCY_ORDERED_TEXT_SHA256
+    ):
+        raise ValueError("frequency artifact ordered training-text identity is invalid")
+
+    mixture = metadata["uniform_mixture_weight"]
+    if isinstance(mixture, bool) or not isinstance(mixture, (int, float)):
+        raise ValueError("empirical prior uniform_mixture_weight must be real")
+    mixture = float(mixture)
+    if not math.isfinite(mixture) or not 0.0 < mixture < 1.0:
+        raise ValueError("empirical prior uniform_mixture_weight must lie in (0, 1)")
+    active_count = expected["frequency_active_token_count"]
+    if type(active_count) is not int or active_count <= 0:
+        raise ValueError("frequency artifact has no count mass on the active alphabet")
+    support_size = len(active_token_ids)
+    expected_probs = torch.tensor(
+        [
+            (1.0 - mixture)
+            * (frequencies["counts_by_token_id"][token_id] / active_count)
+            + mixture / support_size
+            for token_id in active_token_ids
+        ],
+        dtype=torch.float64,
+    )
+    expected_probs /= expected_probs.sum()
+    if not torch.equal(stationary_probs.detach().cpu(), expected_probs):
+        raise ValueError(
+            "categorical stationary_probs disagree with the pinned smoothed "
+            "empirical prior"
+        )
+
+
+def _validate_udlm_backend(
+    model: Any,
+    *,
+    panel: Mapping[str, Any],
+    frequencies: Mapping[str, Any],
+    checkpoint_prior_metadata: Mapping[str, Any] | None,
+    artifact_provenance: Mapping[str, Any] | None,
+) -> tuple[ContinuousUniformDiffusion, dict[str, Any]]:
+    """Validate exact process type, buffers, prior law, and immutable identity."""
 
     if str(getattr(model, "diffusion_type", "")).lower() != "udlm":
         raise ValueError("denoising panel evaluation requires a UDLM model")
     if not hasattr(model, "mdlm"):
         raise ValueError("UDLM model has no diffusion process at model.mdlm")
     process = model.mdlm
-    if type(process) is not ContinuousUniformDiffusion:
+    if type(process) not in {
+        ContinuousUniformDiffusion,
+        ContinuousCategoricalDiffusion,
+    }:
         observed = f"{type(process).__module__}.{type(process).__qualname__}"
-        expected = (
-            f"{ContinuousUniformDiffusion.__module__}."
-            f"{ContinuousUniformDiffusion.__qualname__}"
-        )
         raise ValueError(
-            "this evaluator is defined only for the exact uniform UDLM backend; "
-            f"observed {observed}, expected {expected}"
+            "evaluator requires an exact supported UDLM backend, not a subclass; "
+            f"observed {observed}"
         )
-    return process
+
+    active_tensor = process.diffusion_token_ids.detach().cpu()
+    mapping_tensor = process.token_to_diffusion_index.detach().cpu()
+    if active_tensor.dtype != torch.long or active_tensor.ndim != 1:
+        raise ValueError(
+            "UDLM diffusion_token_ids must be a one-dimensional long buffer"
+        )
+    active_token_ids = [int(value) for value in active_tensor.tolist()]
+    if active_token_ids != sorted(set(active_token_ids)):
+        raise ValueError("UDLM diffusion_token_ids must be unique and strictly ordered")
+    num_classes = int(process.num_classes)
+    if not active_token_ids or not all(
+        0 <= token_id < num_classes for token_id in active_token_ids
+    ):
+        raise ValueError("UDLM diffusion_token_ids lie outside the model vocabulary")
+    if int(process.diffusion_vocab_size) != len(active_token_ids):
+        raise ValueError(
+            "UDLM diffusion_vocab_size disagrees with its active-token buffer"
+        )
+    expected_mapping = torch.full((num_classes,), -1, dtype=torch.long)
+    expected_mapping[active_tensor] = torch.arange(len(active_token_ids))
+    if mapping_tensor.dtype != torch.long or not torch.equal(
+        mapping_tensor, expected_mapping
+    ):
+        raise ValueError("UDLM compact-token mapping is inconsistent")
+    active_set = set(active_token_ids)
+    excluded_token_ids = [
+        token_id for token_id in range(num_classes) if token_id not in active_set
+    ]
+
+    categorical = type(process) is ContinuousCategoricalDiffusion
+    if categorical:
+        stationary_probs = process.stationary_probs.detach().cpu()
+        if (
+            stationary_probs.dtype != torch.float64
+            or stationary_probs.shape != (len(active_token_ids),)
+            or not torch.isfinite(stationary_probs).all()
+            or torch.any(stationary_probs <= 0)
+            or not torch.isclose(
+                stationary_probs.sum(),
+                torch.tensor(1.0, dtype=torch.float64),
+                rtol=1e-12,
+                atol=1e-12,
+            )
+        ):
+            raise ValueError(
+                "categorical stationary_probs must be a normalized float64 "
+                "full-support buffer"
+            )
+    else:
+        stationary_probs = torch.full(
+            (len(active_token_ids),),
+            1.0 / len(active_token_ids),
+            dtype=torch.float64,
+        )
+        stationary_probs /= stationary_probs.sum()
+
+    metadata = _runtime_prior_metadata(model)
+    if metadata is None:
+        if categorical:
+            raise ValueError(
+                "categorical UDLM model is missing immutable prior metadata"
+            )
+        if checkpoint_prior_metadata is not None:
+            raise ValueError(
+                "release_uniform checkpoint must not declare categorical prior metadata"
+            )
+        variant = "release_uniform"
+        metadata_status = "legacy_or_injected_release_uniform_without_runtime_record"
+    else:
+        variant = metadata.get("variant")
+        if variant not in UDLM_PRIOR_VARIANT_IDENTITIES:
+            raise ValueError(f"unsupported UDLM prior variant {variant!r}")
+        expected_type = (
+            ContinuousUniformDiffusion
+            if variant == "release_uniform"
+            else ContinuousCategoricalDiffusion
+        )
+        if type(process) is not expected_type:
+            raise ValueError("UDLM prior variant disagrees with the exact process type")
+        identity = UDLM_PRIOR_VARIANT_IDENTITIES[variant]
+        for field, expected_value in identity.items():
+            if not _exact_data_equal(metadata[field], expected_value):
+                raise ValueError(
+                    f"UDLM prior metadata {field} is invalid for variant {variant}"
+                )
+        configured_variant = _configured_prior_variant(model)
+        if configured_variant is not None and configured_variant != variant:
+            raise ValueError(
+                "checkpoint config and runtime UDLM prior variants disagree"
+            )
+        exact_fields = {
+            "full_vocab_size": num_classes,
+            "active_vocab_size": len(active_token_ids),
+            "excluded_token_ids": excluded_token_ids,
+            "sampling_eps": float(process.sampling_eps),
+            "noise_eps": float(process.noise_eps),
+            "antithetic_sampling": bool(process.antithetic_sampling),
+            "active_token_ids_sha256": _canonical_numeric_sequence_sha256(
+                active_token_ids
+            ),
+            "stationary_probs_sha256": _canonical_numeric_sequence_sha256(
+                [float(value) for value in stationary_probs.tolist()]
+            ),
+        }
+        for field, expected_value in exact_fields.items():
+            if not _exact_data_equal(metadata[field], expected_value):
+                raise ValueError(
+                    f"UDLM prior metadata {field} disagrees with the live process"
+                )
+        _validate_sha256(metadata["active_token_ids_sha256"], "active_token_ids_sha256")
+        _validate_sha256(metadata["stationary_probs_sha256"], "stationary_probs_sha256")
+
+        tokenizer = panel["tokenizer"]
+        for field, expected_value in {
+            "tokenizer_repo_id": tokenizer["repo_id"],
+            "tokenizer_revision": tokenizer["revision"],
+            "tokenizer_json_sha256": tokenizer["tokenizer_json_sha256"],
+        }.items():
+            if not _exact_data_equal(metadata[field], expected_value):
+                raise ValueError(
+                    f"UDLM prior metadata {field} disagrees with the panel tokenizer"
+                )
+
+        if categorical:
+            if not isinstance(checkpoint_prior_metadata, Mapping):
+                raise ValueError(
+                    "categorical UDLM checkpoint is missing immutable prior metadata"
+                )
+            if not _exact_data_equal(dict(checkpoint_prior_metadata), metadata):
+                raise ValueError(
+                    "categorical checkpoint prior metadata disagrees with the runtime "
+                    "process"
+                )
+            metadata_status = "required_checkpoint_record_matches_runtime_exactly"
+        else:
+            if checkpoint_prior_metadata is not None:
+                raise ValueError(
+                    "release_uniform checkpoint must not declare categorical prior metadata"
+                )
+            metadata_status = "release_checkpoint_record_correctly_absent"
+
+        frequency_fields = {
+            field
+            for field in UDLM_PRIOR_METADATA_FIELDS
+            if field.startswith("frequency_")
+        }
+        if variant == "empirical_frequency":
+            _validate_empirical_artifact_identity(
+                metadata,
+                frequencies,
+                artifact_provenance,
+                active_token_ids,
+                stationary_probs,
+            )
+        else:
+            if metadata["uniform_mixture_weight"] is not None or any(
+                metadata[field] is not None for field in frequency_fields
+            ):
+                raise ValueError(
+                    f"{variant} metadata must not claim an empirical frequency artifact"
+                )
+            uniform_probs = torch.full_like(
+                stationary_probs, 1.0 / len(active_token_ids)
+            )
+            uniform_probs /= uniform_probs.sum()
+            if not torch.equal(stationary_probs, uniform_probs):
+                raise ValueError(f"{variant} stationary prior must be exactly uniform")
+
+    return process, {
+        "variant": variant,
+        "comparison_role": UDLM_PRIOR_VARIANT_IDENTITIES[variant]["comparison_role"],
+        "checkpoint_metadata_validation": metadata_status,
+        "runtime_metadata": metadata,
+        "runtime_metadata_sha256": (
+            None if metadata is None else _canonical_sha256(metadata)
+        ),
+        "active_token_ids": active_token_ids,
+        "excluded_token_ids": excluded_token_ids,
+        "stationary_probs": stationary_probs,
+    }
 
 
-def _process_metadata(process: Any, time_bins: Sequence[float]) -> dict[str, Any]:
+def _process_metadata(
+    process: Any,
+    time_bins: Sequence[float],
+    identity: Mapping[str, Any],
+) -> dict[str, Any]:
     device = process.diffusion_token_ids.device
     time_tensor = torch.tensor(time_bins, device=device, dtype=torch.float32)
     with torch.no_grad():
@@ -424,26 +871,60 @@ def _process_metadata(process: Any, time_bins: Sequence[float]) -> dict[str, Any
     diffusion_token_ids = [
         int(value) for value in process.diffusion_token_ids.detach().cpu().tolist()
     ]
-    allowed = set(diffusion_token_ids)
-    excluded = [
-        token_id
-        for token_id in range(int(process.num_classes))
-        if token_id not in allowed
-    ]
+    variant = str(identity["variant"])
+    variant_identity = UDLM_PRIOR_VARIANT_IDENTITIES[variant]
+    categorical = type(process) is ContinuousCategoricalDiffusion
+    stationary_probs = identity["stationary_probs"]
+    probability_values = [float(value) for value in stationary_probs.tolist()]
     prior_identity = {
-        "family": "uniform_over_diffusion_token_ids",
+        "family": (
+            "categorical_stationary_over_diffusion_token_ids"
+            if variant == "empirical_frequency"
+            else "uniform_over_diffusion_token_ids"
+        ),
         "support_size": len(diffusion_token_ids),
-        "probability_per_supported_token": 1.0 / len(diffusion_token_ids),
-        "ordered_token_ids_sha256": _canonical_sha256(diffusion_token_ids),
+        "probability_per_supported_token": (
+            1.0 / len(diffusion_token_ids) if variant != "empirical_frequency" else None
+        ),
+        "minimum_probability": min(probability_values),
+        "maximum_probability": max(probability_values),
+        "entropy_nats": -sum(
+            probability * math.log(probability) for probability in probability_values
+        ),
+        "ordered_token_ids_sha256": _canonical_numeric_sequence_sha256(
+            diffusion_token_ids
+        ),
+        "ordered_probabilities_sha256": _canonical_numeric_sequence_sha256(
+            probability_values
+        ),
     }
     prior_identity["identity_sha256"] = _canonical_sha256(prior_identity)
     return {
         "backend": f"{type(process).__module__}.{type(process).__qualname__}",
         "backend_exact_type_required": True,
+        "prior_variant": variant,
+        **variant_identity,
+        "comparison_design": (
+            "schedule_uniform is the matched schedule/process-family control for "
+            "empirical_frequency. Fixed-grid differences are descriptive and do "
+            "not by themselves identify a causal prior effect."
+        ),
+        "valid_single_factor_prior_control_for": (
+            "empirical_frequency" if variant == "schedule_uniform" else None
+        ),
+        "loss_values_cross_backend_comparable": False,
+        "training_frequency_artifact_usage": (
+            ["stationary_prior_construction", "metric_stratification"]
+            if variant == "empirical_frequency"
+            else ["metric_stratification_only"]
+        ),
+        "checkpoint_metadata_validation": identity["checkpoint_metadata_validation"],
+        "runtime_prior_metadata": identity["runtime_metadata"],
+        "runtime_prior_metadata_sha256": identity["runtime_metadata_sha256"],
         "prior": prior_identity,
         "num_classes": int(process.num_classes),
         "diffusion_vocab_size": int(process.diffusion_vocab_size),
-        "excluded_token_ids": excluded,
+        "excluded_token_ids": identity["excluded_token_ids"],
         "sampling_eps": float(process.sampling_eps),
         "noise_eps": float(process.noise_eps),
         "antithetic_sampling": bool(process.antithetic_sampling),
@@ -454,12 +935,24 @@ def _process_metadata(process: Any, time_bins: Sequence[float]) -> dict[str, Any
         },
         "production_loss_schedule": {
             "definition": (
-                "ContinuousUniformDiffusion.loss_per_token uses the released "
+                "ContinuousCategoricalDiffusion.loss_per_token uses the exact "
+                "rank-one categorical model-dependent integrand and "
+                "beta(t)=(1-noise_eps)/alpha_corrupt(t)"
+                if categorical
+                else "ContinuousUniformDiffusion.loss_per_token uses the released "
                 "idealized alpha_loss(t)=1-t and coefficient 1/(N*(1-t))"
             ),
             "qualification": (
-                "This intentionally differs from the residual-noise corruption "
+                "The parameter-independent endpoint-prior KL is excluded here and "
+                "reported separately; fixed-grid values are not a NELBO."
+                if categorical
+                else "This intentionally differs from the residual-noise corruption "
                 "endpoint when noise_eps > 0."
+            ),
+            "time_bin_beta": (
+                process.beta(time_tensor).detach().cpu().double().tolist()
+                if categorical
+                else None
             ),
         },
     }
@@ -475,6 +968,8 @@ def evaluate_denoising_panel(
     batch_size: int = 4,
     max_rows: int | None = None,
     device: str | torch.device = "cpu",
+    checkpoint_prior_metadata: Mapping[str, Any] | None = None,
+    artifact_provenance: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run deterministic denoising diagnostics on an injected UDLM model.
 
@@ -493,8 +988,33 @@ def evaluate_denoising_panel(
         max_rows = available_rows
     if not 1 <= max_rows <= available_rows:
         raise ValueError(f"max_rows must lie in [1, {available_rows}]")
-    process = _validate_uniform_udlm_backend(model)
+    process, process_identity = _validate_udlm_backend(
+        model,
+        panel=panel,
+        frequencies=frequencies,
+        checkpoint_prior_metadata=checkpoint_prior_metadata,
+        artifact_provenance=artifact_provenance,
+    )
+    initial_process_identity_sha256 = _canonical_sha256(
+        {
+            "variant": process_identity["variant"],
+            "active_token_ids": process_identity["active_token_ids"],
+            "excluded_token_ids": process_identity["excluded_token_ids"],
+            "stationary_probs_sha256": _canonical_numeric_sequence_sha256(
+                [
+                    float(value)
+                    for value in process_identity["stationary_probs"].tolist()
+                ]
+            ),
+            "runtime_metadata_sha256": process_identity["runtime_metadata_sha256"],
+        }
+    )
     parsed_device = torch.device(device)
+    if parsed_device.type != "cpu":
+        raise ValueError(
+            "deterministic denoising-panel evaluation is CPU-only; GPU inference "
+            "would weaken the recorded numerical reproducibility contract"
+        )
     model.to(parsed_device)
     process.to_device(parsed_device)
     model.eval()
@@ -551,10 +1071,15 @@ def evaluate_denoising_panel(
         frequencies["counts_by_token_id"], dtype=torch.long, device=parsed_device
     )
     pooled_groups = _new_metric_groups()
+    endpoint_groups = (
+        _new_endpoint_groups()
+        if type(process) is ContinuousCategoricalDiffusion
+        else None
+    )
     bin_results = []
 
     with torch.inference_mode():
-        for time_value in time_bins:
+        for time_index, time_value in enumerate(time_bins):
             bin_groups = _new_metric_groups()
             row_seeds = [
                 corruption_seed(seed, time_value, int(row["source_index"]))
@@ -647,6 +1172,32 @@ def evaluate_denoising_panel(
                 original_training_counts = training_counts[x0]
                 bucket_masks = frequency_bucket_masks(original_training_counts)
 
+                if endpoint_groups is not None and time_index == 0:
+                    endpoint_prior_kl = process.endpoint_prior_kl(x0, mask=content_mask)
+                    if endpoint_prior_kl.shape != x0.shape:
+                        raise RuntimeError(
+                            "endpoint_prior_kl returned an invalid tensor shape"
+                        )
+                    if (
+                        not torch.isfinite(endpoint_prior_kl[content_mask]).all()
+                        or torch.any(endpoint_prior_kl[content_mask] < -1e-12)
+                        or torch.any(endpoint_prior_kl[~content_mask] != 0)
+                    ):
+                        raise RuntimeError(
+                            "invalid categorical endpoint-prior KL on panel tokens"
+                        )
+                    _update_endpoint_accumulator(
+                        endpoint_groups["overall"],
+                        content_mask,
+                        endpoint_prior_kl,
+                    )
+                    for name, bucket_mask in bucket_masks.items():
+                        _update_endpoint_accumulator(
+                            endpoint_groups["by_training_frequency"][name],
+                            content_mask & bucket_mask,
+                            endpoint_prior_kl,
+                        )
+
                 _update_accumulator(
                     bin_groups["overall"],
                     content_mask,
@@ -699,6 +1250,64 @@ def evaluate_denoising_panel(
                 f"content denominator invariant failed: {observed} != "
                 f"{expected_content_tokens}"
             )
+    if endpoint_groups is not None and (
+        endpoint_groups["overall"]["denominator_tokens"] != expected_content_tokens
+    ):
+        raise RuntimeError("endpoint-prior KL denominator invariant failed")
+
+    _final_process, final_process_identity = _validate_udlm_backend(
+        model,
+        panel=panel,
+        frequencies=frequencies,
+        checkpoint_prior_metadata=checkpoint_prior_metadata,
+        artifact_provenance=artifact_provenance,
+    )
+    final_process_identity_sha256 = _canonical_sha256(
+        {
+            "variant": final_process_identity["variant"],
+            "active_token_ids": final_process_identity["active_token_ids"],
+            "excluded_token_ids": final_process_identity["excluded_token_ids"],
+            "stationary_probs_sha256": _canonical_numeric_sequence_sha256(
+                [
+                    float(value)
+                    for value in final_process_identity["stationary_probs"].tolist()
+                ]
+            ),
+            "runtime_metadata_sha256": final_process_identity[
+                "runtime_metadata_sha256"
+            ],
+        }
+    )
+    if final_process_identity_sha256 != initial_process_identity_sha256:
+        raise RuntimeError("UDLM process identity changed during panel evaluation")
+
+    endpoint_result = {
+        "applicable": endpoint_groups is not None,
+        "mathematically_defined_for_residual_forward": True,
+        "reported_by_evaluator": endpoint_groups is not None,
+        "parameter_independent": True,
+        "included_in_production_loss": False,
+        "definition": (
+            "KL(q(z_1 | x0) || stationary_prior) induced by residual "
+            "alpha_corrupt(1)=noise_eps, evaluated once per clean content token"
+            if endpoint_groups is not None
+            else (
+                "mathematically nonzero for the residual-clean released forward "
+                "kernel, but not exposed or included by the faithful released "
+                "ContinuousUniformDiffusion objective"
+            )
+        ),
+        "qualification": (
+            "Adding this endpoint value to fixed-grid instantaneous losses still "
+            "does not produce a NELBO because no continuous-time integral is "
+            "estimated."
+        ),
+        "metrics": (
+            _finalize_endpoint_groups(endpoint_groups)
+            if endpoint_groups is not None
+            else None
+        ),
+    }
 
     return {
         "rows_evaluated": max_rows,
@@ -710,7 +1319,8 @@ def evaluate_denoising_panel(
         "device": str(parsed_device),
         "estimator_scope": (
             "one deterministic corruption per selected row and fixed time; "
-            "descriptive grid, not an integrated or unbiased NELBO estimate"
+            "descriptive grid, not an integrated or unbiased NELBO estimate; "
+            "cross-backend differences are not causal estimates"
         ),
         "seed_protocol": {
             "definition": (
@@ -733,14 +1343,15 @@ def evaluate_denoising_panel(
                     "row_corruption_seeds_sha256": result[
                         "row_corruption_seeds_sha256"
                     ],
-                    "corrupted_token_ids_sha256": result[
-                        "corrupted_token_ids_sha256"
-                    ],
+                    "corrupted_token_ids_sha256": result["corrupted_token_ids_sha256"],
                 }
                 for result in bin_results
             ]
         ),
-        "process": _process_metadata(process, time_bins),
+        "process_identity_sha256": initial_process_identity_sha256,
+        "process_identity_postcheck": "unchanged_after_evaluation",
+        "process": _process_metadata(process, time_bins, process_identity),
+        "endpoint_prior_kl": endpoint_result,
         "metrics_by_time": bin_results,
         "pooled_token_time_metrics": _finalize_metric_groups(pooled_groups),
     }
@@ -828,6 +1439,16 @@ def _checkpoint_metadata_from_payload(
         initialization_checkpoint, str
     ):
         initialization_checkpoint = str(initialization_checkpoint)
+    checkpoint_prior_metadata = checkpoint.get(UDLM_PRIOR_CHECKPOINT_KEY)
+    if checkpoint_prior_metadata is not None and not isinstance(
+        checkpoint_prior_metadata, Mapping
+    ):
+        raise ValueError("checkpoint udlm_prior_metadata must be a mapping")
+    plain_prior_metadata = (
+        None
+        if checkpoint_prior_metadata is None
+        else _plain_config(checkpoint_prior_metadata)
+    )
     return {
         "path": str(path.resolve()),
         "sha256": snapshot["sha256"],
@@ -843,6 +1464,13 @@ def _checkpoint_metadata_from_payload(
         "epoch": None if checkpoint.get("epoch") is None else int(checkpoint["epoch"]),
         "diffusion_type": diffusion_type,
         "config_sha256": _canonical_sha256(config),
+        "udlm_prior_metadata_declared": plain_prior_metadata is not None,
+        "udlm_prior_metadata_sha256": (
+            None
+            if plain_prior_metadata is None
+            else _canonical_sha256(plain_prior_metadata)
+        ),
+        "udlm_prior_metadata": plain_prior_metadata,
         "training_initialization_declaration": {
             "init_from_mdlm_checkpoint": initialization_checkpoint,
             "init_from_mdlm_ema": bool(training.get("init_from_mdlm_ema", True)),
@@ -874,13 +1502,35 @@ def _git_output(arguments: Sequence[str]) -> str | None:
         return None
 
 
-def source_provenance() -> dict[str, Any]:
+def source_provenance(
+    *,
+    capture_phase: str = "unspecified",
+    validate_loaded_modules: bool = True,
+) -> dict[str, Any]:
     hashes = {}
     for relative_path in SOURCE_INPUTS:
         absolute_path = REPOSITORY_ROOT / relative_path
         if not absolute_path.is_file():
             raise FileNotFoundError(absolute_path)
-        hashes[str(relative_path)] = sha256_file(absolute_path)
+        hashes[str(relative_path)] = _stable_file_snapshot(absolute_path)["sha256"]
+    loaded_modules = {
+        "evaluator": Path(__file__).resolve(),
+        "diffusion": Path(inspect.getfile(ContinuousUniformDiffusion)).resolve(),
+        "validation_panel_materializer": Path(
+            inspect.getfile(validate_panel)
+        ).resolve(),
+    }
+    expected_loaded_modules = {
+        "evaluator": (REPOSITORY_ROOT / SOURCE_INPUTS[0]).resolve(),
+        "diffusion": (REPOSITORY_ROOT / "src/genmol/diffusion.py").resolve(),
+        "validation_panel_materializer": (
+            REPOSITORY_ROOT / "scripts/udlm/materialize_validation_panel.py"
+        ).resolve(),
+    }
+    if validate_loaded_modules and loaded_modules != expected_loaded_modules:
+        raise RuntimeError(
+            "loaded evaluator modules do not originate from the isolated worktree"
+        )
     status = _git_output(["status", "--porcelain=v1", "--untracked-files=normal"])
     if status is None:
         worktree_state = "unknown"
@@ -892,6 +1542,8 @@ def source_provenance() -> dict[str, Any]:
         worktree_state = "clean"
         git_dirty = False
     return {
+        "captured_at_utc": datetime.now(timezone.utc).isoformat(),
+        "capture_phase": capture_phase,
         "repository_root": str(REPOSITORY_ROOT),
         "git_commit": _git_output(["rev-parse", "HEAD"]),
         "git_branch": _git_output(["branch", "--show-current"]),
@@ -900,6 +1552,9 @@ def source_provenance() -> dict[str, Any]:
         "git_status_sha256": None
         if status is None
         else hashlib.sha256(status.encode()).hexdigest(),
+        "loaded_module_paths": {
+            name: str(path) for name, path in loaded_modules.items()
+        },
         "files_sha256": hashes,
     }
 
@@ -914,8 +1569,10 @@ def verify_source_provenance(source: Mapping[str, Any]) -> None:
     for relative_path in SOURCE_INPUTS:
         absolute_path = REPOSITORY_ROOT / relative_path
         if not absolute_path.is_file():
-            raise RuntimeError(f"source input disappeared during evaluation: {absolute_path}")
-        observed[str(relative_path)] = sha256_file(absolute_path)
+            raise RuntimeError(
+                f"source input disappeared during evaluation: {absolute_path}"
+            )
+        observed[str(relative_path)] = _stable_file_snapshot(absolute_path)["sha256"]
     if observed != dict(expected):
         changed = sorted(
             path
@@ -1063,7 +1720,27 @@ def load_checkpoint_model(
 ) -> tuple[Any, dict[str, Any]]:
     """Construct GenMol from the already verified, once-loaded checkpoint."""
 
-    from genmol.model import GenMol
+    from genmol.model import (
+        EMPIRICAL_FREQUENCY_RELATIVE_PATH as MODEL_FREQUENCY_RELATIVE_PATH,
+        EMPIRICAL_FREQUENCY_SHA256 as MODEL_FREQUENCY_SHA256,
+        UDLM_PRIOR_CHECKPOINT_KEY as MODEL_PRIOR_CHECKPOINT_KEY,
+        UDLM_PRIOR_VARIANT_IDENTITIES as MODEL_PRIOR_VARIANT_IDENTITIES,
+        GenMol,
+    )
+
+    if (
+        MODEL_PRIOR_CHECKPOINT_KEY != UDLM_PRIOR_CHECKPOINT_KEY
+        or MODEL_FREQUENCY_RELATIVE_PATH != EMPIRICAL_FREQUENCY_RELATIVE_PATH
+        or MODEL_FREQUENCY_SHA256 != FROZEN_FREQUENCY_SHA256
+        or MODEL_PRIOR_VARIANT_IDENTITIES != UDLM_PRIOR_VARIANT_IDENTITIES
+    ):
+        raise RuntimeError(
+            "evaluator and GenMol UDLM prior contracts disagree; refusing to label "
+            "the checkpoint"
+        )
+    model_source_path = Path(inspect.getfile(GenMol)).resolve()
+    if model_source_path != (REPOSITORY_ROOT / "src/genmol/model.py").resolve():
+        raise RuntimeError("GenMol model resolved outside the isolated worktree")
 
     hyper_parameters = checkpoint.get("hyper_parameters")
     if not isinstance(hyper_parameters, Mapping) or "config" not in hyper_parameters:
@@ -1073,7 +1750,20 @@ def load_checkpoint_model(
         raise ValueError("checkpoint state_dict must be a mapping")
 
     model = GenMol(hyper_parameters["config"])
+    # Manual construction bypasses Lightning's on_load_checkpoint hook. Invoke
+    # the same immutable categorical-prior validation before accepting tensors.
+    model._validate_runtime_udlm_prior_identity()
+    model._validate_udlm_prior_checkpoint(checkpoint)
+    runtime_metadata = getattr(model, "udlm_prior_metadata", None)
+    runtime_record = None if runtime_metadata is None else runtime_metadata.to_dict()
+    checkpoint_record = checkpoint.get(UDLM_PRIOR_CHECKPOINT_KEY)
+    if type(model.mdlm) is ContinuousCategoricalDiffusion and (
+        not isinstance(checkpoint_record, Mapping)
+        or not _exact_data_equal(dict(checkpoint_record), runtime_record)
+    ):
+        raise ValueError("categorical UDLM checkpoint prior metadata is not type-exact")
     model.load_state_dict(checkpoint_state, strict=True)
+    model._validate_runtime_udlm_prior_identity()
     manifest = _backbone_parameter_manifest(model, checkpoint_state)
     names = [name for name, _parameter, _raw_tensor in manifest]
     ema_enabled = model.ema is not None
@@ -1097,6 +1787,30 @@ def load_checkpoint_model(
         }
     else:
         raise ValueError("weights must be 'ema' or 'raw'")
+    runtime_prior_metadata = getattr(model, "udlm_prior_metadata", None)
+    runtime_prior_record = (
+        None if runtime_prior_metadata is None else runtime_prior_metadata.to_dict()
+    )
+    categorical = type(model.mdlm) is ContinuousCategoricalDiffusion
+    weight_provenance["udlm_process_identity"] = {
+        "exact_backend": f"{type(model.mdlm).__module__}.{type(model.mdlm).__qualname__}",
+        "checkpoint_prior_metadata_required": categorical,
+        "checkpoint_prior_metadata_present": (UDLM_PRIOR_CHECKPOINT_KEY in checkpoint),
+        "runtime_prior_metadata_sha256": (
+            None
+            if runtime_prior_record is None
+            else _canonical_sha256(runtime_prior_record)
+        ),
+        "validation": (
+            "GenMol categorical checkpoint metadata, process buffers, configured "
+            "pinned artifact, and live process identity were checked before and "
+            "after strict state loading"
+            if categorical
+            else "release_uniform categorical metadata/state absence and live "
+            "process identity were checked before and after strict state loading"
+        ),
+        "model_source_path": str(model_source_path),
+    }
     model.backbone.eval()
     return model, weight_provenance
 
@@ -1123,8 +1837,50 @@ def _validate_output_path(
     return path
 
 
-def _atomic_write_json(path: Path, payload: dict, force: bool) -> None:
-    path = _validate_output_path(path, force=force)
+def _protected_evaluation_paths(
+    checkpoint_path: Path,
+    panel_path: Path,
+    frequency_path: Path,
+) -> tuple[Path, ...]:
+    """Bind CLI inputs, canonical artifacts, and implementation sources."""
+
+    candidates = (
+        checkpoint_path,
+        panel_path,
+        frequency_path,
+        DEFAULT_PANEL,
+        DEFAULT_FREQUENCIES,
+        *(REPOSITORY_ROOT / path for path in SOURCE_INPUTS),
+    )
+    return tuple(dict.fromkeys(path.resolve() for path in candidates))
+
+
+def _atomic_write_json(
+    path: Path,
+    payload: dict,
+    force: bool,
+    *,
+    protected_paths: Sequence[Path] = (),
+    path_is_prevalidated_and_resolved: bool = False,
+) -> None:
+    if path_is_prevalidated_and_resolved:
+        # Preserve the exact target that was protected before checkpoint work;
+        # do not resolve the user's spelling a second time after a long run.
+        normalized_path = Path(os.path.abspath(os.fspath(path)))
+        if (
+            not path.is_absolute()
+            or path != normalized_path
+            or not path.is_relative_to(REPOSITORY_ROOT.resolve())
+        ):
+            raise ValueError(
+                "prevalidated output path is not an absolute worktree path"
+            )
+        if path in set(protected_paths):
+            raise ValueError(f"output cannot overwrite an evaluation input: {path}")
+        if path.exists() and not force:
+            raise FileExistsError(f"refusing to overwrite {path}; pass --force")
+    else:
+        path = _validate_output_path(path, force=force, protected_paths=protected_paths)
     path.parent.mkdir(parents=True, exist_ok=True)
     encoded = (
         json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n"
@@ -1196,23 +1952,31 @@ def main() -> None:
     started_at = datetime.now(timezone.utc)
     started = time.perf_counter()
     checkpoint_path = args.checkpoint.resolve()
+    panel_path = args.panel.resolve()
+    frequency_path = args.training_frequencies.resolve()
     if not checkpoint_path.is_file():
         raise FileNotFoundError(checkpoint_path)
     if not checkpoint_path.is_relative_to(PROJECT_ROOT):
         raise ValueError(f"checkpoint must be inside {PROJECT_ROOT}")
-    _validate_output_path(
+    protected_paths = _protected_evaluation_paths(
+        checkpoint_path,
+        panel_path,
+        frequency_path,
+    )
+    output_path = _validate_output_path(
         args.output,
         force=args.force,
-        protected_paths=(
-            checkpoint_path,
-            args.panel,
-            args.training_frequencies,
-            *(REPOSITORY_ROOT / path for path in SOURCE_INPUTS),
-        ),
+        protected_paths=protected_paths,
     )
     _validate_device(args.device)
+    # Bind the already imported implementation before any potentially slow
+    # artifact or checkpoint work, then re-hash the same set before publication.
+    source_info = source_provenance(
+        capture_phase="before_artifact_and_checkpoint_loading"
+    )
+    runtime_info = runtime_provenance()
     panel, frequencies, artifact_provenance = load_frozen_artifacts(
-        args.panel, args.training_frequencies
+        panel_path, frequency_path
     )
     checkpoint, checkpoint_snapshot = load_verified_checkpoint(checkpoint_path)
     checkpoint_info = _checkpoint_metadata_from_payload(
@@ -1220,10 +1984,7 @@ def main() -> None:
     )
     if checkpoint_info["diffusion_type"] != "udlm":
         raise ValueError("checkpoint metadata does not declare training.diffusion=udlm")
-    source_info = source_provenance()
-    runtime_info = runtime_provenance()
     model, weight_provenance = load_checkpoint_model(checkpoint, args.weights)
-    del checkpoint
     evaluation = evaluate_denoising_panel(
         model,
         panel,
@@ -1233,17 +1994,26 @@ def main() -> None:
         batch_size=args.batch_size,
         max_rows=args.max_rows,
         device=args.device,
+        checkpoint_prior_metadata=checkpoint.get(UDLM_PRIOR_CHECKPOINT_KEY),
+        artifact_provenance=artifact_provenance,
     )
+    del checkpoint
     verify_source_provenance(source_info)
+    source_info["postcheck"] = {
+        "status": "unchanged_after_checkpoint_load_and_evaluation",
+        "verified_at_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    variant = evaluation["process"]["prior_variant"]
     result = {
         "schema_version": SCHEMA_VERSION,
         "purpose": (
-            "fixed held-out uniform-UDLM one-corruption denoising diagnostic; "
-            "not benchmark evidence"
+            f"fixed held-out {variant} UDLM one-corruption denoising diagnostic; "
+            "not molecule-generation benchmark evidence"
         ),
         "claim_scope": (
             "These token-level diagnostics do not measure generated-molecule quality "
-            "and cannot establish that UDLM beats GenMol."
+            "and cannot establish that UDLM beats GenMol. Cross-backend or "
+            "cross-checkpoint differences are descriptive, not causal estimates."
         ),
         "started_at_utc": started_at.isoformat(),
         "elapsed_seconds": time.perf_counter() - started,
@@ -1267,14 +2037,16 @@ def main() -> None:
                 "panel tokenizer's complete special_token_ids list."
             ),
             "production_loss": (
-                "The instantaneous ContinuousUniformDiffusion.loss_per_token value "
-                "at the named time and realized corruption, summed in float64 and "
-                "divided by the reported content-token denominator. It is not an "
-                "integrated NELBO estimate."
+                "The exact selected process's instantaneous loss_per_token value at "
+                "the named time and realized corruption, summed in float64 and "
+                "divided by the reported content-token denominator. For categorical "
+                "UDLM this is only the model-dependent integrand and excludes the "
+                "separately reported endpoint-prior KL. It is not an integrated "
+                "NELBO estimate."
             ),
             "clean_token_nll": (
                 "Negative log probability of the original clean token under "
-                "ContinuousUniformDiffusion.clean_log_probs(logits)."
+                "the selected process's clean_log_probs(logits)."
             ),
             "clean_token_top1": (
                 "Argmax over clean-token probabilities equals the original clean "
@@ -1282,8 +2054,9 @@ def main() -> None:
             ),
             "observed_changed": (
                 "The realized noisy token ID differs from its clean token ID. "
-                "A latent uniform replacement that redraws the same ID is therefore "
-                "counted as observed_unchanged."
+                "A latent prior refresh that redraws the same ID is therefore counted "
+                "as observed_unchanged; this rate is token/prior-dependent and is not "
+                "the latent refresh probability."
             ),
             "observed_unchanged": "The realized noisy token ID equals its clean token ID.",
             "training_frequency_bucket": (
@@ -1296,15 +2069,28 @@ def main() -> None:
                 "it is not an average of already-rounded bin means or an integral "
                 "over time."
             ),
+            "endpoint_prior_kl": (
+                "For categorical UDLM only, the parameter-independent terminal "
+                "KL(q(z_1|x0) || stationary_prior), micro-averaged once per clean "
+                "content token and excluded from production_loss. Adding it to a "
+                "fixed-time grid still does not yield a NELBO."
+            ),
         },
         "evaluation": evaluation,
     }
-    _atomic_write_json(args.output, result, args.force)
+    verify_source_provenance(source_info)
+    _atomic_write_json(
+        output_path,
+        result,
+        args.force,
+        protected_paths=protected_paths,
+        path_is_prevalidated_and_resolved=True,
+    )
     print(
         json.dumps(
             {
-                "output": str(args.output.resolve()),
-                "output_sha256": sha256_file(args.output.resolve()),
+                "output": str(output_path),
+                "output_sha256": sha256_file(output_path),
                 "rows_evaluated": evaluation["rows_evaluated"],
                 "time_bins": evaluation["time_bins"],
                 "purpose": result["purpose"],
