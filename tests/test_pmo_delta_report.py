@@ -467,6 +467,10 @@ class DeltaReportTests(unittest.TestCase):
             self.assertIn("Delta-y and attribution diagnostics", text)
             manifest = json.loads(Path(first["report_path"]).read_text())
             self.assertEqual(manifest["design"]["run_count"], 12)
+            self.assertEqual(
+                manifest["reporter"]["sha256"],
+                sha256_file(report.REPORTER_PATH),
+            )
             paired = manifest["paired_delta_vs_matched_control"]["metrics"]
             self.assertAlmostEqual(
                 paired["all_charged_molecules"]["auc_top_10"]["mean"],

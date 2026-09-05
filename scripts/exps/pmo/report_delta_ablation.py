@@ -53,6 +53,7 @@ from scripts.exps.pmo.main.genmol.experiment_io import sha256_file
 
 REPORT_SCHEMA_VERSION = 1
 COLLECTION_SCHEMA_VERSION = 3
+REPORTER_PATH = Path(__file__).resolve()
 EXPERIMENT_ID = "fragment_vocab_qed_50k_delta_1k_v1"
 SCIENTIFIC_STATUS = (
     "Exploratory paired three-seed QED delta-y credit-assignment study using the "
@@ -1444,6 +1445,7 @@ def render_report_pdf(data: ReportData) -> bytes:
             f"{data.collection_path.name} | SHA-256 {data.collection_sha256}",
         ),
         ("Results CSV", f"{data.csv_path.name} | SHA-256 {data.csv_sha256}"),
+        ("Reporter", f"{REPORTER_PATH} | SHA-256 {sha256_file(REPORTER_PATH)}"),
         ("Code identity", code_identity),
         ("GPU launches", "\n".join(gpu_rows)),
     ]
@@ -1610,6 +1612,7 @@ def write_report(
     """Validate inputs and publish deterministic hash-addressed report artifacts."""
 
     data = load_report_data(collection_manifest)
+    reporter_sha256 = sha256_file(REPORTER_PATH)
     destination = _prepare_output_directory(
         data.collection_path.parent if output_dir is None else output_dir
     )
@@ -1648,6 +1651,10 @@ def write_report(
                 },
                 "model_sha256": EXPECTED_MODEL_SHA256,
                 "vocabulary_sha256": EXPECTED_VOCABULARY_SHA256,
+            },
+            "reporter": {
+                "path": str(REPORTER_PATH),
+                "sha256": reporter_sha256,
             },
             "design": {
                 "oracle": EXPECTED_ORACLE,
@@ -1688,6 +1695,11 @@ def write_report(
             overwrite=overwrite,
         )
         _recheck_sources(data)
+        _equal(
+            sha256_file(REPORTER_PATH),
+            reporter_sha256,
+            "reporter source SHA-256 after publication",
+        )
         _equal(sha256_file(pdf_path), pdf_sha, "published PDF SHA-256")
     return {
         "pdf_path": str(pdf_path),
