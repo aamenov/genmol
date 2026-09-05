@@ -19,18 +19,22 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import importlib
 import importlib.metadata
 import json
 import math
 import os
+import pickle
 import platform
 import random
+import stat
 import statistics
 import subprocess
 import sys
 import tempfile
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -43,11 +47,39 @@ for import_root in (REPO_ROOT, REPO_SRC):
         sys.path.remove(str(import_root))
     sys.path.insert(0, str(import_root))
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 TOKENIZER_REQUESTED_IDENTIFIER = "datamol-io/safe-gpt"
 RAW_SAMPLES_FILENAME = "raw_samples.csv"
 SUMMARY_FILENAME = "summary.json"
 LOCK_FILENAME = ".benchmark.lock"
+
+METRIC_INPUT_SCHEMA_VERSION = 1
+SA_FRAGMENT_SCORES_RELATIVE_PATH = Path("oracle/fpscores.pkl")
+SA_FRAGMENT_SCORES_SHA256 = (
+    "24a4392f5c673e79c0446af3c4d8e458293b5fecaa244328e76741ead9d21dbf"
+)
+SA_FRAGMENT_SCORES_SIZE_BYTES = 9_048_931
+SA_FRAGMENT_SCORE_ROW_COUNT = 3_549
+SA_FINGERPRINT_SCORE_COUNT = 705_292
+TDC_METRIC_IMPLEMENTATION_PATHS = {
+    "oracle_dispatch": Path("tdc/oracles.py"),
+    "sa_qed_scoring": Path("tdc/chem_utils/oracle/oracle.py"),
+    "evaluator_dispatch": Path("tdc/evaluator.py"),
+    "diversity_scoring": Path("tdc/chem_utils/evaluator.py"),
+}
+TDC_METRIC_DISTRIBUTION_VERSION = "0.4.1"
+TDC_METRIC_IMPLEMENTATION_SHA256 = {
+    "oracle_dispatch": "03b52abdc8a1446f903238009fd9682842e04479eac8e989ed2395147938de2b",
+    "sa_qed_scoring": "d266c89b5ea5f67135d0fa04f3348c4e67e3b8946c4ffe13ee8d6b96a5335e4f",
+    "evaluator_dispatch": "3531d60f2b128417429f2e510d994c1c72a2e441124ea43505224f4120819549",
+    "diversity_scoring": "eb61d9c258be6ad1a8a2297395f6519ff89d7651013fc8a2c72831e572d574e3",
+}
+TDC_METRIC_IMPLEMENTATION_SIZE_BYTES = {
+    "oracle_dispatch": 25_879,
+    "sa_qed_scoring": 59_584,
+    "evaluator_dispatch": 15_901,
+    "diversity_scoring": 13_620,
+}
 
 LAUNCH_ENVIRONMENT_KEYS = (
     "CUDA_VISIBLE_DEVICES",
@@ -99,6 +131,14 @@ class BenchmarkConfigurationError(ValueError):
     """Raised before model loading when a requested run is not well formed."""
 
 
+@dataclass(frozen=True)
+class PinnedSAMetricInput:
+    """Verified, resident SA fragment scores and their immutable provenance."""
+
+    provenance: Mapping[str, Any]
+    fragment_scores: Mapping[int, float]
+
+
 def benchmark_run_label(global_step: int, checkpoint_sha256: str, seed: int) -> str:
     """Return the shared launcher/report identity label for one seed."""
     return f"denovo_step{int(global_step)}_{checkpoint_sha256[:12]}_seed{int(seed)}"
@@ -125,6 +165,315 @@ def _canonical_json_sha256(payload: Any) -> str:
         allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _read_pinned_regular_file(
+    *,
+    repository_root: Path,
+    relative_path: Path,
+    expected_sha256: str,
+    expected_size_bytes: int,
+) -> tuple[Path, bytes]:
+    """Read one exact in-repository regular file through a stable descriptor.
+
+    The resolved path, inode, metadata, byte count, and digest all have to agree.
+    ``O_NOFOLLOW`` closes the final-component symlink race on platforms that
+    provide it; the canonical-path and post-read inode checks also reject a
+    symlinked parent or a path replacement during the read.
+    """
+
+    if not isinstance(relative_path, Path) or relative_path.is_absolute():
+        raise ValueError("pinned metric-input path must be repository-relative")
+    if (
+        not isinstance(expected_sha256, str)
+        or len(expected_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in expected_sha256)
+    ):
+        raise ValueError("expected metric-input SHA-256 must be 64 lowercase hex digits")
+    if type(expected_size_bytes) is not int or expected_size_bytes <= 0:
+        raise ValueError("expected metric-input size must be a positive integer")
+
+    try:
+        root = repository_root.resolve(strict=True)
+    except OSError as error:
+        raise FileNotFoundError(
+            f"Benchmark repository root is unavailable: {repository_root}"
+        ) from error
+    candidate = root / relative_path
+    if candidate != root and root not in candidate.parents:
+        raise ValueError(f"metric-input path escapes repository root: {relative_path}")
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError as error:
+        raise FileNotFoundError(
+            "Pinned TDC SA fragment-score artifact is missing; refusing TDC's "
+            f"implicit downloader: {candidate}"
+        ) from error
+    if resolved != candidate:
+        raise RuntimeError(
+            "Pinned TDC SA fragment-score artifact must not traverse a symlink: "
+            f"{candidate} resolves to {resolved}"
+        )
+    try:
+        path_before = candidate.stat(follow_symlinks=False)
+    except OSError as error:
+        raise RuntimeError(
+            f"Pinned metric-input path changed before it was opened: {candidate}"
+        ) from error
+    if not stat.S_ISREG(path_before.st_mode):
+        raise RuntimeError(f"Pinned metric input is not a regular file: {candidate}")
+
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(candidate, flags)
+    except OSError as error:
+        raise RuntimeError(
+            f"Could not securely open pinned metric input {candidate}: {error}"
+        ) from error
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise RuntimeError(f"Pinned metric input is not a regular file: {candidate}")
+        if (
+            path_before.st_dev != before.st_dev
+            or path_before.st_ino != before.st_ino
+        ):
+            raise RuntimeError(
+                f"Pinned metric-input path was replaced before open: {candidate}"
+            )
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(descriptor, 8 * 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+
+    identity_before = (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+        before.st_ctime_ns,
+    )
+    identity_after = (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+    )
+    if identity_before != identity_after:
+        raise RuntimeError(f"Pinned metric input changed while being read: {candidate}")
+    try:
+        path_after = candidate.stat(follow_symlinks=False)
+    except OSError as error:
+        raise RuntimeError(
+            f"Pinned metric-input path changed after it was read: {candidate}"
+        ) from error
+    if (
+        not stat.S_ISREG(path_after.st_mode)
+        or path_after.st_dev != after.st_dev
+        or path_after.st_ino != after.st_ino
+    ):
+        raise RuntimeError(
+            f"Pinned metric-input path was replaced while being read: {candidate}"
+        )
+
+    payload = b"".join(chunks)
+    actual_size = len(payload)
+    actual_sha256 = hashlib.sha256(payload).hexdigest()
+    if actual_size != expected_size_bytes:
+        raise RuntimeError(
+            "Pinned TDC SA fragment-score artifact has the wrong size: "
+            f"{actual_size} bytes != {expected_size_bytes} bytes"
+        )
+    if actual_sha256 != expected_sha256:
+        raise RuntimeError(
+            "Pinned TDC SA fragment-score artifact has the wrong SHA-256: "
+            f"{actual_sha256} != {expected_sha256}"
+        )
+    return candidate, payload
+
+
+def _decode_sa_fragment_scores(
+    payload: bytes,
+    *,
+    expected_row_count: int,
+    expected_fingerprint_count: int,
+) -> dict[int, float]:
+    """Decode the pinned pickle using TDC's row-to-fingerprint semantics."""
+
+    try:
+        rows = pickle.loads(payload)
+    except Exception as error:
+        raise RuntimeError("Pinned TDC SA fragment scores are not a valid pickle") from error
+    if type(rows) is not list or len(rows) != expected_row_count:
+        raise RuntimeError(
+            "Pinned TDC SA fragment-score row count is invalid: "
+            f"{len(rows) if isinstance(rows, list) else type(rows).__name__} "
+            f"!= {expected_row_count}"
+        )
+
+    fragment_scores: dict[int, float] = {}
+    for row_index, row in enumerate(rows):
+        if type(row) is not list or len(row) < 2:
+            raise RuntimeError(
+                f"Pinned TDC SA fragment-score row {row_index} is malformed"
+            )
+        score_value = row[0]
+        if isinstance(score_value, bool) or not isinstance(score_value, (int, float)):
+            raise RuntimeError(
+                f"Pinned TDC SA fragment-score row {row_index} has a nonnumeric score"
+            )
+        score = float(score_value)
+        if not math.isfinite(score):
+            raise RuntimeError(
+                f"Pinned TDC SA fragment-score row {row_index} has a nonfinite score"
+            )
+        for fingerprint in row[1:]:
+            if isinstance(fingerprint, bool) or not isinstance(fingerprint, int):
+                raise RuntimeError(
+                    f"Pinned TDC SA fragment-score row {row_index} has a noninteger key"
+                )
+            if fingerprint in fragment_scores:
+                raise RuntimeError(
+                    "Pinned TDC SA fragment scores contain a duplicate fingerprint key"
+                )
+            fragment_scores[fingerprint] = score
+    if len(fragment_scores) != expected_fingerprint_count:
+        raise RuntimeError(
+            "Pinned TDC SA fragment-score fingerprint count is invalid: "
+            f"{len(fragment_scores)} != {expected_fingerprint_count}"
+        )
+    return fragment_scores
+
+
+def _tdc_metric_implementation_provenance() -> dict[str, Any]:
+    """Fingerprint the installed TDC files that define reported metrics."""
+
+    try:
+        distribution = importlib.metadata.distribution("PyTDC")
+    except importlib.metadata.PackageNotFoundError as error:
+        raise RuntimeError("The pinned benchmark requires the PyTDC distribution") from error
+    if distribution.version != TDC_METRIC_DISTRIBUTION_VERSION:
+        raise RuntimeError(
+            "PyTDC version does not match the audited metric backend: "
+            f"{distribution.version} != {TDC_METRIC_DISTRIBUTION_VERSION}"
+        )
+    files: dict[str, Any] = {}
+    for name, relative_path in TDC_METRIC_IMPLEMENTATION_PATHS.items():
+        path = Path(distribution.locate_file(relative_path)).resolve()
+        if not path.is_file() or path.is_symlink():
+            raise RuntimeError(f"Required TDC metric implementation is not regular: {path}")
+        digest = _sha256(path)
+        size_bytes = path.stat().st_size
+        if digest != TDC_METRIC_IMPLEMENTATION_SHA256[name]:
+            raise RuntimeError(
+                f"TDC metric implementation {name} has an unaudited SHA-256: {digest}"
+            )
+        if size_bytes != TDC_METRIC_IMPLEMENTATION_SIZE_BYTES[name]:
+            raise RuntimeError(
+                f"TDC metric implementation {name} has an unaudited size: {size_bytes}"
+            )
+        files[name] = {
+            "path": str(path),
+            "sha256": digest,
+            "size_bytes": size_bytes,
+        }
+    return {
+        "distribution": "PyTDC",
+        "version": TDC_METRIC_DISTRIBUTION_VERSION,
+        "implementation_files": files,
+    }
+
+
+def _load_pinned_sa_metric_input(
+    *,
+    repository_root: Path,
+    relative_path: Path,
+    expected_sha256: str,
+    expected_size_bytes: int,
+    expected_row_count: int,
+    expected_fingerprint_count: int,
+    include_tdc_provenance: bool = True,
+) -> PinnedSAMetricInput:
+    """Return verified resident scores without calling TDC's network loader."""
+
+    path, payload = _read_pinned_regular_file(
+        repository_root=repository_root,
+        relative_path=relative_path,
+        expected_sha256=expected_sha256,
+        expected_size_bytes=expected_size_bytes,
+    )
+    fragment_scores = _decode_sa_fragment_scores(
+        payload,
+        expected_row_count=expected_row_count,
+        expected_fingerprint_count=expected_fingerprint_count,
+    )
+    tdc_provenance = (
+        _tdc_metric_implementation_provenance()
+        if include_tdc_provenance
+        else {
+            "distribution": "PyTDC",
+            "version": "test-fixture",
+            "implementation_files": {},
+        }
+    )
+    provenance = {
+        "schema_version": METRIC_INPUT_SCHEMA_VERSION,
+        "sa_fragment_scores": {
+            "path": str(path),
+            "relative_path": relative_path.as_posix(),
+            "sha256": expected_sha256,
+            "size_bytes": expected_size_bytes,
+            "serialization": "python_pickle_verified_before_deserialization",
+            "top_level_row_count": expected_row_count,
+            "fingerprint_score_count": expected_fingerprint_count,
+            "duplicate_fingerprint_count": 0,
+        },
+        "tdc_metric_implementation": tdc_provenance,
+        "sa_loading_policy": {
+            "requested_oracle": "sa",
+            "oracle_class": "tdc.oracles.Oracle",
+            "sa_callable": "tdc.chem_utils.oracle.oracle.SA",
+            "network_download_allowed": False,
+            "tdc_oracle_load_invoked": False,
+            "resident_scores_loaded_from_verified_bytes": True,
+            "artifact_mutation_after_resident_load_affects_current_run": False,
+        },
+        "affected_outputs": [
+            "raw_samples_csv.strict_sa",
+            "raw_samples_csv.released_sa",
+            "metrics.strict.quality",
+            "metrics.released_comparable.quality",
+        ],
+    }
+    return PinnedSAMetricInput(
+        provenance=provenance,
+        fragment_scores=fragment_scores,
+    )
+
+
+def load_pinned_sa_metric_input() -> PinnedSAMetricInput:
+    """Load the only SA artifact authorized for benchmark quality metrics."""
+
+    return _load_pinned_sa_metric_input(
+        repository_root=REPO_ROOT,
+        relative_path=SA_FRAGMENT_SCORES_RELATIVE_PATH,
+        expected_sha256=SA_FRAGMENT_SCORES_SHA256,
+        expected_size_bytes=SA_FRAGMENT_SCORES_SIZE_BYTES,
+        expected_row_count=SA_FRAGMENT_SCORE_ROW_COUNT,
+        expected_fingerprint_count=SA_FINGERPRINT_SCORE_COUNT,
+    )
+
+
+def metric_input_provenance() -> dict[str, Any]:
+    """Validate and fingerprint every external input to reported metrics."""
+
+    return dict(load_pinned_sa_metric_input().provenance)
 
 
 def _json_compatible_number(value: Any) -> float | None:
@@ -1112,6 +1461,89 @@ def assert_runtime_module_provenance(
             )
 
 
+def assert_runtime_tdc_metric_provenance(
+    metric_inputs: Mapping[str, Any],
+) -> None:
+    """Bind imported TDC metric modules to the files fingerprinted preflight."""
+
+    module_names = {
+        "oracle_dispatch": "tdc.oracles",
+        "sa_qed_scoring": "tdc.chem_utils.oracle.oracle",
+        "evaluator_dispatch": "tdc.evaluator",
+        "diversity_scoring": "tdc.chem_utils.evaluator",
+    }
+    tdc_provenance = metric_inputs.get("tdc_metric_implementation")
+    if not isinstance(tdc_provenance, Mapping):
+        raise RuntimeError("Metric provenance lacks TDC implementation metadata")
+    recorded_files = tdc_provenance.get("implementation_files")
+    if not isinstance(recorded_files, Mapping) or set(recorded_files) != set(
+        module_names
+    ):
+        raise RuntimeError("Metric provenance has incomplete TDC implementation files")
+    for source_name, module_name in module_names.items():
+        module = importlib.import_module(module_name)
+        module_file = getattr(module, "__file__", None)
+        if not module_file:
+            raise RuntimeError(f"Runtime TDC module {module_name} has no source path")
+        runtime_path = Path(module_file).resolve()
+        recorded = recorded_files[source_name]
+        if not isinstance(recorded, Mapping):
+            raise RuntimeError(f"TDC metric provenance {source_name} is malformed")
+        if runtime_path != Path(str(recorded.get("path"))).resolve():
+            raise RuntimeError(
+                f"Runtime TDC module {module_name} path does not match preflight"
+            )
+        if _sha256(runtime_path) != recorded.get("sha256"):
+            raise RuntimeError(
+                f"Runtime TDC module {module_name} changed after preflight"
+            )
+
+
+@contextmanager
+def pinned_tdc_sa_oracle(
+    snapshot: PinnedSAMetricInput,
+    oracle_class: type,
+) -> Iterable[Any]:
+    """Yield ``Oracle('sa')`` with verified resident scores and no downloader.
+
+    TDC normally calls ``oracle_load('fpscores')`` lazily on the first SA score.
+    We instead populate the same module-level mapping from already verified
+    bytes and replace both reachable downloader hooks with a fail-closed stub
+    for the duration of scoring.
+    """
+
+    assert_runtime_tdc_metric_provenance(snapshot.provenance)
+    oracle_dispatch = importlib.import_module("tdc.oracles")
+    scoring_module = importlib.import_module("tdc.chem_utils.oracle.oracle")
+
+    def downloader_disabled(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError(
+            "TDC oracle downloading is disabled; only the pinned resident SA "
+            "fragment scores may be used"
+        )
+
+    previous_dispatch_loader = oracle_dispatch.oracle_load
+    previous_scoring_loader = scoring_module.oracle_load
+    previous_scores = scoring_module._fscores
+    resident_scores = snapshot.fragment_scores
+    oracle_dispatch.oracle_load = downloader_disabled
+    scoring_module.oracle_load = downloader_disabled
+    scoring_module._fscores = resident_scores
+    try:
+        oracle = oracle_class("sa")
+        if getattr(oracle, "name", None) != "sa":
+            raise RuntimeError("TDC did not resolve the requested SA oracle exactly")
+        if getattr(oracle, "evaluator_func", None) is not scoring_module.SA:
+            raise RuntimeError("TDC SA oracle resolved to an unexpected implementation")
+        yield oracle
+        if scoring_module._fscores is not resident_scores:
+            raise RuntimeError("TDC replaced the pinned resident SA fragment scores")
+    finally:
+        scoring_module._fscores = previous_scores
+        scoring_module.oracle_load = previous_scoring_loader
+        oracle_dispatch.oracle_load = previous_dispatch_loader
+
+
 def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     checkpoint_path = args.checkpoint.resolve()
     config_path = args.config.resolve()
@@ -1125,7 +1557,13 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     if args.seed < 0 or args.seed > 2**32 - 1:
         raise BenchmarkConfigurationError("seed must be in [0, 2**32 - 1]")
 
+    started_at = _utc_now()
+    total_start = time.perf_counter()
     validate_device(args.device)
+    # Verify and retain the metric-defining bytes before loading a checkpoint,
+    # importing CUDA-facing model code, or moving any tensor onto a GPU.
+    sa_metric_snapshot = load_pinned_sa_metric_input()
+    metric_inputs = dict(sa_metric_snapshot.provenance)
     source_config_sha256 = _sha256(config_path)
     source_config = load_yaml_config(config_path)
     if _sha256(config_path) != source_config_sha256:
@@ -1141,8 +1579,6 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     )
     sampling_config_sha256 = _canonical_json_sha256(sampling_config)
     effective_config_sha256 = _canonical_json_sha256(effective_config)
-    started_at = _utc_now()
-    total_start = time.perf_counter()
 
     with output_lock(output_dir):
         validate_output_target(output_dir, overwrite=args.overwrite)
@@ -1211,13 +1647,15 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             use_bracket_safe=use_bracket_safe,
             timing=decode_timing,
         )
-        metrics, failure_counts = evaluate_records(
-            records,
-            requested_count=args.num_samples,
-            oracle_qed=Oracle("qed"),
-            oracle_sa=Oracle("sa"),
-            diversity_evaluator=Evaluator("diversity"),
-        )
+        with pinned_tdc_sa_oracle(sa_metric_snapshot, Oracle) as sa_oracle:
+            metrics, failure_counts = evaluate_records(
+                records,
+                requested_count=args.num_samples,
+                oracle_qed=Oracle("qed"),
+                oracle_sa=sa_oracle,
+                diversity_evaluator=Evaluator("diversity"),
+            )
+        assert_runtime_tdc_metric_provenance(metric_inputs)
         scoring_seconds = time.perf_counter() - scoring_start
         released_postprocessing_seconds = decode_timing["released_postprocessing"]
         # Released run.py times the full de_novo_generation call.  Its endpoint
@@ -1282,6 +1720,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "environment": environment_info,
             "git": git_info,
             "implementation_inputs": implementation_inputs,
+            "metric_inputs": metric_inputs,
             "tokenizer": tokenizer_info,
             "artifacts": {
                 "raw_samples_csv": {

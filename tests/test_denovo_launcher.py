@@ -85,6 +85,14 @@ def _expected(tmp_path: Path, *, num_samples: int = 3) -> launcher.ExpectedRunId
             "maximum": 10,
         },
     }
+    metric_inputs = {
+        "schema_version": 1,
+        "sa_fragment_scores": {
+            "path": str((tmp_path / "oracle/fpscores.pkl").resolve()),
+            "sha256": "d" * 64,
+            "size_bytes": 789,
+        },
+    }
     return launcher.ExpectedRunIdentity(
         checkpoint_path=checkpoint,
         checkpoint_sha256=launcher._sha256_file(checkpoint),
@@ -102,6 +110,7 @@ def _expected(tmp_path: Path, *, num_samples: int = 3) -> launcher.ExpectedRunId
         effective_config_sha256=launcher._canonical_json_sha256(effective),
         benchmark_runner_sha256="a" * 64,
         implementation_inputs=implementation_inputs,
+        metric_inputs=metric_inputs,
         num_samples=num_samples,
     )
 
@@ -176,6 +185,7 @@ def _write_matching_artifacts(
         },
         "git": {"runner_sha256": expected.benchmark_runner_sha256},
         "implementation_inputs": expected.implementation_inputs,
+        "metric_inputs": expected.metric_inputs,
         "artifacts": {
             "raw_samples_csv": {
                 "path": str(raw_path.resolve()),
@@ -554,20 +564,35 @@ def test_expected_identity_uses_checkpoint_metadata_and_normalized_sampling(
     tmp_path: Path,
 ) -> None:
     expected_fixture = _expected(tmp_path)
+    preflight_order = []
+
+    def metric_preflight():
+        preflight_order.append("metric_input")
+        return expected_fixture.metric_inputs
+
+    def checkpoint_preflight(_path):
+        preflight_order.append("checkpoint")
+        return {
+            "sha256": expected_fixture.checkpoint_sha256,
+            "global_step": 50_000,
+            "size_bytes": expected_fixture.checkpoint_size_bytes,
+        }
+
     with (
         mock.patch.object(
             launcher.benchmark_runner,
             "checkpoint_metadata",
-            return_value={
-                "sha256": expected_fixture.checkpoint_sha256,
-                "global_step": 50_000,
-                "size_bytes": expected_fixture.checkpoint_size_bytes,
-            },
+            side_effect=checkpoint_preflight,
         ),
         mock.patch.object(
             launcher.benchmark_runner,
             "implementation_input_provenance",
             return_value=expected_fixture.implementation_inputs,
+        ),
+        mock.patch.object(
+            launcher.benchmark_runner,
+            "metric_input_provenance",
+            side_effect=metric_preflight,
         ),
     ):
         expected = launcher._build_expected_run_identity(
@@ -596,6 +621,8 @@ def test_expected_identity_uses_checkpoint_metadata_and_normalized_sampling(
         Path(launcher.benchmark_runner.__file__).resolve()
     )
     assert expected.implementation_inputs == expected_fixture.implementation_inputs
+    assert expected.metric_inputs == expected_fixture.metric_inputs
+    assert preflight_order[:2] == ["metric_input", "checkpoint"]
 
 
 def test_expected_identity_supports_udlm_and_rejects_endpoint_mismatch(
@@ -630,6 +657,11 @@ def test_expected_identity_supports_udlm_and_rejects_endpoint_mismatch(
             launcher.benchmark_runner,
             "implementation_input_provenance",
             return_value=expected_fixture.implementation_inputs,
+        ),
+        mock.patch.object(
+            launcher.benchmark_runner,
+            "metric_input_provenance",
+            return_value=expected_fixture.metric_inputs,
         ),
     ):
         expected = launcher._build_expected_run_identity(
@@ -683,6 +715,7 @@ def test_completed_artifacts_reject_runner_and_implementation_input_mismatches(
     summary = _read_summary(summary_path)
     summary["git"]["runner_sha256"] = "0" * 64
     summary["implementation_inputs"]["sampler_source"]["sha256"] = "1" * 64
+    summary["metric_inputs"]["sa_fragment_scores"]["sha256"] = "2" * 64
     _write_summary(summary_path, summary)
 
     with pytest.raises(launcher.CompletionArtifactError) as caught:
@@ -690,6 +723,7 @@ def test_completed_artifacts_reject_runner_and_implementation_input_mismatches(
     message = str(caught.value)
     assert "git.runner_sha256" in message
     assert "implementation_inputs" in message
+    assert "metric_inputs" in message
 
 
 @pytest.mark.parametrize("missing_name", ["raw_samples.csv", "summary.json"])

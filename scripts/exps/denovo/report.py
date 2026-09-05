@@ -35,16 +35,26 @@ if str(REPOSITORY_ROOT) not in sys.path:
 # Importing the schema constants does not import any GPU or chemistry package.
 # Keeping one source of truth makes schema drift fail immediately.
 from scripts.exps.denovo.benchmark import (  # noqa: E402
+    METRIC_INPUT_SCHEMA_VERSION,
     RAW_SAMPLE_FIELDS,
     RAW_SAMPLES_FILENAME,
+    SA_FINGERPRINT_SCORE_COUNT,
+    SA_FRAGMENT_SCORE_ROW_COUNT,
+    SA_FRAGMENT_SCORES_RELATIVE_PATH,
+    SA_FRAGMENT_SCORES_SHA256,
+    SA_FRAGMENT_SCORES_SIZE_BYTES,
     SCHEMA_VERSION as RUN_SCHEMA_VERSION,
     SUMMARY_FILENAME,
+    TDC_METRIC_DISTRIBUTION_VERSION,
+    TDC_METRIC_IMPLEMENTATION_SHA256,
+    TDC_METRIC_IMPLEMENTATION_SIZE_BYTES,
+    TDC_METRIC_IMPLEMENTATION_PATHS,
     benchmark_run_label,
     validate_sampling_config,
 )
 
 
-REPORT_SCHEMA_VERSION = 2
+REPORT_SCHEMA_VERSION = 3
 EXPECTED_SEEDS = (0, 1, 2)
 EXPECTED_SAMPLES_PER_SEED = 1_000
 EXPECTED_GLOBAL_STEP = 50_000
@@ -1240,6 +1250,158 @@ def _validate_tokenizer_provenance(
     return tokenizer
 
 
+def _validate_metric_inputs(value: Any, *, summary_path: Path) -> dict[str, Any]:
+    """Validate the immutable TDC/SA inputs behind the quality metric."""
+
+    context = f"{summary_path}: metric_inputs"
+    metric_inputs = dict(_mapping(value, context))
+    expected_top_level = {
+        "schema_version",
+        "sa_fragment_scores",
+        "tdc_metric_implementation",
+        "sa_loading_policy",
+        "affected_outputs",
+    }
+    if set(metric_inputs) != expected_top_level:
+        raise ReportValidationError(
+            f"{context} fields must be exactly {sorted(expected_top_level)}"
+        )
+    if metric_inputs["schema_version"] != METRIC_INPUT_SCHEMA_VERSION:
+        raise ReportValidationError(
+            f"{context}.schema_version must equal {METRIC_INPUT_SCHEMA_VERSION}"
+        )
+
+    fragment_scores = _mapping(
+        metric_inputs["sa_fragment_scores"], f"{context}.sa_fragment_scores"
+    )
+    expected_fragment_fields = {
+        "path",
+        "relative_path",
+        "sha256",
+        "size_bytes",
+        "serialization",
+        "top_level_row_count",
+        "fingerprint_score_count",
+        "duplicate_fingerprint_count",
+    }
+    if set(fragment_scores) != expected_fragment_fields:
+        raise ReportValidationError(
+            f"{context}.sa_fragment_scores fields must be exactly "
+            f"{sorted(expected_fragment_fields)}"
+        )
+    expected_fragment_values = {
+        "relative_path": SA_FRAGMENT_SCORES_RELATIVE_PATH.as_posix(),
+        "sha256": SA_FRAGMENT_SCORES_SHA256,
+        "size_bytes": SA_FRAGMENT_SCORES_SIZE_BYTES,
+        "serialization": "python_pickle_verified_before_deserialization",
+        "top_level_row_count": SA_FRAGMENT_SCORE_ROW_COUNT,
+        "fingerprint_score_count": SA_FINGERPRINT_SCORE_COUNT,
+        "duplicate_fingerprint_count": 0,
+    }
+    for key, expected in expected_fragment_values.items():
+        if fragment_scores.get(key) != expected:
+            raise ReportValidationError(
+                f"{context}.sa_fragment_scores.{key}={fragment_scores.get(key)!r}; "
+                f"expected pinned value {expected!r}"
+            )
+    recorded_fragment_path = fragment_scores.get("path")
+    if not isinstance(recorded_fragment_path, str) or not Path(
+        recorded_fragment_path
+    ).is_absolute():
+        raise ReportValidationError(
+            f"{context}.sa_fragment_scores.path must be absolute"
+        )
+    expected_fragment_path = (
+        REPOSITORY_ROOT / SA_FRAGMENT_SCORES_RELATIVE_PATH
+    ).resolve()
+    if Path(recorded_fragment_path).resolve() != expected_fragment_path:
+        raise ReportValidationError(
+            f"{context}.sa_fragment_scores.path is not the pinned repository path"
+        )
+
+    tdc = _mapping(
+        metric_inputs["tdc_metric_implementation"],
+        f"{context}.tdc_metric_implementation",
+    )
+    if set(tdc) != {"distribution", "version", "implementation_files"}:
+        raise ReportValidationError(
+            f"{context}.tdc_metric_implementation has unexpected fields"
+        )
+    if (
+        tdc.get("distribution") != "PyTDC"
+        or tdc.get("version") != TDC_METRIC_DISTRIBUTION_VERSION
+    ):
+        raise ReportValidationError(
+            f"{context} must record the audited PyTDC "
+            f"{TDC_METRIC_DISTRIBUTION_VERSION} metric backend"
+        )
+    implementation_files = _mapping(
+        tdc.get("implementation_files"),
+        f"{context}.tdc_metric_implementation.implementation_files",
+    )
+    if set(implementation_files) != set(TDC_METRIC_IMPLEMENTATION_PATHS):
+        raise ReportValidationError(
+            f"{context} has incomplete TDC metric implementation fingerprints"
+        )
+    for name, relative_path in TDC_METRIC_IMPLEMENTATION_PATHS.items():
+        source = _mapping(
+            implementation_files[name],
+            f"{context}.tdc_metric_implementation.implementation_files.{name}",
+        )
+        if set(source) != {"path", "sha256", "size_bytes"}:
+            raise ReportValidationError(
+                f"{context} TDC source {name} has unexpected fields"
+            )
+        source_path = source.get("path")
+        if (
+            not isinstance(source_path, str)
+            or not Path(source_path).is_absolute()
+            or not Path(source_path).as_posix().endswith(relative_path.as_posix())
+        ):
+            raise ReportValidationError(
+                f"{context} TDC source {name} has an invalid path"
+            )
+        digest = _sha256_value(
+            source.get("sha256"), f"{context} TDC source {name} SHA-256"
+        )
+        size_bytes = _integer(
+            source.get("size_bytes"), f"{context} TDC source {name} size"
+        )
+        if digest != TDC_METRIC_IMPLEMENTATION_SHA256[name]:
+            raise ReportValidationError(
+                f"{context} TDC source {name} does not match the audited SHA-256"
+            )
+        if size_bytes != TDC_METRIC_IMPLEMENTATION_SIZE_BYTES[name]:
+            raise ReportValidationError(
+                f"{context} TDC source {name} does not match the audited size"
+            )
+
+    expected_loading_policy = {
+        "requested_oracle": "sa",
+        "oracle_class": "tdc.oracles.Oracle",
+        "sa_callable": "tdc.chem_utils.oracle.oracle.SA",
+        "network_download_allowed": False,
+        "tdc_oracle_load_invoked": False,
+        "resident_scores_loaded_from_verified_bytes": True,
+        "artifact_mutation_after_resident_load_affects_current_run": False,
+    }
+    if metric_inputs["sa_loading_policy"] != expected_loading_policy:
+        raise ReportValidationError(
+            f"{context}.sa_loading_policy is not the fail-closed pinned policy"
+        )
+    expected_affected_outputs = [
+        "raw_samples_csv.strict_sa",
+        "raw_samples_csv.released_sa",
+        "metrics.strict.quality",
+        "metrics.released_comparable.quality",
+    ]
+    if metric_inputs["affected_outputs"] != expected_affected_outputs:
+        raise ReportValidationError(
+            f"{context}.affected_outputs does not match the SA-dependent fields"
+        )
+    return metric_inputs
+
+
 def _validate_generation_protocol(
     protocol: Mapping[str, Any],
     sampling: Mapping[str, Any],
@@ -1338,6 +1500,7 @@ def _validate_summary_and_rows(
         "environment",
         "git",
         "implementation_inputs",
+        "metric_inputs",
         "tokenizer",
         "artifacts",
     }
@@ -1622,6 +1785,9 @@ def _validate_summary_and_rows(
     tokenizer = _validate_tokenizer_provenance(
         summary["tokenizer"], summary_path=summary_path
     )
+    metric_inputs = _validate_metric_inputs(
+        summary["metric_inputs"], summary_path=summary_path
+    )
     implementation_inputs = _mapping(
         summary["implementation_inputs"], f"{summary_path}: implementation_inputs"
     )
@@ -1693,6 +1859,7 @@ def _validate_summary_and_rows(
             name: dict(_mapping(value, f"implementation_inputs.{name}"))
             for name, value in implementation_inputs.items()
         },
+        "metric_inputs": metric_inputs,
     }
 
 
@@ -1751,6 +1918,11 @@ def _common_identity(runs: Sequence[Mapping[str, Any]]) -> tuple[dict[str, Any],
             raise ReportValidationError(
                 "direct implementation/data input fingerprints differ across seeds; "
                 "aggregation is forbidden"
+            )
+        if run["metric_inputs"] != first["metric_inputs"]:
+            raise ReportValidationError(
+                "metric-input artifact or TDC implementation fingerprints differ "
+                "across seeds; aggregation is forbidden"
             )
         if run["tokenizer"] != first["tokenizer"]:
             raise ReportValidationError(
@@ -1935,7 +2107,8 @@ def collect_report(runs_dir: Path) -> dict[str, Any]:
         "uniqueness": "first-occurrence unique valid molecules / valid_count, per seed.",
         "quality": (
             "first-occurrence unique valid molecules with QED >= 0.6 and SA <= 4.0 / "
-            "1,000 requested samples, per seed."
+            "1,000 requested samples, per seed. SA uses TDC Oracle('sa') with the "
+            f"pinned fragment-score artifact SHA-256 {SA_FRAGMENT_SCORES_SHA256}."
         ),
         "diversity": (
             "TDC Diversity on first-occurrence unique valid molecules; "
@@ -2049,6 +2222,12 @@ def collect_report(runs_dir: Path) -> dict[str, Any]:
             "This reporter does not assert that those hashes equal a pristine NVIDIA "
             "release checkout."
         ),
+        (
+            "Quality depends on the pinned TDC synthetic-accessibility fragment-score "
+            f"artifact ({SA_FRAGMENT_SCORES_RELATIVE_PATH.as_posix()}, SHA-256 "
+            f"{SA_FRAGMENT_SCORES_SHA256}). The benchmark loads verified resident bytes "
+            "and disables TDC's implicit downloader during scoring."
+        ),
     ]
 
     return {
@@ -2091,6 +2270,7 @@ def collect_report(runs_dir: Path) -> dict[str, Any]:
         },
         "runner_sha256": runs[0]["runner_sha256"],
         "implementation_inputs": runs[0]["implementation_inputs"],
+        "metric_inputs": runs[0]["metric_inputs"],
         "tokenizer": runs[0]["tokenizer"],
         "environment_consistency": {
             "shared_signature": runs[0]["environment_signature"],
@@ -2897,6 +3077,18 @@ def render_pdf(payload: Mapping[str, Any], pdf_path: Path) -> None:
             f"n=249,455; min/median/max=10/49/87; SHA-256 "
             f"{payload['implementation_inputs']['length_distribution']['sha256']}",
         ],
+        [
+            "SA fragment scores",
+            f"{payload['metric_inputs']['sa_fragment_scores']['relative_path']}; "
+            f"{payload['metric_inputs']['sa_fragment_scores']['size_bytes']:,} bytes; "
+            f"SHA-256 {payload['metric_inputs']['sa_fragment_scores']['sha256']}",
+        ],
+        [
+            "SA metric backend",
+            f"{payload['metric_inputs']['tdc_metric_implementation']['distribution']} "
+            f"{payload['metric_inputs']['tdc_metric_implementation']['version']}; "
+            "verified resident scores; network downloader disabled",
+        ],
     ]
     story.extend(
         [
@@ -3089,7 +3281,7 @@ def render_pdf(payload: Mapping[str, Any], pdf_path: Path) -> None:
                 "logical cuda:0 mapping; recorded GPU-selection method plus final launch "
                 "probes satisfying the exclusive utilization and minimum-free-memory policy, "
                 "with process inventories preserved; cross-seed dependency, tokenizer, "
-                "implementation, "
+                "implementation, pinned SA artifact, TDC metric-source, "
                 "checkpoint, effective-config, and runner identity; recomputed "
                 "strict/released validity, first-occurrence uniqueness, quality gates, "
                 "repair recovery, largest-component flags, failure counts, ratios, and "

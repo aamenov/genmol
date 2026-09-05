@@ -119,6 +119,7 @@ class ExpectedRunIdentity:
     effective_config_sha256: str
     benchmark_runner_sha256: str
     implementation_inputs: Mapping[str, Any]
+    metric_inputs: Mapping[str, Any]
     num_samples: int
     device: str = "cuda:0"
 
@@ -509,6 +510,9 @@ def _build_expected_run_identity(
 ) -> ExpectedRunIdentity:
     """Resolve and fingerprint the exact inputs passed to every child run."""
 
+    # Quality depends on this ignored binary artifact. Verify it before the
+    # checkpoint inspection and well before any GPU selection/model startup.
+    metric_inputs = benchmark_runner.metric_input_provenance()
     checkpoint_info = benchmark_runner.checkpoint_metadata(checkpoint)
     source_config = benchmark_runner.load_yaml_config(config)
     sampling_config = benchmark_runner.validate_sampling_config(source_config)
@@ -578,6 +582,7 @@ def _build_expected_run_identity(
         effective_config_sha256=_canonical_json_sha256(effective_config),
         benchmark_runner_sha256=_sha256_file(benchmark_runner_path),
         implementation_inputs=implementation_inputs,
+        metric_inputs=metric_inputs,
         num_samples=num_samples,
     )
 
@@ -827,6 +832,11 @@ def _completed(
         "implementation_inputs",
         summary.get("implementation_inputs"),
         expected.implementation_inputs,
+    )
+    expect(
+        "metric_inputs",
+        summary.get("metric_inputs"),
+        expected.metric_inputs,
     )
 
     artifacts = _mapping(summary.get("artifacts"))

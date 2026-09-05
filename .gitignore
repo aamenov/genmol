@@ -20,3 +20,10 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+
+# Local runtime artifacts. Ignoring them does not exempt metric-defining inputs:
+# benchmark code pins and fingerprints the TDC SA fragment scores before use.
+/.cache/
+/oracle/fpscores.pkl
+/output/
+/tmp/

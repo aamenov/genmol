@@ -98,3 +98,9 @@ requires a from-scratch UDLM run and an equal-extra-step MDLM continuation.
 Every run records Git SHA, source checkpoint/hash, seed, physical-to-logical GPU
 mapping, configuration, sample count, step count, wall time, raw generations,
 strict and repaired metrics, and deviations from the paper/released code.
+Quality additionally binds the ignored local `oracle/fpscores.pkl` input to
+SHA-256 `24a4392f5c673e79c0446af3c4d8e458293b5fecaa244328e76741ead9d21dbf`
+and PyTDC 0.4.1 source hashes. The runner loads those verified bytes directly
+into the resident TDC SA table and disables TDC's implicit downloader while
+scoring; missing, replaced, symlinked, or mismatched inputs fail before model
+startup.

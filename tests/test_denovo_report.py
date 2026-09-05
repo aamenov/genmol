@@ -231,6 +231,54 @@ class DenovoReportTests(unittest.TestCase):
                 "maximum": 87,
             },
         }
+        metric_inputs = {
+            "schema_version": report.METRIC_INPUT_SCHEMA_VERSION,
+            "sa_fragment_scores": {
+                "path": str(
+                    report.REPOSITORY_ROOT / report.SA_FRAGMENT_SCORES_RELATIVE_PATH
+                ),
+                "relative_path": report.SA_FRAGMENT_SCORES_RELATIVE_PATH.as_posix(),
+                "sha256": report.SA_FRAGMENT_SCORES_SHA256,
+                "size_bytes": report.SA_FRAGMENT_SCORES_SIZE_BYTES,
+                "serialization": "python_pickle_verified_before_deserialization",
+                "top_level_row_count": report.SA_FRAGMENT_SCORE_ROW_COUNT,
+                "fingerprint_score_count": report.SA_FINGERPRINT_SCORE_COUNT,
+                "duplicate_fingerprint_count": 0,
+            },
+            "tdc_metric_implementation": {
+                "distribution": "PyTDC",
+                "version": report.TDC_METRIC_DISTRIBUTION_VERSION,
+                "implementation_files": {
+                    name: {
+                        "path": str(
+                            report.REPOSITORY_ROOT
+                            / ".test-site-packages"
+                            / relative_path
+                        ),
+                        "sha256": report.TDC_METRIC_IMPLEMENTATION_SHA256[name],
+                        "size_bytes": report.TDC_METRIC_IMPLEMENTATION_SIZE_BYTES[
+                            name
+                        ],
+                    }
+                    for name, relative_path in report.TDC_METRIC_IMPLEMENTATION_PATHS.items()
+                },
+            },
+            "sa_loading_policy": {
+                "requested_oracle": "sa",
+                "oracle_class": "tdc.oracles.Oracle",
+                "sa_callable": "tdc.chem_utils.oracle.oracle.SA",
+                "network_download_allowed": False,
+                "tdc_oracle_load_invoked": False,
+                "resident_scores_loaded_from_verified_bytes": True,
+                "artifact_mutation_after_resident_load_affects_current_run": False,
+            },
+            "affected_outputs": [
+                "raw_samples_csv.strict_sa",
+                "raw_samples_csv.released_sa",
+                "metrics.strict.quality",
+                "metrics.released_comparable.quality",
+            ],
+        }
         run_command = [
             ".venv/bin/python",
             "scripts/exps/denovo/benchmark.py",
@@ -382,6 +430,7 @@ class DenovoReportTests(unittest.TestCase):
                 "runner_sha256": "5" * 64,
             },
             "implementation_inputs": implementation_inputs,
+            "metric_inputs": metric_inputs,
             "tokenizer": {
                 "requested_identifier": "datamol-io/safe-gpt",
                 "class": "transformers.PreTrainedTokenizerFast",
@@ -506,6 +555,49 @@ class DenovoReportTests(unittest.TestCase):
             self.assertEqual(funnel["strict_valid"], 2_730)
             self.assertEqual(funnel["released_recovered_strict_failure"], 267)
             self.assertIn("ddof=1", payload["metric_definitions"]["aggregation"])
+            self.assertEqual(
+                payload["metric_inputs"]["sa_fragment_scores"]["sha256"],
+                report.SA_FRAGMENT_SCORES_SHA256,
+            )
+            self.assertIn("pinned fragment-score", payload["metric_definitions"]["quality"])
+
+    def test_missing_or_wrong_sa_metric_provenance_is_rejected(self):
+        with self._workspace() as directory:
+            runs = Path(directory) / "runs"
+            self._three_runs(runs)
+            summary_path = runs / "seed_1" / "summary.json"
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            summary["metric_inputs"]["sa_fragment_scores"]["sha256"] = "0" * 64
+            summary_path.write_text(json.dumps(summary), encoding="utf-8")
+            with self.assertRaisesRegex(
+                report.ReportValidationError,
+                "expected pinned value",
+            ):
+                report.collect_report(runs)
+
+            del summary["metric_inputs"]
+            summary_path.write_text(json.dumps(summary), encoding="utf-8")
+            with self.assertRaisesRegex(
+                report.ReportValidationError,
+                "missing top-level field",
+            ):
+                report.collect_report(runs)
+
+    def test_unaudited_tdc_metric_source_is_rejected(self):
+        with self._workspace() as directory:
+            runs = Path(directory) / "runs"
+            self._three_runs(runs)
+            summary_path = runs / "seed_2" / "summary.json"
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            summary["metric_inputs"]["tdc_metric_implementation"][
+                "implementation_files"
+            ]["sa_qed_scoring"]["sha256"] = "0" * 64
+            summary_path.write_text(json.dumps(summary), encoding="utf-8")
+            with self.assertRaisesRegex(
+                report.ReportValidationError,
+                "audited SHA-256",
+            ):
+                report.collect_report(runs)
 
     def test_collect_supports_udlm_and_records_effective_nfe(self):
         with self._workspace() as directory:

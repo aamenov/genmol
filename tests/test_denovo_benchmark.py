@@ -1,12 +1,22 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
+import pickle
 from pathlib import Path
 
 import pytest
 
 from scripts.exps.denovo import benchmark
+
+
+def _tiny_sa_artifact(root: Path) -> tuple[Path, str, int]:
+    path = root / "oracle" / "fpscores.pkl"
+    path.parent.mkdir(parents=True)
+    payload = pickle.dumps([[1.25, 7, 9], [-0.5, 11]], protocol=4)
+    path.write_bytes(payload)
+    return path, hashlib.sha256(payload).hexdigest(), len(payload)
 
 
 def _score(values):
@@ -367,6 +377,113 @@ def test_implementation_inputs_include_length_distribution_statistics() -> None:
     lengths = inputs["length_distribution"]
     assert lengths["count"] > 0
     assert lengths["minimum"] <= lengths["median"] <= lengths["maximum"]
+
+
+def test_pinned_sa_artifact_loads_verified_bytes_without_tdc_download(
+    tmp_path: Path,
+) -> None:
+    path, digest, size = _tiny_sa_artifact(tmp_path)
+
+    snapshot = benchmark._load_pinned_sa_metric_input(
+        repository_root=tmp_path,
+        relative_path=Path("oracle/fpscores.pkl"),
+        expected_sha256=digest,
+        expected_size_bytes=size,
+        expected_row_count=2,
+        expected_fingerprint_count=3,
+        include_tdc_provenance=False,
+    )
+
+    assert snapshot.fragment_scores == {7: 1.25, 9: 1.25, 11: -0.5}
+    artifact = snapshot.provenance["sa_fragment_scores"]
+    assert artifact["path"] == str(path)
+    assert artifact["sha256"] == digest
+    assert snapshot.provenance["sa_loading_policy"]["network_download_allowed"] is False
+    assert snapshot.provenance["sa_loading_policy"]["tdc_oracle_load_invoked"] is False
+
+
+def test_pinned_sa_artifact_rejects_missing_symlink_nonregular_and_wrong_digest(
+    tmp_path: Path,
+) -> None:
+    relative = Path("oracle/fpscores.pkl")
+    common = {
+        "repository_root": tmp_path,
+        "relative_path": relative,
+        "expected_sha256": "0" * 64,
+        "expected_size_bytes": 1,
+    }
+    with pytest.raises(FileNotFoundError, match="implicit downloader"):
+        benchmark._read_pinned_regular_file(**common)
+
+    target = tmp_path / "target.pkl"
+    target.write_bytes(b"x")
+    (tmp_path / "oracle").mkdir()
+    (tmp_path / relative).symlink_to(target)
+    with pytest.raises(RuntimeError, match="symlink"):
+        benchmark._read_pinned_regular_file(**common)
+    (tmp_path / relative).unlink()
+    (tmp_path / relative).mkdir()
+    with pytest.raises(RuntimeError, match="regular file"):
+        benchmark._read_pinned_regular_file(**common)
+    (tmp_path / relative).rmdir()
+    (tmp_path / relative).write_bytes(b"x")
+    wrong_digest = {**common, "expected_sha256": "f" * 64}
+    with pytest.raises(RuntimeError, match="wrong SHA-256"):
+        benchmark._read_pinned_regular_file(**wrong_digest)
+
+
+def test_pinned_sa_artifact_rejects_mutation_while_descriptor_is_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path, digest, size = _tiny_sa_artifact(tmp_path)
+    real_read = benchmark.os.read
+    mutated = False
+
+    def mutating_read(descriptor: int, count: int) -> bytes:
+        nonlocal mutated
+        chunk = real_read(descriptor, count)
+        if chunk and not mutated:
+            mutated = True
+            path.write_bytes(path.read_bytes() + b"changed")
+        return chunk
+
+    monkeypatch.setattr(benchmark.os, "read", mutating_read)
+    with pytest.raises(RuntimeError, match="changed while being read"):
+        benchmark._read_pinned_regular_file(
+            repository_root=tmp_path,
+            relative_path=Path("oracle/fpscores.pkl"),
+            expected_sha256=digest,
+            expected_size_bytes=size,
+        )
+
+
+def test_tdc_sa_context_hydrates_scores_and_disables_both_download_hooks() -> None:
+    tdc = pytest.importorskip("tdc")
+    oracle_dispatch = pytest.importorskip("tdc.oracles")
+    scoring_module = pytest.importorskip("tdc.chem_utils.oracle.oracle")
+    provenance = {
+        "tdc_metric_implementation": benchmark._tdc_metric_implementation_provenance()
+    }
+    snapshot = benchmark.PinnedSAMetricInput(
+        provenance=provenance,
+        fragment_scores={7: 1.25},
+    )
+    previous_scores = scoring_module._fscores
+    previous_dispatch_loader = oracle_dispatch.oracle_load
+    previous_scoring_loader = scoring_module.oracle_load
+
+    with benchmark.pinned_tdc_sa_oracle(snapshot, tdc.Oracle) as oracle:
+        assert oracle.name == "sa"
+        assert scoring_module._fscores == {7: 1.25}
+        with pytest.raises(RuntimeError, match="downloading is disabled"):
+            oracle_dispatch.oracle_load("fpscores")
+        with pytest.raises(RuntimeError, match="downloading is disabled"):
+            scoring_module.oracle_load("fpscores")
+
+    assert scoring_module._fscores is previous_scores
+    assert oracle_dispatch.oracle_load is previous_dispatch_loader
+    assert scoring_module.oracle_load is previous_scoring_loader
 
 
 def test_runtime_generation_modules_match_recorded_paths_and_hashes() -> None:
