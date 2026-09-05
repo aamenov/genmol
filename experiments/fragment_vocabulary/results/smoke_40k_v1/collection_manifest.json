@@ -1,0 +1,1453 @@
+{
+  "collection_complete": true,
+  "collector": {
+    "path": "/home/aidar.alimbayev/Documents/genmolv2/scripts/exps/pmo/collect_ablation_results.py",
+    "sha256": "fc420bfbb875ffbfdbd19b660a3f9da01170343093261dbcb865d5fb6edb2935"
+  },
+  "created_at": "2026-09-05T15:22:53Z",
+  "experiment_id": "fragment_vocab_smoke_40k_v1",
+  "experiment_root": "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation/fragment_vocab_smoke_40k_v1",
+  "matrix": {
+    "expected_job_count": 6,
+    "expected_jobs": [
+      {
+        "oracle": "qed",
+        "seed": 0,
+        "variant": "delta"
+      },
+      {
+        "oracle": "qed",
+        "seed": 0,
+        "variant": "released"
+      },
+      {
+        "oracle": "qed",
+        "seed": 0,
+        "variant": "running_mean"
+      },
+      {
+        "oracle": "qed",
+        "seed": 0,
+        "variant": "running_mean_parent_control"
+      },
+      {
+        "oracle": "qed",
+        "seed": 0,
+        "variant": "shrink10"
+      },
+      {
+        "oracle": "qed",
+        "seed": 0,
+        "variant": "support3"
+      }
+    ],
+    "path": "/home/aidar.alimbayev/Documents/genmolv2/experiments/fragment_vocabulary/configs/smoke_40k.yaml",
+    "recorded_by_all_collected_runs": false,
+    "schema_version": 1,
+    "sha256": "28b66efd2f26b3438598fd85a1a2bbde27f8e46f1c75086e1dea4c8201067758"
+  },
+  "missing_jobs": [],
+  "results_csv": {
+    "columns": [
+      "experiment_id",
+      "run_id",
+      "oracle",
+      "variant",
+      "seed",
+      "summary_schema_version",
+      "status",
+      "oracle_budget",
+      "all_oracle_calls",
+      "charged_child_count",
+      "child_views",
+      "events",
+      "iterations_completed",
+      "elapsed_seconds",
+      "reporting_frequency",
+      "all_top_1",
+      "all_top_10",
+      "all_top_100",
+      "all_auc_top_1",
+      "all_auc_top_10",
+      "all_auc_top_100",
+      "child_total_score_count",
+      "child_total_axis_budget",
+      "child_total_top_1",
+      "child_total_top_10",
+      "child_total_top_100",
+      "child_total_auc_top_1",
+      "child_total_auc_top_10",
+      "child_total_auc_top_100",
+      "child_count_score_count",
+      "child_count_axis_budget",
+      "child_count_top_1",
+      "child_count_top_10",
+      "child_count_top_100",
+      "child_count_auc_top_1",
+      "child_count_auc_top_10",
+      "child_count_auc_top_100",
+      "child_legacy_score_count",
+      "child_legacy_axis_budget",
+      "child_legacy_top_1",
+      "child_legacy_top_10",
+      "child_legacy_top_100",
+      "child_legacy_auc_top_1",
+      "child_legacy_auc_top_10",
+      "child_legacy_auc_top_100",
+      "population_size",
+      "warmup",
+      "gamma",
+      "softmax_temp",
+      "randomness",
+      "guidance_scale",
+      "min_mol_size",
+      "max_mol_size",
+      "max_iterations",
+      "checkpoint_every",
+      "policy_mode",
+      "min_support",
+      "parent_control",
+      "prior_mean",
+      "prior_strength",
+      "prior_mean_source",
+      "delta_attribution",
+      "legacy_seed_count",
+      "legacy_warmup_off_by_one",
+      "durable_events",
+      "population_sampling_order",
+      "config_sha256",
+      "model_path",
+      "model_sha256",
+      "vocabulary_path",
+      "vocabulary_sha256",
+      "scientific_status",
+      "git_commit",
+      "git_branch",
+      "git_dirty",
+      "tracked_diff_sha256",
+      "hostname",
+      "python_version",
+      "cuda_visible_devices",
+      "gpu_name",
+      "gpu_logical_index",
+      "torch_version",
+      "rdkit_version",
+      "resume_count",
+      "launch_attempt_count",
+      "launch_history_complete",
+      "launch_policy_complete",
+      "launch_matrix_provenance_complete",
+      "launch_provenance_complete",
+      "launch_gpu_migrated",
+      "launch_any_gpu_sharing",
+      "launch_wall_time_comparable",
+      "durable_events_provenance_complete",
+      "timing_provenance_complete",
+      "launch_first_time_unix",
+      "launch_last_time_unix",
+      "launch_gpu_uuids",
+      "launch_command_sha256s",
+      "launch_logs",
+      "source_manifest_sha256",
+      "source_summary_sha256",
+      "source_events_sha256",
+      "source_checkpoint_sha256"
+    ],
+    "immutable": true,
+    "path": "results.e801010c8912ad06d9df78d5bb10d3fff709459855a7c1670b692c22cac3e029.csv",
+    "sha256": "e801010c8912ad06d9df78d5bb10d3fff709459855a7c1670b692c22cac3e029"
+  },
+  "run_count": 6,
+  "runs": [
+    {
+      "charged_child_count": 107,
+      "config": {
+        "checkpoint_every": 20,
+        "delta_attribution": "novel_vs_parent",
+        "device": "cuda:0",
+        "experiment_id": "fragment_vocab_smoke_40k_v1",
+        "gamma": 0.0,
+        "guidance_scale": 2.0,
+        "legacy_seed_count": 1,
+        "legacy_warmup_off_by_one": true,
+        "max_iterations": 2000,
+        "max_mol_size": 30,
+        "max_oracle_calls": 200,
+        "min_mol_size": 10,
+        "min_support": 1,
+        "model_path": "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/40000.ckpt",
+        "oracle": "qed",
+        "parent_control": true,
+        "policy_mode": "delta",
+        "population_size": 100,
+        "prior_mean": null,
+        "prior_mean_source": null,
+        "prior_strength": 0.0,
+        "randomness": 2.0,
+        "released_duplicate_policy": "repeat cached-child decomposition, matching release",
+        "reporting_frequency": 20,
+        "scientific_status": "Engineering smoke test using a preliminary 40k checkpoint, one seed, a shortened warmup, and a 200-call budget. Not comparable with the paper.",
+        "seed": 0,
+        "softmax_temp": 1.2,
+        "statistical_duplicate_policy": "one update per unique canonical child",
+        "variant": "delta",
+        "vocab_path": "/home/aidar.alimbayev/Documents/genmolv2/scripts/exps/pmo/vocab/qed.csv",
+        "warmup": 20
+      },
+      "elapsed_seconds": 20.315612446982414,
+      "events": 116,
+      "identity": {
+        "experiment_id": "fragment_vocab_smoke_40k_v1",
+        "oracle": "qed",
+        "run_id": "fragment_vocab_smoke_40k_v1:qed:delta:seed0",
+        "seed": 0,
+        "variant": "delta"
+      },
+      "iterations_completed": 116,
+      "launch": {
+        "any_gpu_sharing": true,
+        "attempt_count": 1,
+        "attempts": [
+          {
+            "command_sha256": "2f570a5b00bdd493846b5f9210dd907a8ed4a2a8071f3c7d6cd92a6be5c2a31a",
+            "line_number": 1,
+            "matrix_provenance_complete": false,
+            "path": "/home/aidar.alimbayev/Documents/genmolv2/output/logs/pmo_fragment_vocab_smoke_40k_v1__qed__delta__seed0.log",
+            "policy_complete": false,
+            "record": {
+              "command": [
+                "/home/aidar.alimbayev/Documents/genmolv2/.venv/bin/python",
+                "/home/aidar.alimbayev/Documents/genmolv2/scripts/exps/pmo/run_ablation.py",
+                "--oracle",
+                "qed",
+                "--variant",
+                "delta",
+                "--seed",
+                "0",
+                "--model-path",
+                "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/40000.ckpt",
+                "--device",
+                "cuda:0",
+                "--experiment-id",
+                "fragment_vocab_smoke_40k_v1",
+                "--scientific-status",
+                "Engineering smoke test using a preliminary 40k checkpoint, one seed, a shortened warmup, and a 200-call budget. Not comparable with the paper.",
+                "--output-root",
+                "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation",
+                "--max-oracle-calls",
+                "200",
+                "--reporting-frequency",
+                "20",
+                "--checkpoint-every",
+                "20",
+                "--max-iterations",
+                "2000",
+                "--population-size",
+                "100",
+                "--warmup",
+                "20",
+                "--softmax-temp",
+                "1.2",
+                "--randomness",
+                "2.0",
+                "--guidance-scale",
+                "2.0",
+                "--legacy-seed-count",
+                "1",
+                "--delta-attribution",
+                "novel_vs_parent",
+                "--legacy-warmup-off-by-one",
+                "--durable-events",
+                "--gamma",
+                "0.0"
+              ],
+              "compute_processes": [
+                {
+                  "gpu_uuid": "GPU-2cd1aa5b-616e-e6d3-b54d-49241cc8f959",
+                  "pid": 1222689,
+                  "process_name": "/home/meir.roketlishvili/miniconda3/envs/SGPO_repro/bin/python",
+                  "used_memory_mib": 4424
+                }
+              ],
+              "event": "launch",
+              "job": "qed__delta__seed0",
+              "physical_gpu": {
+                "index": 3,
+                "memory_total_mib": 49140,
+                "memory_used_mib": 4447,
+                "utilization_percent": 8,
+                "uuid": "GPU-2cd1aa5b-616e-e6d3-b54d-49241cc8f959"
+              },
+              "time_unix": 1788616427.9705548
+            }
+          }
+        ],
+        "durable_events_config_complete": false,
+        "gpu_migrated": false,
+        "history_complete": true,
+        "initial_attempt_ordinal": 1,
+        "matrix_provenance_complete": false,
+        "policy_complete": false,
+        "pre_initial_attempt_count": 0,
+        "provenance_complete": false,
+        "sources": [
+          {
+            "path": "/home/aidar.alimbayev/Documents/genmolv2/output/logs/pmo_fragment_vocab_smoke_40k_v1__qed__delta__seed0.log",
+            "sha256": "a6c5369290eeddf6217bf17cd5200f7f94d4e5605bd47138b9784c4af840b934"
+          }
+        ],
+        "wall_time_comparable": null
+      },
+      "metrics": {
+        "all_charged_molecules": {
+          "auc_top_1": 0.8906015193500041,
+          "auc_top_10": 0.8576749532130162,
+          "auc_top_100": 0.7300669874910858,
+          "axis": null,
+          "axis_budget": 200,
+          "reporting_frequency": 20,
+          "score_count": 200,
+          "semantics": "all charged molecules on the total oracle-call axis",
+          "source_key": "all_charged_molecules",
+          "top_1": 0.9460117601176269,
+          "top_10": 0.9380684380863421,
+          "top_100": 0.8342674211457063
+        },
+        "charged_children_only": {
+          "auc_top_1": 0.8912803774113689,
+          "auc_top_10": 0.8618777856567121,
+          "auc_top_100": 0.7252256634829379,
+          "axis": null,
+          "axis_budget": 200,
+          "reporting_frequency": 20,
+          "score_count": 107,
+          "semantics": "legacy dense child curve padded over the total budget; AUC is not globally aligned",
+          "source_key": "charged_children_only",
+          "top_1": 0.944711333157095,
+          "top_10": 0.927354319233584,
+          "top_100": 0.7675125857909338
+        }
+      },
+      "oracle_budget": 200,
+      "provenance": {
+        "config_sha256": "c6997983c43bd0c03ca8cfdbdbf197292cf207fbc0cc4d766dae40c79df7e4d2",
+        "cuda_visible_devices": "3",
+        "durable_events_provenance_complete": false,
+        "git_branch": "codex/fragment-vocab-ablation",
+        "git_commit": "3d8a7c278fa3292c1fe60ed0d0a9f889f5ffc26d",
+        "git_dirty": true,
+        "gpu_logical_index": 0,
+        "gpu_name": "NVIDIA RTX A6000",
+        "hostname": "srv-01",
+        "model_path": "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/40000.ckpt",
+        "model_sha256": "2c153c347a749c671661d7d4d8f04d4bf8857a4a6d0fef87cceab40d2785f88e",
+        "python_version": "3.10.21",
+        "rdkit_version": "2023.09.6",
+        "resume_count": 0,
+        "scientific_status": "Engineering smoke test using a preliminary 40k checkpoint, one seed, a shortened warmup, and a 200-call budget. Not comparable with the paper.",
+        "timing_provenance_complete": false,
+        "torch_version": "2.6.0+cu124",
+        "tracked_diff_sha256": "313b89197e785e111213bf8044a34b5ac64c5b2a9342493b7a8179b3eaf2a5f9",
+        "vocabulary_path": "/home/aidar.alimbayev/Documents/genmolv2/scripts/exps/pmo/vocab/qed.csv",
+        "vocabulary_sha256": "6b98420f3fa88835e50cb28b960225dc6c7857a29f3057fb1ca22b4211c1806c"
+      },
+      "run_dir": "qed/delta/seed_0",
+      "sources": {
+        "checkpoint": {
+          "path": "qed/delta/seed_0/state/latest.pkl",
+          "sha256": "7eb947ff0f15a1e4f21667b37ac706ba16712e5b843ad73dcbfee86701d2c2ab"
+        },
+        "events": {
+          "path": "qed/delta/seed_0/events.jsonl",
+          "sha256": "1135c2fb57c8ab211dc5e13bd56fa4653d943f136f974d3dc6df252ebb9c553e"
+        },
+        "manifest": {
+          "path": "qed/delta/seed_0/manifest.json",
+          "sha256": "a5cd2e0056be2d0c306fdc50857cdb205795ed316825320acfe27b5cbb3ad600"
+        },
+        "summary": {
+          "path": "qed/delta/seed_0/summary.json",
+          "sha256": "78e04540773e6520f9053bb27076ba4a0fac37eef76c572010bcb7fc89b7f266"
+        }
+      },
+      "status": "completed",
+      "summary_schema_version": 1
+    },
+    {
+      "charged_child_count": 200,
+      "config": {
+        "checkpoint_every": 20,
+        "delta_attribution": "novel_vs_parent",
+        "device": "cuda:0",
+        "experiment_id": "fragment_vocab_smoke_40k_v1",
+        "gamma": 0.0,
+        "guidance_scale": 2.0,
+        "legacy_seed_count": 1,
+        "legacy_warmup_off_by_one": true,
+        "max_iterations": 2000,
+        "max_mol_size": 30,
+        "max_oracle_calls": 200,
+        "min_mol_size": 10,
+        "min_support": 1,
+        "model_path": "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/40000.ckpt",
+        "oracle": "qed",
+        "parent_control": false,
+        "policy_mode": "released",
+        "population_size": 100,
+        "prior_mean": null,
+        "prior_mean_source": null,
+        "prior_strength": 0.0,
+        "randomness": 2.0,
+        "released_duplicate_policy": "repeat cached-child decomposition, matching release",
+        "reporting_frequency": 20,
+        "scientific_status": "Engineering smoke test using a preliminary 40k checkpoint, one seed, a shortened warmup, and a 200-call budget. Not comparable with the paper.",
+        "seed": 0,
+        "softmax_temp": 1.2,
+        "statistical_duplicate_policy": "one update per unique canonical child",
+        "variant": "released",
+        "vocab_path": "/home/aidar.alimbayev/Documents/genmolv2/scripts/exps/pmo/vocab/qed.csv",
+        "warmup": 20
+      },
+      "elapsed_seconds": 53.85997217899421,
+      "events": 200,
+      "identity": {
+        "experiment_id": "fragment_vocab_smoke_40k_v1",
+        "oracle": "qed",
+        "run_id": "fragment_vocab_smoke_40k_v1:qed:released:seed0",
+        "seed": 0,
+        "variant": "released"
+      },
+      "iterations_completed": 200,
+      "launch": {
+        "any_gpu_sharing": true,
+        "attempt_count": 1,
+        "attempts": [
+          {
+            "command_sha256": "10fd27f64ae5905ee741e8a40529128389fe020fdc7623e7aafef2c0cd2b1032",
+            "line_number": 1,
+            "matrix_provenance_complete": false,
+            "path": "/home/aidar.alimbayev/Documents/genmolv2/output/logs/pmo_fragment_vocab_smoke_40k_v1__qed__released__seed0.log",
+            "policy_complete": false,
+            "record": {
+              "command": [
+                "/home/aidar.alimbayev/Documents/genmolv2/.venv/bin/python",
+                "/home/aidar.alimbayev/Documents/genmolv2/scripts/exps/pmo/run_ablation.py",
+                "--oracle",
+                "qed",
+                "--variant",
+                "released",
+                "--seed",
+                "0",
+                "--model-path",
+                "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/40000.ckpt",
+                "--device",
+                "cuda:0",
+                "--experiment-id",
+                "fragment_vocab_smoke_40k_v1",
+                "--scientific-status",
+                "Engineering smoke test using a preliminary 40k checkpoint, one seed, a shortened warmup, and a 200-call budget. Not comparable with the paper.",
+                "--output-root",
+                "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation",
+                "--max-oracle-calls",
+                "200",
+                "--reporting-frequency",
+                "20",
+                "--checkpoint-every",
+                "20",
+                "--max-iterations",
+                "2000",
+                "--population-size",
+                "100",
+                "--warmup",
+                "20",
+                "--softmax-temp",
+                "1.2",
+                "--randomness",
+                "2.0",
+                "--guidance-scale",
+                "2.0",
+                "--legacy-seed-count",
+                "1",
+                "--delta-attribution",
+                "novel_vs_parent",
+                "--legacy-warmup-off-by-one",
+                "--durable-events",
+                "--gamma",
+                "0.0"
+              ],
+              "compute_processes": [
+                {
+                  "gpu_uuid": "GPU-2cd1aa5b-616e-e6d3-b54d-49241cc8f959",
+                  "pid": 1222689,
+                  "process_name": "/home/meir.roketlishvili/miniconda3/envs/SGPO_repro/bin/python",
+                  "used_memory_mib": 4424
+                }
+              ],
+              "event": "launch",
+              "job": "qed__released__seed0",
+              "physical_gpu": {
+                "index": 3,
+                "memory_total_mib": 49140,
+                "memory_used_mib": 4447,
+                "utilization_percent": 7,
+                "uuid": "GPU-2cd1aa5b-616e-e6d3-b54d-49241cc8f959"
+              },
+              "time_unix": 1788616092.1513858
+            }
+          }
+        ],
+        "durable_events_config_complete": false,
+        "gpu_migrated": false,
+        "history_complete": true,
+        "initial_attempt_ordinal": 1,
+        "matrix_provenance_complete": false,
+        "policy_complete": false,
+        "pre_initial_attempt_count": 0,
+        "provenance_complete": false,
+        "sources": [
+          {
+            "path": "/home/aidar.alimbayev/Documents/genmolv2/output/logs/pmo_fragment_vocab_smoke_40k_v1__qed__released__seed0.log",
+            "sha256": "619b66347ca2afcc4a5c0c71beb2bf030e60b7d117b96cbf7761ef0589b6d4ae"
+          }
+        ],
+        "wall_time_comparable": null
+      },
+      "metrics": {
+        "all_charged_molecules": {
+          "auc_top_1": 0.8929448767255646,
+          "auc_top_10": 0.8748269368237872,
+          "auc_top_100": 0.7720003400295653,
+          "axis": null,
+          "axis_budget": 200,
+          "reporting_frequency": 20,
+          "score_count": 200,
+          "semantics": "all charged molecules on the total oracle-call axis",
+          "source_key": "all_charged_molecules",
+          "top_1": 0.947784650947615,
+          "top_10": 0.9422878820905067,
+          "top_100": 0.8673166504133785
+        },
+        "charged_children_only": {
+          "auc_top_1": 0.8929448767255646,
+          "auc_top_10": 0.8748269368237872,
+          "auc_top_100": 0.7720003400295653,
+          "axis": null,
+          "axis_budget": 200,
+          "reporting_frequency": 20,
+          "score_count": 200,
+          "semantics": "legacy dense child curve padded over the total budget; AUC is not globally aligned",
+          "source_key": "charged_children_only",
+          "top_1": 0.947784650947615,
+          "top_10": 0.9422878820905067,
+          "top_100": 0.8673166504133785
+        }
+      },
+      "oracle_budget": 200,
+      "provenance": {
+        "config_sha256": "215f74b4752307ced50545ef1efad04643cc04036a62754eb66c4547211371fd",
+        "cuda_visible_devices": "3",
+        "durable_events_provenance_complete": false,
+        "git_branch": "codex/fragment-vocab-ablation",
+        "git_commit": "3d8a7c278fa3292c1fe60ed0d0a9f889f5ffc26d",
+        "git_dirty": true,
+        "gpu_logical_index": 0,
+        "gpu_name": "NVIDIA RTX A6000",
+        "hostname": "srv-01",
+        "model_path": "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/40000.ckpt",
+        "model_sha256": "2c153c347a749c671661d7d4d8f04d4bf8857a4a6d0fef87cceab40d2785f88e",
+        "python_version": "3.10.21",
+        "rdkit_version": "2023.09.6",
+        "resume_count": 0,
+        "scientific_status": "Engineering smoke test using a preliminary 40k checkpoint, one seed, a shortened warmup, and a 200-call budget. Not comparable with the paper.",
+        "timing_provenance_complete": true,
+        "torch_version": "2.6.0+cu124",
+        "tracked_diff_sha256": "313b89197e785e111213bf8044a34b5ac64c5b2a9342493b7a8179b3eaf2a5f9",
+        "vocabulary_path": "/home/aidar.alimbayev/Documents/genmolv2/scripts/exps/pmo/vocab/qed.csv",
+        "vocabulary_sha256": "6b98420f3fa88835e50cb28b960225dc6c7857a29f3057fb1ca22b4211c1806c"
+      },
+      "run_dir": "qed/released/seed_0",
+      "sources": {
+        "checkpoint": {
+          "path": "qed/released/seed_0/state/latest.pkl",
+          "sha256": "73243d60ecf62d4d14c0905e74decfe9a6cac8da0d88a2aa7d4ce7dd309354b9"
+        },
+        "events": {
+          "path": "qed/released/seed_0/events.jsonl",
+          "sha256": "ebe1da86b69c7bce121f7e50efb630110df4d413ea5e8b3e17704a2cccc1a7ff"
+        },
+        "manifest": {
+          "path": "qed/released/seed_0/manifest.json",
+          "sha256": "0586db976a9527f8f0d430fd2a4bbc7d4baede1a9d5b0f825c0a9da6638b00ef"
+        },
+        "summary": {
+          "path": "qed/released/seed_0/summary.json",
+          "sha256": "1c1fbe5b29553bf5122125c1017bd74b2430430eb077136e73b20759af2f8954"
+        }
+      },
+      "status": "completed",
+      "summary_schema_version": 1
+    },
+    {
+      "charged_child_count": 200,
+      "config": {
+        "checkpoint_every": 20,
+        "delta_attribution": "novel_vs_parent",
+        "device": "cuda:0",
+        "experiment_id": "fragment_vocab_smoke_40k_v1",
+        "gamma": 0.0,
+        "guidance_scale": 2.0,
+        "legacy_seed_count": 1,
+        "legacy_warmup_off_by_one": true,
+        "max_iterations": 2000,
+        "max_mol_size": 30,
+        "max_oracle_calls": 200,
+        "min_mol_size": 10,
+        "min_support": 1,
+        "model_path": "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/40000.ckpt",
+        "oracle": "qed",
+        "parent_control": false,
+        "policy_mode": "mean",
+        "population_size": 100,
+        "prior_mean": null,
+        "prior_mean_source": null,
+        "prior_strength": 0.0,
+        "randomness": 2.0,
+        "released_duplicate_policy": "repeat cached-child decomposition, matching release",
+        "reporting_frequency": 20,
+        "scientific_status": "Engineering smoke test using a preliminary 40k checkpoint, one seed, a shortened warmup, and a 200-call budget. Not comparable with the paper.",
+        "seed": 0,
+        "softmax_temp": 1.2,
+        "statistical_duplicate_policy": "one update per unique canonical child",
+        "variant": "running_mean",
+        "vocab_path": "/home/aidar.alimbayev/Documents/genmolv2/scripts/exps/pmo/vocab/qed.csv",
+        "warmup": 20
+      },
+      "elapsed_seconds": 40.873283615976106,
+      "events": 202,
+      "identity": {
+        "experiment_id": "fragment_vocab_smoke_40k_v1",
+        "oracle": "qed",
+        "run_id": "fragment_vocab_smoke_40k_v1:qed:running_mean:seed0",
+        "seed": 0,
+        "variant": "running_mean"
+      },
+      "iterations_completed": 202,
+      "launch": {
+        "any_gpu_sharing": true,
+        "attempt_count": 1,
+        "attempts": [
+          {
+            "command_sha256": "1bb2293da0cc147c3700a828003757fdb426556e5f5f8f909da362af02a6d0a6",
+            "line_number": 1,
+            "matrix_provenance_complete": false,
+            "path": "/home/aidar.alimbayev/Documents/genmolv2/output/logs/pmo_fragment_vocab_smoke_40k_v1__qed__running_mean__seed0.log",
+            "policy_complete": false,
+            "record": {
+              "command": [
+                "/home/aidar.alimbayev/Documents/genmolv2/.venv/bin/python",
+                "/home/aidar.alimbayev/Documents/genmolv2/scripts/exps/pmo/run_ablation.py",
+                "--oracle",
+                "qed",
+                "--variant",
+                "running_mean",
+                "--seed",
+                "0",
+                "--model-path",
+                "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/40000.ckpt",
+                "--device",
+                "cuda:0",
+                "--experiment-id",
+                "fragment_vocab_smoke_40k_v1",
+                "--scientific-status",
+                "Engineering smoke test using a preliminary 40k checkpoint, one seed, a shortened warmup, and a 200-call budget. Not comparable with the paper.",
+                "--output-root",
+                "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation",
+                "--max-oracle-calls",
+                "200",
+                "--reporting-frequency",
+                "20",
+                "--checkpoint-every",
+                "20",
+                "--max-iterations",
+                "2000",
+                "--population-size",
+                "100",
+                "--warmup",
+                "20",
+                "--softmax-temp",
+                "1.2",
+                "--randomness",
+                "2.0",
+                "--guidance-scale",
+                "2.0",
+                "--legacy-seed-count",
+                "1",
+                "--delta-attribution",
+                "novel_vs_parent",
+                "--legacy-warmup-off-by-one",
+                "--durable-events",
+                "--gamma",
+                "0.0"
+              ],
+              "compute_processes": [
+                {
+                  "gpu_uuid": "GPU-2cd1aa5b-616e-e6d3-b54d-49241cc8f959",
+                  "pid": 1222689,
+                  "process_name": "/home/meir.roketlishvili/miniconda3/envs/SGPO_repro/bin/python",
+                  "used_memory_mib": 4424
+                }
+              ],
+              "event": "launch",
+              "job": "qed__running_mean__seed0",
+              "physical_gpu": {
+                "index": 3,
+                "memory_total_mib": 49140,
+                "memory_used_mib": 4447,
+                "utilization_percent": 6,
+                "uuid": "GPU-2cd1aa5b-616e-e6d3-b54d-49241cc8f959"
+              },
+              "time_unix": 1788616173.4909267
+            }
+          }
+        ],
+        "durable_events_config_complete": false,
+        "gpu_migrated": false,
+        "history_complete": true,
+        "initial_attempt_ordinal": 1,
+        "matrix_provenance_complete": false,
+        "policy_complete": false,
+        "pre_initial_attempt_count": 0,
+        "provenance_complete": false,
+        "sources": [
+          {
+            "path": "/home/aidar.alimbayev/Documents/genmolv2/output/logs/pmo_fragment_vocab_smoke_40k_v1__qed__running_mean__seed0.log",
+            "sha256": "512575f5029f59454317a13f1baf78f000db54d1543e307a1bcd826fcad43795"
+          }
+        ],
+        "wall_time_comparable": null
+      },
+      "metrics": {
+        "all_charged_molecules": {
+          "auc_top_1": 0.8922154089116507,
+          "auc_top_10": 0.8688516884109719,
+          "auc_top_100": 0.7610665923187112,
+          "axis": null,
+          "axis_budget": 200,
+          "reporting_frequency": 20,
+          "score_count": 200,
+          "semantics": "all charged molecules on the total oracle-call axis",
+          "source_key": "all_charged_molecules",
+          "top_1": 0.944711333157095,
+          "top_10": 0.9422281458218494,
+          "top_100": 0.8741824979538337
+        },
+        "charged_children_only": {
+          "auc_top_1": 0.8922154089116507,
+          "auc_top_10": 0.8688516884109719,
+          "auc_top_100": 0.7610665923187112,
+          "axis": null,
+          "axis_budget": 200,
+          "reporting_frequency": 20,
+          "score_count": 200,
+          "semantics": "legacy dense child curve padded over the total budget; AUC is not globally aligned",
+          "source_key": "charged_children_only",
+          "top_1": 0.944711333157095,
+          "top_10": 0.9422281458218494,
+          "top_100": 0.8741824979538337
+        }
+      },
+      "oracle_budget": 200,
+      "provenance": {
+        "config_sha256": "c46b6b54e5301fa8c7c810d6f5593c3e238f78bf1d5e727d699df23c09c0586d",
+        "cuda_visible_devices": "3",
+        "durable_events_provenance_complete": false,
+        "git_branch": "codex/fragment-vocab-ablation",
+        "git_commit": "3d8a7c278fa3292c1fe60ed0d0a9f889f5ffc26d",
+        "git_dirty": true,
+        "gpu_logical_index": 0,
+        "gpu_name": "NVIDIA RTX A6000",
+        "hostname": "srv-01",
+        "model_path": "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/40000.ckpt",
+        "model_sha256": "2c153c347a749c671661d7d4d8f04d4bf8857a4a6d0fef87cceab40d2785f88e",
+        "python_version": "3.10.21",
+        "rdkit_version": "2023.09.6",
+        "resume_count": 0,
+        "scientific_status": "Engineering smoke test using a preliminary 40k checkpoint, one seed, a shortened warmup, and a 200-call budget. Not comparable with the paper.",
+        "timing_provenance_complete": true,
+        "torch_version": "2.6.0+cu124",
+        "tracked_diff_sha256": "313b89197e785e111213bf8044a34b5ac64c5b2a9342493b7a8179b3eaf2a5f9",
+        "vocabulary_path": "/home/aidar.alimbayev/Documents/genmolv2/scripts/exps/pmo/vocab/qed.csv",
+        "vocabulary_sha256": "6b98420f3fa88835e50cb28b960225dc6c7857a29f3057fb1ca22b4211c1806c"
+      },
+      "run_dir": "qed/running_mean/seed_0",
+      "sources": {
+        "checkpoint": {
+          "path": "qed/running_mean/seed_0/state/latest.pkl",
+          "sha256": "a00ec1a5aeb4091f87db8969bfa445eab09a675bcace6b0f3a4810d69048935a"
+        },
+        "events": {
+          "path": "qed/running_mean/seed_0/events.jsonl",
+          "sha256": "e33b9fb8da07ef54f0285d4f7545037362144b96f66635f328ef5f0775e259e4"
+        },
+        "manifest": {
+          "path": "qed/running_mean/seed_0/manifest.json",
+          "sha256": "eaada5e0f8dd26d4a4443a3e1d2a85ec47445e85173a7f3b56963a11ff176792"
+        },
+        "summary": {
+          "path": "qed/running_mean/seed_0/summary.json",
+          "sha256": "f01a8f5ef0b777946e7fec08d120a42e6aca6222b72388c8a4f10664193648d7"
+        }
+      },
+      "status": "completed",
+      "summary_schema_version": 1
+    },
+    {
+      "charged_child_count": 109,
+      "config": {
+        "checkpoint_every": 20,
+        "delta_attribution": "novel_vs_parent",
+        "device": "cuda:0",
+        "experiment_id": "fragment_vocab_smoke_40k_v1",
+        "gamma": 0.0,
+        "guidance_scale": 2.0,
+        "legacy_seed_count": 1,
+        "legacy_warmup_off_by_one": true,
+        "max_iterations": 2000,
+        "max_mol_size": 30,
+        "max_oracle_calls": 200,
+        "min_mol_size": 10,
+        "min_support": 1,
+        "model_path": "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/40000.ckpt",
+        "oracle": "qed",
+        "parent_control": true,
+        "policy_mode": "mean",
+        "population_size": 100,
+        "prior_mean": null,
+        "prior_mean_source": null,
+        "prior_strength": 0.0,
+        "randomness": 2.0,
+        "released_duplicate_policy": "repeat cached-child decomposition, matching release",
+        "reporting_frequency": 20,
+        "scientific_status": "Engineering smoke test using a preliminary 40k checkpoint, one seed, a shortened warmup, and a 200-call budget. Not comparable with the paper.",
+        "seed": 0,
+        "softmax_temp": 1.2,
+        "statistical_duplicate_policy": "one update per unique canonical child",
+        "variant": "running_mean_parent_control",
+        "vocab_path": "/home/aidar.alimbayev/Documents/genmolv2/scripts/exps/pmo/vocab/qed.csv",
+        "warmup": 20
+      },
+      "elapsed_seconds": 21.655978484021034,
+      "events": 113,
+      "identity": {
+        "experiment_id": "fragment_vocab_smoke_40k_v1",
+        "oracle": "qed",
+        "run_id": "fragment_vocab_smoke_40k_v1:qed:running_mean_parent_control:seed0",
+        "seed": 0,
+        "variant": "running_mean_parent_control"
+      },
+      "iterations_completed": 113,
+      "launch": {
+        "any_gpu_sharing": true,
+        "attempt_count": 1,
+        "attempts": [
+          {
+            "command_sha256": "90f854fdbb3e05263699018196cf98f34bdaa8ac6c4a7033a8f128d168edaffa",
+            "line_number": 1,
+            "matrix_provenance_complete": false,
+            "path": "/home/aidar.alimbayev/Documents/genmolv2/output/logs/pmo_fragment_vocab_smoke_40k_v1__qed__running_mean_parent_control__seed0.log",
+            "policy_complete": false,
+            "record": {
+              "command": [
+                "/home/aidar.alimbayev/Documents/genmolv2/.venv/bin/python",
+                "/home/aidar.alimbayev/Documents/genmolv2/scripts/exps/pmo/run_ablation.py",
+                "--oracle",
+                "qed",
+                "--variant",
+                "running_mean_parent_control",
+                "--seed",
+                "0",
+                "--model-path",
+                "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/40000.ckpt",
+                "--device",
+                "cuda:0",
+                "--experiment-id",
+                "fragment_vocab_smoke_40k_v1",
+                "--scientific-status",
+                "Engineering smoke test using a preliminary 40k checkpoint, one seed, a shortened warmup, and a 200-call budget. Not comparable with the paper.",
+                "--output-root",
+                "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation",
+                "--max-oracle-calls",
+                "200",
+                "--reporting-frequency",
+                "20",
+                "--checkpoint-every",
+                "20",
+                "--max-iterations",
+                "2000",
+                "--population-size",
+                "100",
+                "--warmup",
+                "20",
+                "--softmax-temp",
+                "1.2",
+                "--randomness",
+                "2.0",
+                "--guidance-scale",
+                "2.0",
+                "--legacy-seed-count",
+                "1",
+                "--delta-attribution",
+                "novel_vs_parent",
+                "--legacy-warmup-off-by-one",
+                "--durable-events",
+                "--gamma",
+                "0.0"
+              ],
+              "compute_processes": [
+                {
+                  "gpu_uuid": "GPU-2cd1aa5b-616e-e6d3-b54d-49241cc8f959",
+                  "pid": 1222689,
+                  "process_name": "/home/meir.roketlishvili/miniconda3/envs/SGPO_repro/bin/python",
+                  "used_memory_mib": 4424
+                }
+              ],
+              "event": "launch",
+              "job": "qed__running_mean_parent_control__seed0",
+              "physical_gpu": {
+                "index": 3,
+                "memory_total_mib": 49140,
+                "memory_used_mib": 4447,
+                "utilization_percent": 8,
+                "uuid": "GPU-2cd1aa5b-616e-e6d3-b54d-49241cc8f959"
+              },
+              "time_unix": 1788616377.071977
+            }
+          }
+        ],
+        "durable_events_config_complete": false,
+        "gpu_migrated": false,
+        "history_complete": true,
+        "initial_attempt_ordinal": 1,
+        "matrix_provenance_complete": false,
+        "policy_complete": false,
+        "pre_initial_attempt_count": 0,
+        "provenance_complete": false,
+        "sources": [
+          {
+            "path": "/home/aidar.alimbayev/Documents/genmolv2/output/logs/pmo_fragment_vocab_smoke_40k_v1__qed__running_mean_parent_control__seed0.log",
+            "sha256": "a7a9b3688df4b4b0204cbfdf209b8b1ebbaded427abf7128604509bf4515a81f"
+          }
+        ],
+        "wall_time_comparable": null
+      },
+      "metrics": {
+        "all_charged_molecules": {
+          "auc_top_1": 0.8884666392618198,
+          "auc_top_10": 0.8552026102821781,
+          "auc_top_100": 0.7196021449589667,
+          "axis": null,
+          "axis_budget": 200,
+          "reporting_frequency": 20,
+          "score_count": 200,
+          "semantics": "all charged molecules on the total oracle-call axis",
+          "source_key": "all_charged_molecules",
+          "top_1": 0.9469742202736621,
+          "top_10": 0.9412140361682176,
+          "top_100": 0.8384492870001299
+        },
+        "charged_children_only": {
+          "auc_top_1": 0.8921578005231231,
+          "auc_top_10": 0.8674151189237258,
+          "auc_top_100": 0.742310243341903,
+          "axis": null,
+          "axis_budget": 200,
+          "reporting_frequency": 20,
+          "score_count": 109,
+          "semantics": "legacy dense child curve padded over the total budget; AUC is not globally aligned",
+          "source_key": "charged_children_only",
+          "top_1": 0.9435591653865432,
+          "top_10": 0.9378392171943583,
+          "top_100": 0.8012741462503864
+        }
+      },
+      "oracle_budget": 200,
+      "provenance": {
+        "config_sha256": "52bbdd6c8bdb783b4d9bcf55bfc06e5ff86c4d6c06772960791672e33a18e29b",
+        "cuda_visible_devices": "3",
+        "durable_events_provenance_complete": false,
+        "git_branch": "codex/fragment-vocab-ablation",
+        "git_commit": "3d8a7c278fa3292c1fe60ed0d0a9f889f5ffc26d",
+        "git_dirty": true,
+        "gpu_logical_index": 0,
+        "gpu_name": "NVIDIA RTX A6000",
+        "hostname": "srv-01",
+        "model_path": "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/40000.ckpt",
+        "model_sha256": "2c153c347a749c671661d7d4d8f04d4bf8857a4a6d0fef87cceab40d2785f88e",
+        "python_version": "3.10.21",
+        "rdkit_version": "2023.09.6",
+        "resume_count": 0,
+        "scientific_status": "Engineering smoke test using a preliminary 40k checkpoint, one seed, a shortened warmup, and a 200-call budget. Not comparable with the paper.",
+        "timing_provenance_complete": false,
+        "torch_version": "2.6.0+cu124",
+        "tracked_diff_sha256": "313b89197e785e111213bf8044a34b5ac64c5b2a9342493b7a8179b3eaf2a5f9",
+        "vocabulary_path": "/home/aidar.alimbayev/Documents/genmolv2/scripts/exps/pmo/vocab/qed.csv",
+        "vocabulary_sha256": "6b98420f3fa88835e50cb28b960225dc6c7857a29f3057fb1ca22b4211c1806c"
+      },
+      "run_dir": "qed/running_mean_parent_control/seed_0",
+      "sources": {
+        "checkpoint": {
+          "path": "qed/running_mean_parent_control/seed_0/state/latest.pkl",
+          "sha256": "7b993055bf60815bd16e3ac3da2448111da9f768a3151a8a2befd7e7415442c1"
+        },
+        "events": {
+          "path": "qed/running_mean_parent_control/seed_0/events.jsonl",
+          "sha256": "724eaa3bf01318bdac7bbe751190424201c80f8ffd0bc9c42e39283b0d2c09a7"
+        },
+        "manifest": {
+          "path": "qed/running_mean_parent_control/seed_0/manifest.json",
+          "sha256": "e90ec3c4956d0497cf31fe8a88d41d68a14ae8685328eebdec063825d8ffe0f1"
+        },
+        "summary": {
+          "path": "qed/running_mean_parent_control/seed_0/summary.json",
+          "sha256": "7a990893c9d2a67af8b696bf62dd5c030807a471a25388ac4bc3138c48d112c8"
+        }
+      },
+      "status": "completed",
+      "summary_schema_version": 1
+    },
+    {
+      "charged_child_count": 200,
+      "config": {
+        "checkpoint_every": 20,
+        "delta_attribution": "novel_vs_parent",
+        "device": "cuda:0",
+        "experiment_id": "fragment_vocab_smoke_40k_v1",
+        "gamma": 0.0,
+        "guidance_scale": 2.0,
+        "legacy_seed_count": 1,
+        "legacy_warmup_off_by_one": true,
+        "max_iterations": 2000,
+        "max_mol_size": 30,
+        "max_oracle_calls": 200,
+        "min_mol_size": 10,
+        "min_support": 1,
+        "model_path": "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/40000.ckpt",
+        "oracle": "qed",
+        "parent_control": false,
+        "policy_mode": "bayes",
+        "population_size": 100,
+        "prior_mean": 0.5,
+        "prior_mean_source": "fixed neutral smoke-test proxy; initial corpus metadata unavailable",
+        "prior_strength": 10.0,
+        "randomness": 2.0,
+        "released_duplicate_policy": "repeat cached-child decomposition, matching release",
+        "reporting_frequency": 20,
+        "scientific_status": "Engineering smoke test using a preliminary 40k checkpoint, one seed, a shortened warmup, and a 200-call budget. Not comparable with the paper.",
+        "seed": 0,
+        "softmax_temp": 1.2,
+        "statistical_duplicate_policy": "one update per unique canonical child",
+        "variant": "shrink10",
+        "vocab_path": "/home/aidar.alimbayev/Documents/genmolv2/scripts/exps/pmo/vocab/qed.csv",
+        "warmup": 20
+      },
+      "elapsed_seconds": 30.463973320031073,
+      "events": 200,
+      "identity": {
+        "experiment_id": "fragment_vocab_smoke_40k_v1",
+        "oracle": "qed",
+        "run_id": "fragment_vocab_smoke_40k_v1:qed:shrink10:seed0",
+        "seed": 0,
+        "variant": "shrink10"
+      },
+      "iterations_completed": 200,
+      "launch": {
+        "any_gpu_sharing": true,
+        "attempt_count": 1,
+        "attempts": [
+          {
+            "command_sha256": "4fcc37c87ab2dca6f52bbfbc72b6d910dec7863378455a07d0bb52ea348ced35",
+            "line_number": 1,
+            "matrix_provenance_complete": false,
+            "path": "/home/aidar.alimbayev/Documents/genmolv2/output/logs/pmo_fragment_vocab_smoke_40k_v1__qed__shrink10__seed0.log",
+            "policy_complete": false,
+            "record": {
+              "command": [
+                "/home/aidar.alimbayev/Documents/genmolv2/.venv/bin/python",
+                "/home/aidar.alimbayev/Documents/genmolv2/scripts/exps/pmo/run_ablation.py",
+                "--oracle",
+                "qed",
+                "--variant",
+                "shrink10",
+                "--seed",
+                "0",
+                "--model-path",
+                "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/40000.ckpt",
+                "--device",
+                "cuda:0",
+                "--experiment-id",
+                "fragment_vocab_smoke_40k_v1",
+                "--scientific-status",
+                "Engineering smoke test using a preliminary 40k checkpoint, one seed, a shortened warmup, and a 200-call budget. Not comparable with the paper.",
+                "--output-root",
+                "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation",
+                "--max-oracle-calls",
+                "200",
+                "--reporting-frequency",
+                "20",
+                "--checkpoint-every",
+                "20",
+                "--max-iterations",
+                "2000",
+                "--population-size",
+                "100",
+                "--warmup",
+                "20",
+                "--softmax-temp",
+                "1.2",
+                "--randomness",
+                "2.0",
+                "--guidance-scale",
+                "2.0",
+                "--legacy-seed-count",
+                "1",
+                "--delta-attribution",
+                "novel_vs_parent",
+                "--legacy-warmup-off-by-one",
+                "--durable-events",
+                "--gamma",
+                "0.0",
+                "--prior-mean",
+                "0.5",
+                "--prior-mean-source",
+                "fixed neutral smoke-test proxy; initial corpus metadata unavailable"
+              ],
+              "compute_processes": [
+                {
+                  "gpu_uuid": "GPU-2cd1aa5b-616e-e6d3-b54d-49241cc8f959",
+                  "pid": 1222689,
+                  "process_name": "/home/meir.roketlishvili/miniconda3/envs/SGPO_repro/bin/python",
+                  "used_memory_mib": 4424
+                }
+              ],
+              "event": "launch",
+              "job": "qed__shrink10__seed0",
+              "physical_gpu": {
+                "index": 3,
+                "memory_total_mib": 49140,
+                "memory_used_mib": 4447,
+                "utilization_percent": 6,
+                "uuid": "GPU-2cd1aa5b-616e-e6d3-b54d-49241cc8f959"
+              },
+              "time_unix": 1788616315.9942124
+            }
+          }
+        ],
+        "durable_events_config_complete": false,
+        "gpu_migrated": false,
+        "history_complete": true,
+        "initial_attempt_ordinal": 1,
+        "matrix_provenance_complete": false,
+        "policy_complete": false,
+        "pre_initial_attempt_count": 0,
+        "provenance_complete": false,
+        "sources": [
+          {
+            "path": "/home/aidar.alimbayev/Documents/genmolv2/output/logs/pmo_fragment_vocab_smoke_40k_v1__qed__shrink10__seed0.log",
+            "sha256": "3c7bd38f4f9f06649983f4ba45e393cb7f55dbc5f2ff609d2d8cc35fbc623a7b"
+          }
+        ],
+        "wall_time_comparable": null
+      },
+      "metrics": {
+        "all_charged_molecules": {
+          "auc_top_1": 0.9005018533451801,
+          "auc_top_10": 0.890331940464669,
+          "auc_top_100": 0.7907791324588844,
+          "axis": null,
+          "axis_budget": 200,
+          "reporting_frequency": 20,
+          "score_count": 200,
+          "semantics": "all charged molecules on the total oracle-call axis",
+          "source_key": "all_charged_molecules",
+          "top_1": 0.9483312933817938,
+          "top_10": 0.9455703178847601,
+          "top_100": 0.8806785467962693
+        },
+        "charged_children_only": {
+          "auc_top_1": 0.9005018533451801,
+          "auc_top_10": 0.890331940464669,
+          "auc_top_100": 0.7907791324588844,
+          "axis": null,
+          "axis_budget": 200,
+          "reporting_frequency": 20,
+          "score_count": 200,
+          "semantics": "legacy dense child curve padded over the total budget; AUC is not globally aligned",
+          "source_key": "charged_children_only",
+          "top_1": 0.9483312933817938,
+          "top_10": 0.9455703178847601,
+          "top_100": 0.8806785467962693
+        }
+      },
+      "oracle_budget": 200,
+      "provenance": {
+        "config_sha256": "d0c63924cb5149019b1f47a870a342755fd8e8e723a0e9adb0ec132aeec3bf8c",
+        "cuda_visible_devices": "3",
+        "durable_events_provenance_complete": false,
+        "git_branch": "codex/fragment-vocab-ablation",
+        "git_commit": "3d8a7c278fa3292c1fe60ed0d0a9f889f5ffc26d",
+        "git_dirty": true,
+        "gpu_logical_index": 0,
+        "gpu_name": "NVIDIA RTX A6000",
+        "hostname": "srv-01",
+        "model_path": "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/40000.ckpt",
+        "model_sha256": "2c153c347a749c671661d7d4d8f04d4bf8857a4a6d0fef87cceab40d2785f88e",
+        "python_version": "3.10.21",
+        "rdkit_version": "2023.09.6",
+        "resume_count": 0,
+        "scientific_status": "Engineering smoke test using a preliminary 40k checkpoint, one seed, a shortened warmup, and a 200-call budget. Not comparable with the paper.",
+        "timing_provenance_complete": true,
+        "torch_version": "2.6.0+cu124",
+        "tracked_diff_sha256": "313b89197e785e111213bf8044a34b5ac64c5b2a9342493b7a8179b3eaf2a5f9",
+        "vocabulary_path": "/home/aidar.alimbayev/Documents/genmolv2/scripts/exps/pmo/vocab/qed.csv",
+        "vocabulary_sha256": "6b98420f3fa88835e50cb28b960225dc6c7857a29f3057fb1ca22b4211c1806c"
+      },
+      "run_dir": "qed/shrink10/seed_0",
+      "sources": {
+        "checkpoint": {
+          "path": "qed/shrink10/seed_0/state/latest.pkl",
+          "sha256": "5d7bbcf833196f0c50aa0544914dda8f8529d0f28925bff6ec24e58874c5f6c4"
+        },
+        "events": {
+          "path": "qed/shrink10/seed_0/events.jsonl",
+          "sha256": "721a860adbd8fc02d72101bbc04d82f2fc10abc418d387cc853e2affb9ba3bc3"
+        },
+        "manifest": {
+          "path": "qed/shrink10/seed_0/manifest.json",
+          "sha256": "156335a2b49acc9d1e2f86079f70b729e1706de1da347bc8fd181a219f4e999e"
+        },
+        "summary": {
+          "path": "qed/shrink10/seed_0/summary.json",
+          "sha256": "ce894762ec42261b23bed1452c2470418c0ebe3e0f96f495b5b0041c78cfd6a0"
+        }
+      },
+      "status": "completed",
+      "summary_schema_version": 1
+    },
+    {
+      "charged_child_count": 200,
+      "config": {
+        "checkpoint_every": 20,
+        "delta_attribution": "novel_vs_parent",
+        "device": "cuda:0",
+        "experiment_id": "fragment_vocab_smoke_40k_v1",
+        "gamma": 0.0,
+        "guidance_scale": 2.0,
+        "legacy_seed_count": 1,
+        "legacy_warmup_off_by_one": true,
+        "max_iterations": 2000,
+        "max_mol_size": 30,
+        "max_oracle_calls": 200,
+        "min_mol_size": 10,
+        "min_support": 3,
+        "model_path": "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/40000.ckpt",
+        "oracle": "qed",
+        "parent_control": false,
+        "policy_mode": "mean",
+        "population_size": 100,
+        "prior_mean": null,
+        "prior_mean_source": null,
+        "prior_strength": 0.0,
+        "randomness": 2.0,
+        "released_duplicate_policy": "repeat cached-child decomposition, matching release",
+        "reporting_frequency": 20,
+        "scientific_status": "Engineering smoke test using a preliminary 40k checkpoint, one seed, a shortened warmup, and a 200-call budget. Not comparable with the paper.",
+        "seed": 0,
+        "softmax_temp": 1.2,
+        "statistical_duplicate_policy": "one update per unique canonical child",
+        "variant": "support3",
+        "vocab_path": "/home/aidar.alimbayev/Documents/genmolv2/scripts/exps/pmo/vocab/qed.csv",
+        "warmup": 20
+      },
+      "elapsed_seconds": 46.07198603200959,
+      "events": 200,
+      "identity": {
+        "experiment_id": "fragment_vocab_smoke_40k_v1",
+        "oracle": "qed",
+        "run_id": "fragment_vocab_smoke_40k_v1:qed:support3:seed0",
+        "seed": 0,
+        "variant": "support3"
+      },
+      "iterations_completed": 200,
+      "launch": {
+        "any_gpu_sharing": true,
+        "attempt_count": 1,
+        "attempts": [
+          {
+            "command_sha256": "71fc5a88a68bfd92d5527a54999d7f19af1cda8fd12dd4f3cc31e2ac2c1c9ec2",
+            "line_number": 1,
+            "matrix_provenance_complete": false,
+            "path": "/home/aidar.alimbayev/Documents/genmolv2/output/logs/pmo_fragment_vocab_smoke_40k_v1__qed__support3__seed0.log",
+            "policy_complete": false,
+            "record": {
+              "command": [
+                "/home/aidar.alimbayev/Documents/genmolv2/.venv/bin/python",
+                "/home/aidar.alimbayev/Documents/genmolv2/scripts/exps/pmo/run_ablation.py",
+                "--oracle",
+                "qed",
+                "--variant",
+                "support3",
+                "--seed",
+                "0",
+                "--model-path",
+                "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/40000.ckpt",
+                "--device",
+                "cuda:0",
+                "--experiment-id",
+                "fragment_vocab_smoke_40k_v1",
+                "--scientific-status",
+                "Engineering smoke test using a preliminary 40k checkpoint, one seed, a shortened warmup, and a 200-call budget. Not comparable with the paper.",
+                "--output-root",
+                "/home/aidar.alimbayev/Documents/genmolv2/output/pmo_ablation",
+                "--max-oracle-calls",
+                "200",
+                "--reporting-frequency",
+                "20",
+                "--checkpoint-every",
+                "20",
+                "--max-iterations",
+                "2000",
+                "--population-size",
+                "100",
+                "--warmup",
+                "20",
+                "--softmax-temp",
+                "1.2",
+                "--randomness",
+                "2.0",
+                "--guidance-scale",
+                "2.0",
+                "--legacy-seed-count",
+                "1",
+                "--delta-attribution",
+                "novel_vs_parent",
+                "--legacy-warmup-off-by-one",
+                "--durable-events",
+                "--gamma",
+                "0.0"
+              ],
+              "compute_processes": [
+                {
+                  "gpu_uuid": "GPU-2cd1aa5b-616e-e6d3-b54d-49241cc8f959",
+                  "pid": 1222689,
+                  "process_name": "/home/meir.roketlishvili/miniconda3/envs/SGPO_repro/bin/python",
+                  "used_memory_mib": 4424
+                }
+              ],
+              "event": "launch",
+              "job": "qed__support3__seed0",
+              "physical_gpu": {
+                "index": 3,
+                "memory_total_mib": 49140,
+                "memory_used_mib": 4447,
+                "utilization_percent": 6,
+                "uuid": "GPU-2cd1aa5b-616e-e6d3-b54d-49241cc8f959"
+              },
+              "time_unix": 1788616244.7589858
+            }
+          }
+        ],
+        "durable_events_config_complete": false,
+        "gpu_migrated": false,
+        "history_complete": true,
+        "initial_attempt_ordinal": 1,
+        "matrix_provenance_complete": false,
+        "policy_complete": false,
+        "pre_initial_attempt_count": 0,
+        "provenance_complete": false,
+        "sources": [
+          {
+            "path": "/home/aidar.alimbayev/Documents/genmolv2/output/logs/pmo_fragment_vocab_smoke_40k_v1__qed__support3__seed0.log",
+            "sha256": "9fcd1503117a8475206d4bf8a3f8887d4a2a74f37ad61839721276a524ddd8ab"
+          }
+        ],
+        "wall_time_comparable": null
+      },
+      "metrics": {
+        "all_charged_molecules": {
+          "auc_top_1": 0.8994257764957133,
+          "auc_top_10": 0.874872991116224,
+          "auc_top_100": 0.7686534152276989,
+          "axis": null,
+          "axis_budget": 200,
+          "reporting_frequency": 20,
+          "score_count": 200,
+          "semantics": "all charged molecules on the total oracle-call axis",
+          "source_key": "all_charged_molecules",
+          "top_1": 0.9473504032001866,
+          "top_10": 0.943415762180065,
+          "top_100": 0.8774823896849547
+        },
+        "charged_children_only": {
+          "auc_top_1": 0.8994257764957133,
+          "auc_top_10": 0.874872991116224,
+          "auc_top_100": 0.7686534152276989,
+          "axis": null,
+          "axis_budget": 200,
+          "reporting_frequency": 20,
+          "score_count": 200,
+          "semantics": "legacy dense child curve padded over the total budget; AUC is not globally aligned",
+          "source_key": "charged_children_only",
+          "top_1": 0.9473504032001866,
+          "top_10": 0.943415762180065,
+          "top_100": 0.8774823896849547
+        }
+      },
+      "oracle_budget": 200,
+      "provenance": {
+        "config_sha256": "7fdcb33f99f46e0d58a330e43d7cf3c5a605e95a45dc43a8ff3678460c9463ad",
+        "cuda_visible_devices": "3",
+        "durable_events_provenance_complete": false,
+        "git_branch": "codex/fragment-vocab-ablation",
+        "git_commit": "3d8a7c278fa3292c1fe60ed0d0a9f889f5ffc26d",
+        "git_dirty": true,
+        "gpu_logical_index": 0,
+        "gpu_name": "NVIDIA RTX A6000",
+        "hostname": "srv-01",
+        "model_path": "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/40000.ckpt",
+        "model_sha256": "2c153c347a749c671661d7d4d8f04d4bf8857a4a6d0fef87cceab40d2785f88e",
+        "python_version": "3.10.21",
+        "rdkit_version": "2023.09.6",
+        "resume_count": 0,
+        "scientific_status": "Engineering smoke test using a preliminary 40k checkpoint, one seed, a shortened warmup, and a 200-call budget. Not comparable with the paper.",
+        "timing_provenance_complete": true,
+        "torch_version": "2.6.0+cu124",
+        "tracked_diff_sha256": "313b89197e785e111213bf8044a34b5ac64c5b2a9342493b7a8179b3eaf2a5f9",
+        "vocabulary_path": "/home/aidar.alimbayev/Documents/genmolv2/scripts/exps/pmo/vocab/qed.csv",
+        "vocabulary_sha256": "6b98420f3fa88835e50cb28b960225dc6c7857a29f3057fb1ca22b4211c1806c"
+      },
+      "run_dir": "qed/support3/seed_0",
+      "sources": {
+        "checkpoint": {
+          "path": "qed/support3/seed_0/state/latest.pkl",
+          "sha256": "efcef1f1bbc7014eff19b604523f99a5e13ea2dd283ae64434ed911aca28b409"
+        },
+        "events": {
+          "path": "qed/support3/seed_0/events.jsonl",
+          "sha256": "2cc06b3ab41d8cdb0913b5f85885dd24da920cdeaea09e782387ae9f49d161e0"
+        },
+        "manifest": {
+          "path": "qed/support3/seed_0/manifest.json",
+          "sha256": "55fe3802164ce87246a900e979fceef007a4c0549a2b3a4736d3b46a2ab63891"
+        },
+        "summary": {
+          "path": "qed/support3/seed_0/summary.json",
+          "sha256": "4b1d71266330089b6608fd9699191c4d3ed26c79e4a10d40d527ef43f7210740"
+        }
+      },
+      "status": "completed",
+      "summary_schema_version": 1
+    }
+  ],
+  "schema_version": 3,
+  "skipped": []
+}

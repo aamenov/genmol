@@ -1,0 +1,98 @@
+{
+  "caveats": [
+    "This toy mechanism diagnostic uses no molecules and no PMO oracle.",
+    "Each observation contains exactly one fragment and support is exhaustive and balanced.",
+    "The shrinkage arm uses privileged complete-panel prior information.",
+    "A positive result supports only the variance premise; it cannot establish fewer oracle calls."
+  ],
+  "code": {
+    "git": {
+      "branch": "codex/fragment-vocab-ablation",
+      "commit": "124a562e34f3edd75f45e2746eb5ae8c94ebedcf",
+      "dirty": true,
+      "status": [
+        "M .gitignore",
+        " M scripts/exps/denovo/run.py",
+        " M src/genmol/utils/utils_data.py",
+        "?? AGENTS.md",
+        "?? PROJECT_CONTEXT.md",
+        "?? genmol_from_scratch.ipynb",
+        "?? oracle/",
+        "?? output/",
+        "?? requirements-stage0.lock",
+        "?? scripts/exps/pmo/analyze_fragment_contexts.py",
+        "?? scripts/exps/pmo/collect_ablation_results.py",
+        "?? tests/test_fragment_context_analyzer.py",
+        "?? tests/test_pmo_ablation_collector.py"
+      ],
+      "tracked_diff_sha256": "313b89197e785e111213bf8044a34b5ac64c5b2a9342493b7a8179b3eaf2a5f9"
+    },
+    "script_path": "/home/aidar.alimbayev/Documents/genmolv2/scripts/exps/pmo/simulate_fragment_updates.py",
+    "script_sha256": "417d5bd48e7e115feec5fb80b2e6a3520f684ac5eb2d63a9b97c9078e80e727e"
+  },
+  "config": {
+    "capacity": 20,
+    "checkpoint_every": 100,
+    "context_stds": [
+      0.05,
+      0.2,
+      0.4
+    ],
+    "fragments": 200,
+    "observations_per_fragment": 20,
+    "replicates": 30,
+    "seed": 20260905
+  },
+  "config_sha256": "c7f3e0bad557af4885acfd0a12a730bdf764f3f41e6c76ad9389dadb303a5e00",
+  "context_panel_coupling": "paired latent means, observation order, and standardized context offsets; context_scale only rescales offsets before clipping",
+  "context_scale_semantics": "Configured pre-clipping offset scale, historically exposed by the --context-stds CLI; achieved within-fragment sample SD and clipping fraction are reported separately.",
+  "created_at": "2026-09-05T14:47:13Z",
+  "elapsed_seconds": 243.61686292401282,
+  "experiment": "deterministic contextual fragment-score simulation",
+  "outputs": {
+    "summary": {
+      "path": "summary.csv",
+      "rows": 12,
+      "sha256": "989aa0a26616544b0ae0a4690773ad95e702e713530833cf7094511c3908d50f",
+      "size_bytes": 2181
+    },
+    "trajectories": {
+      "path": "trajectories.csv",
+      "rows": 14760,
+      "sha256": "abb3243c57c45ed60c0e0950273eb85ae6acd7c3d242f0f6261abd70294fc394",
+      "size_bytes": 2405225
+    }
+  },
+  "runtime": {
+    "executable": "/home/aidar.alimbayev/Documents/genmolv2/.venv/bin/python",
+    "hostname": "srv-01",
+    "numpy_version": "1.26.4",
+    "pandas_version": "2.1.0",
+    "python_version": "3.10.21"
+  },
+  "schema_version": 2,
+  "scientific_status": "mechanism diagnostic; not a molecular or PMO result",
+  "shrinkage_prior": "complete-panel empirical global mean; privileged diagnostic information, not an online or PMO-available prior",
+  "variants": {
+    "released": {
+      "min_support": 1,
+      "mode": "released",
+      "prior_strength": 0.0
+    },
+    "running_mean": {
+      "min_support": 1,
+      "mode": "mean",
+      "prior_strength": 0.0
+    },
+    "shrink10": {
+      "min_support": 1,
+      "mode": "bayes",
+      "prior_strength": 10.0
+    },
+    "support3": {
+      "min_support": 3,
+      "mode": "mean",
+      "prior_strength": 0.0
+    }
+  }
+}
