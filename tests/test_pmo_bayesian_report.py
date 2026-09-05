@@ -31,6 +31,7 @@ CSV_FIELDS = (
     "oracle_budget",
     "all_oracle_calls",
     "charged_child_count",
+    "elapsed_seconds",
     "reporting_frequency",
     "all_auc_top_1",
     "all_auc_top_10",
@@ -224,6 +225,8 @@ class BayesianReportTests(unittest.TestCase):
                     "git_branch": "codex/test",
                     "git_dirty": False,
                     "tracked_diff_sha256": "4" * 64,
+                    "cuda_visible_devices": "3",
+                    "resume_count": 0,
                     "durable_events_provenance_complete": True,
                     "timing_provenance_complete": True,
                 }
@@ -261,6 +264,24 @@ class BayesianReportTests(unittest.TestCase):
                             "durable_events_config_complete": True,
                             "any_gpu_sharing": False,
                             "wall_time_comparable": True,
+                            "attempt_count": 1,
+                            "attempts": [
+                                {
+                                    "record": {
+                                        "physical_gpu": {
+                                            "index": 3,
+                                            "uuid": "GPU-synthetic-3",
+                                            "memory_total_mib": 49140,
+                                            "memory_used_mib": 1000,
+                                            "utilization_percent": 5,
+                                        },
+                                        "utilization_threshold": 10,
+                                        "min_free_memory_mib": 30000,
+                                        "sharing_actual": False,
+                                        "time_unix": 1000.0,
+                                    }
+                                }
+                            ],
                         },
                     }
                 )
@@ -276,6 +297,7 @@ class BayesianReportTests(unittest.TestCase):
                         "oracle_budget": 1000,
                         "all_oracle_calls": 1000,
                         "charged_child_count": 1000,
+                        "elapsed_seconds": 10.0,
                         "reporting_frequency": 100,
                         **values,
                         "prior_mean": 0.5 if variant.startswith("shrink") else "",
@@ -373,6 +395,8 @@ class BayesianReportTests(unittest.TestCase):
             self.assertIn("Final top-100", extracted)
             self.assertIn("n/a", extracted)
             self.assertIn("legacy seed count", extracted)
+            self.assertIn("Physical GPU mapping", extracted)
+            self.assertIn("controller span", extracted)
             for variant in report.EXPECTED_VARIANTS:
                 self.assertIn(variant, extracted)
             with self.assertRaises(FileExistsError):

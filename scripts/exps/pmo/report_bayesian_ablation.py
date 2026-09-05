@@ -145,6 +145,7 @@ REQUIRED_CSV_FIELDS = {
     "oracle_budget",
     "all_oracle_calls",
     "charged_child_count",
+    "elapsed_seconds",
     "reporting_frequency",
     "prior_mean",
     "prior_strength",
@@ -760,6 +761,11 @@ def load_report_data(collection_manifest: str | os.PathLike[str]) -> ReportData:
         ):
             _equal(actual, expected, f"{run_id} {context}")
         _close(
+            _csv_number(row.get("elapsed_seconds"), f"{run_id} CSV elapsed seconds"),
+            _number(raw_run.get("elapsed_seconds"), f"{run_id} collected elapsed seconds"),
+            f"{run_id} elapsed seconds",
+        )
+        _close(
             _csv_number(row.get("prior_strength"), f"{run_id} CSV prior strength"),
             EXPECTED_PRIOR_STRENGTH[str(variant)],
             f"{run_id} CSV prior strength",
@@ -948,6 +954,91 @@ def _lambda_text(variant: str) -> str:
     if variant == "released":
         return "n/a"
     return f"{EXPECTED_PRIOR_STRENGTH[variant]:g}"
+
+
+def _execution_provenance_rows(data: ReportData) -> tuple[tuple[str, str], ...]:
+    elapsed: list[float] = []
+    started: list[float] = []
+    finished: list[float] = []
+    utilizations: list[int] = []
+    free_memory: list[int] = []
+    shared_launches = 0
+    resumes = 0
+    gpu_uuids: dict[int, str] = {}
+    for run in data.runs:
+        run_elapsed = _csv_number(
+            run.row.get("elapsed_seconds"), f"{run.run_id} elapsed seconds"
+        )
+        elapsed.append(run_elapsed)
+        attempts = _sequence(run.launch, "attempts", f"{run.run_id} launch")
+        _equal(len(attempts), 1, f"{run.run_id} launch attempt count")
+        attempt = attempts[0]
+        if not isinstance(attempt, Mapping):
+            raise ReportError(f"{run.run_id} launch attempt must be an object")
+        record = _mapping(attempt, "record", f"{run.run_id} launch attempt")
+        gpu = _mapping(record, "physical_gpu", f"{run.run_id} launch record")
+        gpu_index = _integer(gpu.get("index"), f"{run.run_id} physical GPU")
+        gpu_uuid = gpu.get("uuid")
+        if not isinstance(gpu_uuid, str) or not gpu_uuid.startswith("GPU-"):
+            raise ReportError(f"{run.run_id} physical GPU UUID is invalid")
+        if gpu_index in gpu_uuids:
+            _equal(gpu_uuid, gpu_uuids[gpu_index], f"physical GPU {gpu_index} UUID")
+        gpu_uuids[gpu_index] = gpu_uuid
+        _equal(
+            str(run.provenance.get("cuda_visible_devices")),
+            str(gpu_index),
+            f"{run.run_id} physical GPU mapping",
+        )
+        utilization = _integer(
+            gpu.get("utilization_percent"), f"{run.run_id} launch utilization"
+        )
+        threshold = _integer(
+            record.get("utilization_threshold"), f"{run.run_id} utilization threshold"
+        )
+        if utilization >= threshold:
+            raise ReportError(f"{run.run_id} was launched above its utilization gate")
+        utilizations.append(utilization)
+        total_memory = _integer(
+            gpu.get("memory_total_mib"), f"{run.run_id} total GPU memory"
+        )
+        used_memory = _integer(
+            gpu.get("memory_used_mib"), f"{run.run_id} used GPU memory"
+        )
+        minimum_free = _integer(
+            record.get("min_free_memory_mib"), f"{run.run_id} free-memory gate"
+        )
+        available = total_memory - used_memory
+        if available < minimum_free:
+            raise ReportError(f"{run.run_id} was launched below its free-memory gate")
+        free_memory.append(available)
+        shared_launches += record.get("sharing_actual") is True
+        launch_time = _number(record.get("time_unix"), f"{run.run_id} launch time")
+        started.append(launch_time)
+        finished.append(launch_time + run_elapsed)
+        resumes += _integer(
+            run.provenance.get("resume_count"), f"{run.run_id} resume count"
+        )
+
+    gpu_text = "; ".join(
+        f"{index}={gpu_uuids[index]}" for index in sorted(gpu_uuids)
+    )
+    controller_span = max(finished) - min(started)
+    return (
+        ("Physical GPU mapping", gpu_text),
+        (
+            "Pre-launch gate",
+            f"18/18 launches at {min(utilizations)}-{max(utilizations)}% utilization "
+            f"(<10%) with at least {min(free_memory)} MiB free; "
+            f"{shared_launches}/18 shared with pre-existing low-utilization processes",
+        ),
+        (
+            "Runtime record",
+            f"controller span {controller_span:.1f} s; sum of per-run elapsed times "
+            f"{sum(elapsed):.1f} s; median {statistics.median(elapsed):.1f} s "
+            f"(range {min(elapsed):.1f}-{max(elapsed):.1f}); resumes={resumes}. "
+            "Wall-time comparisons are suppressed because GPUs were shared.",
+        ),
+    )
 
 
 def _chart_image(payload: bytes, *, width: float, height: float) -> Image:
@@ -1214,6 +1305,13 @@ def render_report_pdf(data: ReportData) -> bytes:
         leading=10.5,
         textColor=colors.HexColor("#455A64"),
     )
+    compact_note = ParagraphStyle(
+        "ReportCompactNote",
+        parent=note,
+        fontSize=7.5,
+        leading=9.2,
+        spaceAfter=0.8 * mm,
+    )
 
     def p(text: str, style: ParagraphStyle = body) -> Paragraph:
         return Paragraph(escape(text), style)
@@ -1451,17 +1549,17 @@ def render_report_pdf(data: ReportData) -> bytes:
         ("Vocabulary", f"{first.provenance['vocabulary_path']} | sha256 {first.provenance['vocabulary_sha256']}"),
         ("Code identity", f"commit {first.provenance.get('git_commit')} | dirty={first.provenance.get('git_dirty')} | tracked diff {first.provenance.get('tracked_diff_sha256')}"),
         ("Trajectory evidence", "18 summary files re-hashed; endpoints and normalized trapezoidal AUCs recomputed"),
-        ("Timing policy", "Wall time is not used as an outcome when any launch records GPU sharing."),
+        *_execution_provenance_rows(data),
     )
     story.append(
         _table(
             ("Provenance field", "Validated value"),
             provenance_rows,
             (48 * mm, 215 * mm),
-            font_size=7.2,
+            font_size=6.8,
         )
     )
-    story.append(Spacer(1, 5 * mm))
+    story.append(Spacer(1, 3 * mm))
     story.append(p("Paper reference point", subheading))
     story.append(
         p(
@@ -1473,18 +1571,18 @@ def render_report_pdf(data: ReportData) -> bytes:
             note,
         )
     )
-    story.append(Spacer(1, 3 * mm))
+    story.append(Spacer(1, 2 * mm))
     story.append(p("Scientific caveats", subheading))
     for caveat in data.caveats:
-        story.append(p(f"- {caveat}", note))
-    story.append(Spacer(1, 3 * mm))
+        story.append(p(f"- {caveat}", compact_note))
+    story.append(Spacer(1, 1.5 * mm))
     story.append(
         p(
             "Interpretation boundary: observed differences describe this locked "
             "exploratory matrix only. They neither reproduce the paper's 23-task, "
             "10,000-call PMO aggregate nor establish that Bayesian shrinkage is "
             "generally superior.",
-            body,
+            compact_note,
         )
     )
 

@@ -4,6 +4,65 @@ These are immutable, validation-first snapshots of the fragment-credit
 experiments. Raw checkpoints and molecule-level traces remain under `output/`
 on the experiment host; their hashes are retained in each collection manifest.
 
+## QED 50k Bayesian prior-strength ablation
+
+This exploratory sensitivity study used the final local 50,000-step checkpoint,
+QED with `gamma = 0`, 1,000 unique-molecule oracle calls per variant-seed run,
+population size 100, warmup 100 with the declared legacy off-by-one behavior,
+and paired seeds 0, 1, and 2. The Bayesian arms used a fixed neutral proxy prior
+mean of 0.5 and strengths 1, 3, 10, and 30. The original ZINC molecule-level
+scores needed for a data-derived prior were unavailable. The checkpoint
+SHA-256 is
+`8d00aa47b02f64bf39ff6b0b2e786f213587366fc2c3d29712a00f3f84108dd6`.
+
+All 18 runs completed at exactly 1,000 calls with checkpoint consistency and no
+resumes. The collector replayed the checkpoints and event streams before
+publishing the immutable CSV and report. Values below are mean +/- sample SD
+over the three paired seeds.
+
+| Variant | Prior strength | Top-10 AUC | Final top-10 | Top-100 AUC | Final top-100 | Paired top-10 AUC delta vs running mean |
+|---|---:|---:|---:|---:|---:|---:|
+| `released` | n/a | 0.894028 +/- 0.001708 | 0.946821 +/- 0.000549 | 0.853075 +/- 0.003966 | 0.933910 +/- 0.003292 | -0.001842 +/- 0.003984 |
+| `running_mean` | 0 | 0.895869 +/- 0.002388 | 0.947197 +/- 0.000532 | 0.857370 +/- 0.004860 | 0.938896 +/- 0.001739 | 0.000000 +/- 0.000000 |
+| `shrink1` | 1 | 0.898073 +/- 0.000738 | 0.946953 +/- 0.000143 | 0.854082 +/- 0.005275 | 0.925878 +/- 0.001675 | +0.002204 +/- 0.002767 |
+| `shrink3` | 3 | 0.896511 +/- 0.002984 | 0.945883 +/- 0.001473 | 0.850591 +/- 0.006188 | 0.923429 +/- 0.006982 | +0.000642 +/- 0.001985 |
+| `shrink10` | 10 | 0.897395 +/- 0.000801 | 0.946290 +/- 0.000463 | 0.848850 +/- 0.002930 | 0.922418 +/- 0.001726 | +0.001526 +/- 0.001807 |
+| `shrink30` | 30 | 0.896810 +/- 0.001299 | 0.945458 +/- 0.000724 | 0.851198 +/- 0.002153 | 0.922835 +/- 0.002996 | +0.000941 +/- 0.001751 |
+
+Running-mean updating improved the observed mean top-10 AUC by 0.001842 and
+final top-100 by 0.004986 relative to the released one-shot update. Among the
+tested shrinkage arms, strength 1 had the largest observed mean top-10 AUC and
+its paired AUC deltas were positive in all three seeds. However, all four
+shrinkage strengths had lower final top-10 and substantially lower final
+top-100 than running mean. There was no monotonic dose response. These results
+describe a small exploratory screen; they do not establish an optimal strength
+or a general improvement in sample efficiency.
+
+The jobs ran from clean code commit `47f7692cc21eda826511ce311c9dfa7573df4c0c`
+on physical GPUs 3--6. Every launch snapshot was below the strict 10%
+utilization threshold and had at least 47,163 MiB free. Low-utilization
+processes were already present on those GPUs, as explicitly authorized, so
+wall-time comparisons are suppressed. The controller span was approximately
+1,070 seconds; individual run records ranged from 147.2 to 299.1 seconds.
+
+The authoritative files are in `qed_50k_bayes_strength_1k_v1/`: the schema-3
+collection manifest, hash-named CSV, hash-named six-page PDF, and report
+manifest. The PDF reports every top-1/top-10/top-100 endpoint and normalized
+AUC, per-seed values, paired deltas, trajectories, configurations, provenance,
+and caveats. The paper's QED reference is 0.942 +/- 0.000 PMO AUC top-10 at
+10,000 calls; it is not directly comparable to this 1,000-call local study.
+
+## QED 40k core comparison
+
+`qed_40k_core_1k_v1/` is the validated three-seed archive for the earlier 40k
+checkpoint using the same 1,000-call QED protocol for `released`,
+`running_mean`, and `shrink10`. Its mean top-10 AUC values were 0.893836,
+0.896226, and 0.897346, respectively. The 50k rerun preserves the same
+descriptive trade-off: running mean improves broad final top-100 performance,
+while strength-10 shrinkage gives a small top-10 AUC increase but lowers final
+top-100. The two checkpoint screens are exploratory and are not independent
+confirmatory evidence.
+
 ## QED engineering smoke, v2
 
 The repaired smoke used the preliminary 40k model checkpoint, QED, seed 0, a
