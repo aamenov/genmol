@@ -1,6 +1,11 @@
 import pytest
 
-from scripts.udlm.cpu_smoke import _config, _validate_smoke_gate
+from scripts.udlm.cpu_smoke import (
+    _config,
+    _validate_git_provenance,
+    _validate_smoke_gate,
+    _write_json_exclusive,
+)
 
 
 def _diagnostics(before_loss=6.0, after_loss=2.0):
@@ -59,3 +64,25 @@ def test_smoke_gate_rejects_failed_evidence(losses, before_after, generated, mes
     before, after = before_after
     with pytest.raises(RuntimeError, match=message):
         _validate_smoke_gate(losses, before, after, generated)
+
+
+def test_smoke_requires_clean_pushed_commit():
+    _validate_git_provenance(
+        {"commit": "a" * 40, "upstream": "a" * 40, "dirty": False}
+    )
+    with pytest.raises(RuntimeError, match="upstream"):
+        _validate_git_provenance(
+            {"commit": "a" * 40, "upstream": "b" * 40, "dirty": False}
+        )
+    with pytest.raises(RuntimeError, match="clean"):
+        _validate_git_provenance(
+            {"commit": "a" * 40, "upstream": "a" * 40, "dirty": True}
+        )
+
+
+def test_smoke_writer_is_no_clobber(tmp_path):
+    path = tmp_path / "result.json"
+    _write_json_exclusive(path, {"value": 1})
+    with pytest.raises(FileExistsError):
+        _write_json_exclusive(path, {"value": 2})
+    assert path.read_text(encoding="utf-8") == '{\n  "value": 1\n}\n'

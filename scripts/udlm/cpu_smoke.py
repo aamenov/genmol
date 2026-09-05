@@ -10,6 +10,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -84,6 +85,58 @@ def _git_provenance() -> dict[str, object]:
         "dirty": bool(status) if status is not None else None,
         "status_porcelain": status.splitlines() if status else [],
     }
+
+
+def _validate_git_provenance(provenance: dict[str, object]) -> None:
+    """Require an auditable, pushed source state before collecting evidence."""
+    failures = []
+    commit = provenance.get("commit")
+    upstream = provenance.get("upstream")
+    if not commit or not upstream:
+        failures.append("HEAD and its upstream must both resolve")
+    elif commit != upstream:
+        failures.append("HEAD must equal its upstream commit")
+    if provenance.get("dirty") is not False:
+        failures.append("worktree must be clean")
+    if failures:
+        raise RuntimeError("refusing unauditable CPU smoke run: " + "; ".join(failures))
+
+
+def _source_paths(prior_variant: str) -> dict[str, Path]:
+    paths = {
+        "smoke_runner": Path(__file__).resolve(),
+        "model": ROOT_DIR / "src/genmol/model.py",
+        "diffusion": ROOT_DIR / "src/genmol/diffusion.py",
+        "sampler": ROOT_DIR / "src/genmol/sampler.py",
+    }
+    if prior_variant == "empirical_frequency":
+        paths["frequency_artifact"] = EMPIRICAL_FREQUENCY_PATH
+    return paths
+
+
+def _source_provenance(prior_variant: str) -> dict[str, dict[str, object]]:
+    return {
+        name: {
+            "path": str(path.relative_to(ROOT_DIR)),
+            "sha256": _sha256_file(path),
+            "size_bytes": path.stat().st_size,
+        }
+        for name, path in _source_paths(prior_variant).items()
+    }
+
+
+def _write_json_exclusive(path: Path, payload: dict[str, object]) -> None:
+    """Create one result exactly once without following a pre-existing leaf link."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags, 0o644)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 def _config(
@@ -280,6 +333,8 @@ def main():
     started = time.time()
     started_at = datetime.now(timezone.utc).isoformat()
     git = _git_provenance()
+    _validate_git_provenance(git)
+    source_provenance = _source_provenance(args.prior_variant)
     L.seed_everything(args.seed, workers=True)
     config = _config(
         exclude_special_tokens=args.exclude_special_tokens,
@@ -321,22 +376,12 @@ def main():
     )
     _validate_smoke_gate(losses, before, after, generated)
 
-    source_paths = {
-        "smoke_runner": Path(__file__).resolve(),
-        "model": ROOT_DIR / "src/genmol/model.py",
-        "diffusion": ROOT_DIR / "src/genmol/diffusion.py",
-        "sampler": ROOT_DIR / "src/genmol/sampler.py",
-    }
-    if args.prior_variant == "empirical_frequency":
-        source_paths["frequency_artifact"] = EMPIRICAL_FREQUENCY_PATH
-    source_provenance = {
-        name: {
-            "path": str(path.relative_to(ROOT_DIR)),
-            "sha256": _sha256_file(path),
-            "size_bytes": path.stat().st_size,
-        }
-        for name, path in source_paths.items()
-    }
+    completed_source_provenance = _source_provenance(args.prior_variant)
+    completed_git = _git_provenance()
+    if completed_source_provenance != source_provenance or completed_git != git:
+        raise RuntimeError(
+            "source or Git state changed during CPU smoke run; refusing artifact"
+        )
 
     result = {
         "schema_version": 2,
@@ -356,7 +401,7 @@ def main():
         "steps": args.steps,
         "sampling_steps": args.sampling_steps,
         "sample_count_requested": args.sample_count,
-        "strict_valid_samples": len(generated),
+        "no_repair_decodable_samples": len(generated),
         "exclude_special_tokens": args.exclude_special_tokens,
         "prior_variant": args.prior_variant,
         "empirical_uniform_mix_requested": args.empirical_uniform_mix,
@@ -381,10 +426,7 @@ def main():
         "generated_smiles": generated,
         "runtime_seconds": time.time() - started,
     }
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("x", encoding="utf-8") as handle:
-        json.dump(result, handle, indent=2, sort_keys=True)
-        handle.write("\n")
+    _write_json_exclusive(output_path, result)
     print(json.dumps(result, indent=2, sort_keys=True))
 
 
