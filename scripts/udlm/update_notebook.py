@@ -1426,6 +1426,334 @@ print(stage20_summary)
 """,
             f"{STAGE_TAG_PREFIX}-evidence-code",
         ),
+        _cell(
+            "markdown",
+            r"""
+## 20.5 A schedule-matched categorical prior experiment
+
+**Paper correspondence.** UDLM derives its main result for the uniform
+stationary distribution. The construction below generalizes the same
+rank-one transition family to a strictly positive categorical stationary
+distribution $\pi$. This arbitrary-$\pi$ process and the molecular frequency
+prior are **our experimental extension**, not a result claimed by the UDLM or
+GenMol papers. The faithful released control remains `release_uniform`.
+`schedule_uniform` uses the generalized implementation with uniform $\pi$ and
+the exact residual-clean schedule; it is the required control for
+`empirical_frequency`, because those two variants differ only in $\pi$.
+
+**Intuition and motivation.** Uniform refreshes spend probability on many SAFE
+tokens that are rare in molecules. A training-frequency prior may create more
+chemically plausible noisy states and make denoising easier. It may also copy
+dataset imbalance, suppress useful rare chemistry, or reduce exploration. We
+therefore treat it as a falsifiable hypothesis, not an automatic improvement.
+
+**Symbols and mathematics.** Let $\mathcal A\subseteq\{1,\ldots,K\}$ be the
+active diffusion alphabet after the five immutable tokenizer-control IDs are
+removed, and let $A=|\mathcal A|$. Let
+$\pi=(\pi_j)_{j\in\mathcal A}$ satisfy $\pi_j>0$ and
+$\sum_{j\in\mathcal A}\pi_j=1$. For clean token $x$, candidate token $j$,
+time $t\in[0,1]$, and
+$\alpha_t=1-(1-\epsilon)t$ with residual clean mass
+$\epsilon=10^{-3}$, the forward marginal is
+
+$$q(z_t=j\mid x)=\alpha_t\mathbf 1_{j=x}+(1-\alpha_t)\pi_j.$$
+
+For $0\le s<t\le1$, put $a_{t\mid s}=\alpha_t/\alpha_s$. If the observed
+current token is $i$, the transition likelihood for an earlier candidate $j$
+is
+
+$$q(z_t=i\mid z_s=j)=a_{t\mid s}\mathbf1_{j=i}
+ +(1-a_{t\mid s})\pi_i.$$
+
+Notice that the refresh factor is $\pi_i$, the probability of the *observed*
+token, not $\pi_j$. If $p_{\theta,j}$ is the denoiser's clean-token
+probability, define
+$m_{\theta,s}(j)=\alpha_s p_{\theta,j}+(1-\alpha_s)\pi_j$. The exact reverse
+posterior is
+
+$$p_\theta(z_s=j\mid z_t=i)=
+\frac{[a_{t\mid s}\mathbf1_{j=i}+(1-a_{t\mid s})\pi_i]
+m_{\theta,s}(j)}
+{\sum_{k\in\mathcal A}[a_{t\mid s}\mathbf1_{k=i}
++(1-a_{t\mid s})\pi_i]m_{\theta,s}(k)}.$$
+
+For the continuous loss, define
+$m_x(j)=\alpha_t\mathbf1_{j=x}+(1-\alpha_t)\pi_j$,
+$\bar m_x(j)=m_x(j)/\pi_j$, and
+$\bar m_\theta(j)=[\alpha_t p_{\theta,j}+(1-\alpha_t)\pi_j]/\pi_j$.
+With $R_j=\bar m_x(j)/\bar m_x(i)$,
+$S_j=\bar m_\theta(j)/\bar m_\theta(i)$,
+$\phi(u)=e^u-1-u$, and the exact jump rate
+$\beta(t)=-\alpha'_t/\alpha_t=(1-\epsilon)/\alpha_t$, our model-dependent
+integrand is
+
+$$\ell_\theta=\beta(t)\sum_{j\ne i}\pi_jR_j
+\phi\!\left(\log S_j-\log R_j\right).$$
+
+Because $\alpha_1=\epsilon>0$, the full finite-endpoint NELBO also contains
+the parameter-independent term
+
+$$D_{\rm KL}(q(z_1\mid x)\|\pi)
+=\sum_{j\in\mathcal A}q(z_1=j\mid x)
+\log\frac{q(z_1=j\mid x)}{\pi_j}.$$
+
+The code exposes this term separately: omitting it does not change gradients,
+but it must not be silently called zero in a reported full NELBO.
+
+For frequency counts $c_j$ from $N=10{,}000$ fixed training examples, write
+$f_j=c_j/\sum_{k\in\mathcal A}c_k$. We use
+
+$$\pi_j=(1-\lambda)f_j+\lambda/A,\qquad \lambda=0.01.$$
+
+The uniform component gives every active category positive mass, including
+categories unseen in the prefix. The dataset revision, ordered-text digest,
+tokenizer revision, counts, and artifact bytes are pinned; the prefix is a
+prior-design diagnostic, not an estimate with a benchmark claim.
+
+**Concrete example.** For three categories with counts $(6,3,1)$ and
+$\lambda=0.1$, $f=(0.6,0.3,0.1)$ and
+$\pi\approx(0.5733,0.3033,0.1233)$. If $x$ is category B and
+$\alpha_t=0.2$, then
+$q(z_t\mid x)\approx(0.4587,0.4427,0.0987)$. At high noise, common category A
+can be more likely than the clean token; the time-conditioned denoiser must
+undo that structured corruption.
+
+**Code below.** Notebook-native formulas cross-check production forward,
+posterior, loss, and endpoint-KL values on a three-category example. Tensors
+`x0` and `xt` have shape `(B,L)`, logits have shape `(B,L,A)`, and posterior
+probabilities have shape `(B,L,A)`. A second part validates the exact pinned
+10,000-row frequency artifact and constructs all 1,875 active probabilities
+without network or GPU access.
+
+**Difference from released implementations.** Official UDLM uses uniform
+$\pi$ and an idealized loss schedule in its released compatibility path.
+`schedule_uniform` and `empirical_frequency` instead share the exact
+residual-clean rate above. NVIDIA GenMol has no categorical-prior selector.
+Checkpoint and benchmark metadata bind the variant, active alphabet, schedule,
+stationary-probability digest, and—only for the empirical treatment—the source
+artifact and smoothing weight.
+
+**Comprehension checkpoint.** Why is `release_uniform` not a clean control for
+the empirical prior? Expected reasoning: both the prior and loss schedule
+change, so their effects are confounded. Why must $\lambda$ be positive?
+Expected reasoning: zero-count active tokens would otherwise have zero
+stationary mass and make density ratios undefined. Why report endpoint KL
+separately? Expected reasoning: it belongs to the full NELBO but is constant in
+$\theta$, so it matters for objective accounting but not optimization
+gradients.
+""",
+            f"{STAGE_TAG_PREFIX}-categorical-prior",
+        ),
+        _cell(
+            "code",
+            r"""
+from genmol.diffusion import ContinuousCategoricalDiffusion
+
+
+def reference_categorical_forward(clean_ids, alpha, stationary_probs):
+    '''Return q(z_t | x) with shape (B,L,A).'''
+    num_active = stationary_probs.numel()
+    one_hot = F.one_hot(clean_ids, num_active).to(torch.float64)
+    alpha = alpha.to(torch.float64)[:, None, None]
+    return alpha * one_hot + (1.0 - alpha) * stationary_probs
+
+
+def reference_categorical_posterior(
+    clean_logits, noisy_ids, t, s, stationary_probs, noise_eps
+):
+    '''Direct Bayes-rule oracle for p_theta(z_s | z_t).'''
+    clean_probs = clean_logits.to(torch.float64).softmax(-1)
+    alpha_t = (1.0 - (1.0 - noise_eps) * t.to(torch.float64))[:, None, None]
+    alpha_s = (1.0 - (1.0 - noise_eps) * s.to(torch.float64))[:, None, None]
+    conditional_alpha = alpha_t / alpha_s
+    observed_prior = stationary_probs[noisy_ids][..., None]
+    likelihood = (1.0 - conditional_alpha) * observed_prior
+    likelihood = likelihood.expand_as(clean_probs).clone()
+    likelihood.scatter_add_(
+        -1, noisy_ids[..., None], conditional_alpha.expand_as(observed_prior)
+    )
+    marginal_s = alpha_s * clean_probs + (1.0 - alpha_s) * stationary_probs
+    unnormalized = likelihood * marginal_s
+    return unnormalized / unnormalized.sum(-1, keepdim=True)
+
+
+def reference_categorical_loss(
+    clean_logits, clean_ids, noisy_ids, t, stationary_probs, noise_eps
+):
+    '''Direct density-ratio expression for the model-dependent CT integrand.'''
+    clean_probs = clean_logits.to(torch.float64).softmax(-1)
+    alpha = (1.0 - (1.0 - noise_eps) * t.to(torch.float64))[:, None, None]
+    one_hot = F.one_hot(clean_ids, stationary_probs.numel()).to(torch.float64)
+    marginal_x = alpha * one_hot + (1.0 - alpha) * stationary_probs
+    marginal_theta = alpha * clean_probs + (1.0 - alpha) * stationary_probs
+    density_x = marginal_x / stationary_probs
+    density_theta = marginal_theta / stationary_probs
+    gather_index = noisy_ids[..., None]
+    ratio_x = density_x / torch.gather(density_x, -1, gather_index)
+    ratio_theta = density_theta / torch.gather(
+        density_theta, -1, gather_index
+    )
+    log_ratio_error = ratio_theta.log() - ratio_x.log()
+    phi = torch.expm1(log_ratio_error) - log_ratio_error
+    phi.scatter_(-1, gather_index, 0.0)
+    beta = ((1.0 - noise_eps) / alpha).squeeze(-1)
+    return beta * (stationary_probs * ratio_x * phi).sum(-1)
+
+
+toy_pi = torch.tensor([0.55, 0.30, 0.15], dtype=torch.float64)
+categorical_udlm = ContinuousCategoricalDiffusion(
+    num_classes=3,
+    stationary_probs=toy_pi,
+    noise_eps=1e-3,
+    antithetic_sampling=False,
+)
+categorical_x0 = torch.tensor([[1, 0, 2], [2, 1, 0]])       # (B=2,L=3)
+categorical_xt = torch.tensor([[0, 2, 2], [1, 0, 2]])       # (B=2,L=3)
+categorical_t = torch.tensor([0.75, 0.40], dtype=torch.float64)
+categorical_s = torch.tensor([0.30, 0.10], dtype=torch.float64)
+categorical_logits = torch.tensor(
+    [
+        [[0.2, 1.1, -0.4], [1.3, -0.2, 0.1], [-0.7, 0.3, 1.4]],
+        [[-0.1, 0.2, 1.2], [0.4, 1.0, -0.5], [1.1, 0.1, -0.2]],
+    ],
+    dtype=torch.float64,
+)                                                               # (B,L,A)
+
+categorical_forward_reference = reference_categorical_forward(
+    categorical_x0, categorical_udlm.alpha(categorical_t), toy_pi
+)
+categorical_posterior_reference = reference_categorical_posterior(
+    categorical_logits,
+    categorical_xt,
+    categorical_t,
+    categorical_s,
+    toy_pi,
+    noise_eps=1e-3,
+)
+categorical_posterior_production = categorical_udlm.posterior_probs(
+    categorical_logits, categorical_xt, categorical_t, categorical_s
+)
+assert categorical_forward_reference.shape == (2, 3, 3)
+assert categorical_posterior_production.shape == (2, 3, 3)
+assert torch.allclose(
+    categorical_posterior_production,
+    categorical_posterior_reference,
+    atol=2e-12,
+    rtol=2e-12,
+)
+assert torch.allclose(
+    categorical_posterior_production.sum(-1),
+    torch.ones(2, 3, dtype=torch.float64),
+)
+
+categorical_loss_reference = reference_categorical_loss(
+    categorical_logits,
+    categorical_x0,
+    categorical_xt,
+    categorical_t,
+    toy_pi,
+    noise_eps=1e-3,
+)
+categorical_loss_production = categorical_udlm.loss_per_token(
+    categorical_logits, categorical_x0, categorical_xt, categorical_t
+)
+assert torch.allclose(
+    categorical_loss_production,
+    categorical_loss_reference,
+    atol=2e-12,
+    rtol=2e-12,
+)
+assert torch.all(categorical_loss_production >= 0)
+
+endpoint_q = (
+    1e-3 * F.one_hot(categorical_x0, 3).to(torch.float64)
+    + (1.0 - 1e-3) * toy_pi
+)
+endpoint_kl_reference = (
+    endpoint_q * (endpoint_q.log() - toy_pi.log())
+).sum(-1)
+endpoint_kl_production = categorical_udlm.endpoint_prior_kl(categorical_x0)
+assert torch.allclose(
+    endpoint_kl_production, endpoint_kl_reference, atol=2e-12, rtol=2e-12
+)
+assert torch.all(endpoint_kl_production > 0)
+
+stage20_frequency_path = (
+    PROJECT_ROOT
+    / "experiments"
+    / "udlm"
+    / "token_frequency"
+    / "train_first_10000.json"
+)
+stage20_frequency_bytes = stage20_frequency_path.read_bytes()
+assert stage20_hashlib.sha256(stage20_frequency_bytes).hexdigest() == (
+    "088c78e75611f3cc42c4011e1da6f65a377e673b9cba07a28b126b0fc62f06ed"
+)
+stage20_frequency = stage20_json.loads(stage20_frequency_bytes)
+assert stage20_frequency["schema_version"] == 1
+assert stage20_frequency["example_count"] == 10_000
+assert stage20_frequency["content_token_count"] == 517_090
+assert stage20_frequency["dataset"] == {
+    "ordered_safe_text_sha256": (
+        "53aee8e5592fc96159788e86519abbbcc9f1ab7c6348a1cb59a939bd57051d8f"
+    ),
+    "repo_id": "datamol-io/safe-gpt",
+    "revision": "b83175cd7394e7a4027478a35b2f9d1dda3ac62f",
+    "selection": "first 10000 streaming rows",
+    "split": "train",
+}
+stage20_special_ids = tuple(
+    stage20_frequency["tokenizer"]["special_token_ids"]
+)
+stage20_counts = torch.tensor(
+    stage20_frequency["counts_by_token_id"], dtype=torch.float64
+)
+stage20_active_ids = torch.tensor(
+    [
+        token_id
+        for token_id in range(stage20_counts.numel())
+        if token_id not in stage20_special_ids
+    ]
+)
+assert stage20_counts.shape == (1880,)
+assert stage20_special_ids == (0, 1, 2, 3, 4)
+assert torch.count_nonzero(stage20_counts[list(stage20_special_ids)]) == 0
+stage20_active_counts = stage20_counts[stage20_active_ids]
+stage20_empirical = stage20_active_counts / stage20_active_counts.sum()
+stage20_uniform_mix = 0.01
+stage20_empirical_pi = (
+    (1.0 - stage20_uniform_mix) * stage20_empirical
+    + stage20_uniform_mix / stage20_active_ids.numel()
+)
+assert stage20_empirical_pi.shape == (1875,)
+assert torch.all(stage20_empirical_pi > 0)
+assert torch.isclose(stage20_empirical_pi.sum(), torch.tensor(1.0, dtype=torch.float64))
+assert not torch.allclose(
+    stage20_empirical_pi,
+    torch.full_like(stage20_empirical_pi, 1.0 / stage20_active_ids.numel()),
+)
+
+stage20_categorical_checks = {
+    "toy_forward_shape": tuple(categorical_forward_reference.shape),
+    "toy_posterior_shape": tuple(categorical_posterior_production.shape),
+    "posterior_matches_bayes_oracle": True,
+    "loss_matches_density_ratio_oracle": True,
+    "endpoint_kl_matches_direct_sum": True,
+    "frequency_artifact_sha256": stage20_hashlib.sha256(
+        stage20_frequency_bytes
+    ).hexdigest(),
+    "frequency_examples": stage20_frequency["example_count"],
+    "frequency_content_tokens": int(stage20_active_counts.sum()),
+    "active_vocab_size": stage20_active_ids.numel(),
+    "zero_count_active_tokens": int((stage20_active_counts == 0).sum()),
+    "uniform_mixture_weight": stage20_uniform_mix,
+    "stationary_prior_min": float(stage20_empirical_pi.min()),
+    "stationary_prior_max": float(stage20_empirical_pi.max()),
+}
+print(stage20_categorical_checks)
+""",
+            f"{STAGE_TAG_PREFIX}-categorical-prior-code",
+        ),
     ]
 
 
