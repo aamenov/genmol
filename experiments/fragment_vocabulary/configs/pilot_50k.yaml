@@ -1,0 +1,52 @@
+schema_version: 1
+experiment_id: fragment_vocab_pilot_50k_v1
+scientific_status: >-
+  Preregistered pilot using the final 50k checkpoint. This matrix must not be
+  launched until the checkpoint exists and frozen molecule-level ZINC prior
+  means have replaced the null placeholders below.
+model_path: outputs/paper_v1/checkpoints/50000.ckpt
+tasks:
+  - oracle: albuterol_similarity
+    gamma: 0.2
+    prior_mean: null
+    prior_mean_source: null
+  - oracle: amlodipine_mpo
+    gamma: 0.3
+    prior_mean: null
+    prior_mean_source: null
+  - oracle: celecoxib_rediscovery
+    gamma: 0.0
+    prior_mean: null
+    prior_mean_source: null
+  - oracle: isomers_c7h8n2o2
+    gamma: 0.5
+    prior_mean: null
+    prior_mean_source: null
+  - oracle: jnk3
+    gamma: 0.5
+    prior_mean: null
+    prior_mean_source: null
+variants:
+  - released
+  - running_mean
+  - support3
+  - shrink10
+  - running_mean_parent_control
+  - delta
+seeds: [0, 1, 2]
+stop_on_failure: true
+common:
+  output_root: output/pmo_ablation
+  max_oracle_calls: 3000
+  reporting_frequency: 100
+  checkpoint_every: 100
+  max_iterations: 30000
+  population_size: 100
+  warmup: 1000
+  legacy_warmup_off_by_one: true
+  softmax_temp: 1.2
+  randomness: 2.0
+  guidance_scale: 2.0
+  legacy_seed_count: 1
+  delta_attribution: novel_vs_parent
+  durable_events: true

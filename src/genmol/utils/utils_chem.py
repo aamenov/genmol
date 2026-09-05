@@ -69,12 +69,20 @@ def mix_sequences(prefix_sequences, suffix_sequences, prefix, suffix, num_sample
     return linked[:num_samples]
     
 
-def cut(smiles):
+def cut(smiles, rng=None):
+    """Sample the released three vocabulary cuts.
+
+    ``rng`` is optional so the released global-random behavior stays unchanged,
+    while controlled experiments can isolate fragmentation randomness from
+    proposal selection and diffusion sampling.
+    """
+    chooser = random if rng is None else rng
+
     def cut_nonring(mol):
         if not mol.HasSubstructMatch(Chem.MolFromSmarts('[*]-;!@[*]')):
             return None
 
-        bis = random.choice(mol.GetSubstructMatches(Chem.MolFromSmarts('[*]-;!@[*]')))  # single bond not in ring
+        bis = chooser.choice(mol.GetSubstructMatches(Chem.MolFromSmarts('[*]-;!@[*]')))  # single bond not in ring
         bs = [mol.GetBondBetweenAtoms(bis[0], bis[1]).GetIdx()]
         fragments_mol = Chem.FragmentOnBonds(mol, bs, addDummies=True, dummyLabels=[(1, 1)])
 
@@ -84,12 +92,43 @@ def cut(smiles):
             return None
         
     mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return set()
     frags = set()
     # non-ring cut
     for _ in range(3):
         frags_nonring = cut_nonring(mol)
         if frags_nonring is not None:
             frags |= set([Chem.MolToSmiles(f) for f in frags_nonring])
+    return frags
+
+
+def cut_all(smiles):
+    """Return fragments from every eligible single non-ring-bond cut.
+
+    This deterministic decomposition is not the paper's ``R_vocab`` rule.  It
+    is provided only for diagnostics and approximate changed-fragment credit
+    assignment in the delta ablation.
+    """
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return set()
+
+    pattern = Chem.MolFromSmarts('[*]-;!@[*]')
+    frags = set()
+    for atom_i, atom_j in mol.GetSubstructMatches(pattern):
+        bond = mol.GetBondBetweenAtoms(atom_i, atom_j)
+        fragmented = Chem.FragmentOnBonds(
+            mol,
+            [bond.GetIdx()],
+            addDummies=True,
+            dummyLabels=[(1, 1)],
+        )
+        try:
+            parts = Chem.GetMolFrags(fragmented, asMols=True, sanitizeFrags=True)
+        except ValueError:
+            continue
+        frags.update(Chem.MolToSmiles(part) for part in parts)
     return frags
 
 
