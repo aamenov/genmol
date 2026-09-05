@@ -66,9 +66,11 @@ training:
   antithetic_sampling: True
   sampling_eps: 1e-3
   global_mean_loss: True
-  # All token losses are summed and divided by total token count: sum(all_tokens)/count(all_tokens)
-  # Examples with more tokens (longer sequences) implicitly contribute more to the loss
-  # It's weighted by sequence length
+  # Within each process-local microbatch, sum token losses and divide by its
+  # token count. DDP and gradient accumulation then average those local ratios;
+  # they do not form one exact token ratio across ranks/accumulation windows.
+  # This matches the released GenMol reduction. Longer sequences supply more
+  # summands to their local ratio; equal-per-sequence mode weights them differently.
   use_bracket_safe: False
   # Explicit initialization is distinct from Lightning checkpoint resume.
   # Set only for a UDLM warm-start experiment.

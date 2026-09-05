@@ -1,0 +1,163 @@
+{
+  "schema_version": 1,
+  "purpose": "frozen audited local MDLM comparator for UDLM; not an exact paper reproduction",
+  "source_aggregate": {
+    "original_relative_path": "output/benchmarks/denovo_50000/report/aggregate.json",
+    "sha256": "b474efc593b665489359425dbe1ed0873f8ae1d44b77478b871aff6d6b555904",
+    "schema_version": 1,
+    "runner_sha256": "a77d7c84d8628403c6d7a11edebce5bf9b8405e3f8b79a326a6e06bd7f444cea"
+  },
+  "checkpoint": {
+    "original_relative_path": "outputs/paper_v1/checkpoints/50000.ckpt",
+    "sha256": "8d00aa47b02f64bf39ff6b0b2e786f213587366fc2c3d29712a00f3f84108dd6",
+    "size_bytes": 1396998679,
+    "global_step": 50000,
+    "diffusion_type": "mdlm"
+  },
+  "protocol": {
+    "seeds": [
+      0,
+      1,
+      2
+    ],
+    "samples_per_seed": 1000,
+    "total_requested_samples": 3000,
+    "single_generation_batch_per_seed": true,
+    "softmax_temperature": 0.5,
+    "randomness": 0.5,
+    "minimum_added_length": 40,
+    "safe_version": "V1",
+    "use_bracket_safe": false
+  },
+  "metric_definitions": {
+    "released_comparable": "SAFE fix=True repair, canonicalization, and largest-component-by-string-length selection before metrics",
+    "strict": "SAFE fix=False canonical decode with no repair or largest-component selection",
+    "validity": "valid decoded molecules divided by 1000 requested samples within each seed",
+    "uniqueness": "first-occurrence unique valid molecules divided by valid decoded molecules within each seed",
+    "quality": "first-occurrence unique valid molecules satisfying QED >= 0.6 and SA <= 4.0 divided by 1000 requested samples within each seed",
+    "diversity": "TDC diversity evaluated on first-occurrence unique valid molecules within each seed",
+    "headline_aggregation": "arithmetic mean and sample standard deviation (ddof=1) of the three seed-level metrics; no cross-seed molecule deduplication"
+  },
+  "released_comparable": {
+    "per_seed": [
+      {
+        "seed": 0,
+        "requested": 1000,
+        "valid_count": 1000,
+        "unique_count": 998,
+        "quality_count": 849,
+        "validity": 1.0,
+        "uniqueness": 0.998,
+        "quality": 0.849,
+        "diversity": 0.8239018373671015,
+        "raw_samples_sha256": "fb1a255f04092fdf8763b18eccb866eef02f1d7dde422727b00ce549bc7b2b2f",
+        "summary_sha256": "c8b312dd905ddd0f972920c2851569a4c2468c98aa46dfa2ac3f4dcbb3567a65"
+      },
+      {
+        "seed": 1,
+        "requested": 1000,
+        "valid_count": 1000,
+        "unique_count": 999,
+        "quality_count": 872,
+        "validity": 1.0,
+        "uniqueness": 0.999,
+        "quality": 0.872,
+        "diversity": 0.8214987143446951,
+        "raw_samples_sha256": "5f20bd6731e6c095189de1f7c82ecd46123115b308b1b232c167d64afd1c6dbb",
+        "summary_sha256": "f95f8261b37f82a711848c18b7b15ebea1235858099b2bf8ef5d53b528699575"
+      },
+      {
+        "seed": 2,
+        "requested": 1000,
+        "valid_count": 1000,
+        "unique_count": 999,
+        "quality_count": 853,
+        "validity": 1.0,
+        "uniqueness": 0.999,
+        "quality": 0.853,
+        "diversity": 0.8236634060558206,
+        "raw_samples_sha256": "70c962d46685855b8a1ac099e834956c32a1f0d8dda4a60146b9a8dbb1cac58a",
+        "summary_sha256": "a5c1be00950744b634c23ced6d2fea2f49ffe75b0d1419b3b01b9841bd3c4983"
+      }
+    ],
+    "mean": {
+      "validity": 1.0,
+      "uniqueness": 0.9986666666666667,
+      "quality": 0.858,
+      "diversity": 0.8230213192558725
+    },
+    "sample_sd": {
+      "validity": 0.0,
+      "uniqueness": 0.0005773502691896263,
+      "quality": 0.012288205727444518,
+      "diversity": 0.0013239926960545059
+    }
+  },
+  "strict": {
+    "per_seed": [
+      {
+        "seed": 0,
+        "requested": 1000,
+        "valid_count": 990,
+        "unique_count": 988,
+        "quality_count": 837,
+        "validity": 0.99,
+        "uniqueness": 0.997979797979798,
+        "quality": 0.837,
+        "diversity": 0.8235759382901502
+      },
+      {
+        "seed": 1,
+        "requested": 1000,
+        "valid_count": 986,
+        "unique_count": 985,
+        "quality_count": 861,
+        "validity": 0.986,
+        "uniqueness": 0.9989858012170385,
+        "quality": 0.861,
+        "diversity": 0.8206282422152162
+      },
+      {
+        "seed": 2,
+        "requested": 1000,
+        "valid_count": 988,
+        "unique_count": 987,
+        "quality_count": 845,
+        "validity": 0.988,
+        "uniqueness": 0.9989878542510121,
+        "quality": 0.845,
+        "diversity": 0.8232237734579942
+      }
+    ],
+    "mean": {
+      "validity": 0.988,
+      "uniqueness": 0.9986511511492829,
+      "quality": 0.8476666666666667,
+      "diversity": 0.8224759846544535
+    },
+    "sample_sd": {
+      "validity": 0.0020000000000000018,
+      "uniqueness": 0.0005814098058772169,
+      "quality": 0.012220201853215583,
+      "diversity": 0.0016098506479083267
+    }
+  },
+  "strict_vs_repaired_funnel": {
+    "requested": 3000,
+    "strict_valid": 2964,
+    "strict_unique_within_seed": 2960,
+    "strict_quality": 2543,
+    "released_valid": 3000,
+    "released_unique_within_seed": 2996,
+    "released_quality": 2574,
+    "released_recovered_strict_failure": 36,
+    "released_largest_component_applied": 41
+  },
+  "historical_run_caveats": [
+    "The original training used global batch size 2046 rather than the paper's 2048, three RTX A6000 GPUs rather than eight A100 GPUs, and an unpinned dataset/tokenizer revision.",
+    "The training RNG seed was not retained.",
+    "The benchmark recorded a dirty source tree at commit 2c47164fb49b921ea0e908f2fe735e2ba5c3b83e.",
+    "The historical benchmark allowed one preserved foreign compute process on its GPU; new UDLM launches require zero active compute processes.",
+    "Paper evaluation seeds were not disclosed, so the local seed values cannot be paired with published runs."
+  ]
+}

@@ -1,4 +1,4 @@
-"""Idempotently add the taught UDLM stage to the GenMol notebook."""
+"""Idempotently align Stage 0, taught UDLM Stage 20, and final reporting."""
 
 from __future__ import annotations
 
@@ -8,17 +8,436 @@ from pathlib import Path
 
 
 STAGE_TAG_PREFIX = "stage-20-udlm"
+UDLM_BASE_COMMIT = "02595d1ecf994bbd432ec67ef21b0d56ed97918d"
 
 
 def _cell(cell_type: str, source: str, tag: str):
     cell = {
         "cell_type": cell_type,
+        "id": tag,
         "metadata": {"tags": [tag]},
         "source": source.strip() + "\n",
     }
     if cell_type == "code":
         cell.update({"execution_count": None, "outputs": []})
     return cell
+
+
+def _find_cell(notebook: dict, cell_id: str) -> dict:
+    matches = [cell for cell in notebook["cells"] if cell.get("id") == cell_id]
+    if len(matches) != 1:
+        raise ValueError(f"expected exactly one cell with id {cell_id!r}, found {len(matches)}")
+    return matches[0]
+
+
+def _set_source(notebook: dict, cell_id: str, source: str) -> None:
+    cell = _find_cell(notebook, cell_id)
+    cell["source"] = source.strip() + "\n"
+    if cell["cell_type"] == "code":
+        cell["execution_count"] = None
+        cell["outputs"] = []
+
+
+def _clear_code_output(notebook: dict, cell_id: str) -> None:
+    cell = _find_cell(notebook, cell_id)
+    if cell["cell_type"] != "code":
+        raise ValueError(f"cell {cell_id!r} is not code")
+    cell["execution_count"] = None
+    cell["outputs"] = []
+    cell.setdefault("metadata", {}).pop("execution", None)
+
+
+STAGE0_GPU_COUNT_CODE = """
+# USER SETTING: request a GPU count of 1 or 2; physical IDs are selected dynamically.
+NUM_GPUS: int = 1
+
+if type(NUM_GPUS) is not int or not 1 <= NUM_GPUS <= 2:
+    raise ValueError('NUM_GPUS must be the integer 1 or 2.')
+
+print(f'Requested GPU count: {NUM_GPUS} (hard ceiling: 2)')
+"""
+
+
+STAGE0_SETUP_CODE = r"""
+from __future__ import annotations
+
+import csv
+import io
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+
+def _checked_text_before_runtime(command: list[str], *, cwd: Path) -> str:
+    completed = subprocess.run(
+        command,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return completed.stdout.strip()
+
+
+START_DIRECTORY = Path.cwd().resolve()
+PROJECT_ROOT = Path(
+    _checked_text_before_runtime(
+        ['git', 'rev-parse', '--show-toplevel'], cwd=START_DIRECTORY
+    )
+).resolve()
+GIT_COMMON_DIR_TEXT = _checked_text_before_runtime(
+    ['git', 'rev-parse', '--git-common-dir'], cwd=PROJECT_ROOT
+)
+GIT_COMMON_DIR = Path(GIT_COMMON_DIR_TEXT)
+if not GIT_COMMON_DIR.is_absolute():
+    GIT_COMMON_DIR = (PROJECT_ROOT / GIT_COMMON_DIR).resolve()
+SHARED_REPOSITORY_ROOT = GIT_COMMON_DIR.parent
+PROJECT_VENV = (SHARED_REPOSITORY_ROOT / '.venv').resolve()
+PROJECT_SOURCE_ROOT = (PROJECT_ROOT / 'src').resolve()
+
+assert (PROJECT_ROOT / 'src' / 'genmol').is_dir(), (
+    f'Git worktree has no src/genmol package: {PROJECT_ROOT}'
+)
+assert (PROJECT_ROOT / 'src' / 'genmol' / 'diffusion.py').is_file(), (
+    'This checkout does not contain the UDLM diffusion implementation.'
+)
+assert Path(sys.prefix).resolve() == PROJECT_VENV, (
+    f'Wrong Python environment: {Path(sys.prefix).resolve()}. '
+    f'Expected the project environment {PROJECT_VENV}.'
+)
+assert 'torch' not in sys.modules, (
+    'PyTorch was imported before GPU isolation. Restart the kernel and run from the top.'
+)
+
+# Resolve imports from this Git worktree rather than another editable checkout.
+sys.path[:] = [
+    str(PROJECT_SOURCE_ROOT),
+    *[
+        entry
+        for entry in sys.path
+        if not entry or Path(entry).resolve() != PROJECT_SOURCE_ROOT
+    ],
+]
+existing_pythonpath = os.environ.get('PYTHONPATH', '')
+pythonpath_parts = [
+    part
+    for part in existing_pythonpath.split(os.pathsep)
+    if part and Path(part).resolve() != PROJECT_SOURCE_ROOT
+]
+os.environ['PYTHONPATH'] = os.pathsep.join(
+    [str(PROJECT_SOURCE_ROOT), *pythonpath_parts]
+)
+
+import genmol as stage0_genmol
+
+GENMOL_SOURCE_PATH = Path(stage0_genmol.__file__).resolve()
+assert GENMOL_SOURCE_PATH.is_relative_to(PROJECT_SOURCE_ROOT), (
+    f'genmol resolved from {GENMOL_SOURCE_PATH}, not this worktree at '
+    f'{PROJECT_SOURCE_ROOT}.'
+)
+
+MAX_IDLE_MEMORY_MIB = 100
+MAX_IDLE_UTILIZATION_PERCENT = 5
+
+preexisting_visibility = os.environ.get('CUDA_VISIBLE_DEVICES')
+assert preexisting_visibility in (None, ''), (
+    'CUDA_VISIBLE_DEVICES was already set when this kernel started. The notebook will '
+    'not override a possible scheduler allocation. Start a fresh unallocated kernel.'
+)
+
+
+def _run_nvidia_smi(gpu_id: int, query: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [
+            'nvidia-smi',
+            '-i',
+            str(gpu_id),
+            query,
+            '--format=csv,noheader,nounits',
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _failure_text(result: subprocess.CompletedProcess) -> str:
+    detail = result.stderr.strip() or result.stdout.strip()
+    return ' | '.join(detail.splitlines()) if detail else f'exit code {result.returncode}'
+
+
+def discover_physical_gpu_ids() -> tuple[int, ...]:
+    result = subprocess.run(
+        [
+            'nvidia-smi',
+            '--query-gpu=index',
+            '--format=csv,noheader,nounits',
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0 or result.stderr.strip():
+        raise RuntimeError(f'Could not discover physical GPUs: {_failure_text(result)}')
+    try:
+        gpu_ids = tuple(int(line.strip()) for line in result.stdout.splitlines() if line.strip())
+    except ValueError as error:
+        raise RuntimeError('nvidia-smi returned a non-integer physical GPU index') from error
+    if not gpu_ids or len(gpu_ids) != len(set(gpu_ids)):
+        raise RuntimeError(f'Invalid physical GPU inventory: {gpu_ids}')
+    return gpu_ids
+
+
+PHYSICAL_GPU_IDS = discover_physical_gpu_ids()
+
+
+def probe_physical_gpu(gpu_id: int) -> dict:
+    gpu = {'index': gpu_id, 'eligible': False, 'reasons': []}
+    status = _run_nvidia_smi(
+        gpu_id,
+        '--query-gpu=index,uuid,name,memory.used,utilization.gpu,compute_mode',
+    )
+    if status.returncode != 0 or status.stderr.strip():
+        gpu['reasons'].append(f'status query failed: {_failure_text(status)}')
+        return gpu
+
+    rows = [
+        [field.strip() for field in row]
+        for row in csv.reader(io.StringIO(status.stdout))
+        if any(field.strip() for field in row)
+    ]
+    if len(rows) != 1 or len(rows[0]) != 6:
+        gpu['reasons'].append('status query returned an unexpected row')
+        return gpu
+
+    index_text, uuid, name, memory_text, utilization_text, compute_mode = rows[0]
+    try:
+        reported_index = int(index_text)
+        memory_mib = int(memory_text)
+        utilization_percent = int(utilization_text)
+    except ValueError:
+        gpu['reasons'].append('status query contained an N/A or non-numeric field')
+        return gpu
+    if reported_index != gpu_id or not uuid.startswith('GPU-'):
+        gpu['reasons'].append('status query returned an inconsistent index or UUID')
+        return gpu
+
+    gpu.update(
+        {
+            'uuid': uuid,
+            'name': name,
+            'memory_mib': memory_mib,
+            'utilization_percent': utilization_percent,
+            'compute_mode': compute_mode,
+        }
+    )
+
+    processes = _run_nvidia_smi(
+        gpu_id,
+        '--query-compute-apps=pid,used_memory',
+    )
+    if processes.returncode != 0 or processes.stderr.strip():
+        gpu['reasons'].append(f'process query failed: {_failure_text(processes)}')
+        return gpu
+
+    process_rows = []
+    for row in csv.reader(io.StringIO(processes.stdout)):
+        fields = [field.strip() for field in row]
+        if not any(fields) or fields[0].lower().startswith('no running'):
+            continue
+        if len(fields) != 2 or not fields[0].isdigit():
+            gpu['reasons'].append('process query returned an unverifiable row')
+            return gpu
+        process_rows.append({'pid': int(fields[0]), 'used_memory': fields[1]})
+
+    gpu['compute_process_count'] = len(process_rows)
+    if process_rows:
+        gpu['reasons'].append(f'{len(process_rows)} active compute process(es)')
+    if memory_mib > MAX_IDLE_MEMORY_MIB:
+        gpu['reasons'].append(
+            f'{memory_mib} MiB used exceeds {MAX_IDLE_MEMORY_MIB} MiB'
+        )
+    if utilization_percent > MAX_IDLE_UTILIZATION_PERCENT:
+        gpu['reasons'].append(
+            f'{utilization_percent}% utilization exceeds '
+            f'{MAX_IDLE_UTILIZATION_PERCENT}%'
+        )
+    if compute_mode.lower() == 'prohibited':
+        gpu['reasons'].append('compute mode is prohibited')
+
+    gpu['eligible'] = not gpu['reasons']
+    return gpu
+
+
+def print_gpu_snapshot(snapshot: list[dict]) -> None:
+    print('GPU availability snapshot:')
+    for gpu in snapshot:
+        if 'name' in gpu:
+            details = (
+                f"{gpu['name']}, {gpu['memory_mib']} MiB, "
+                f"{gpu['utilization_percent']}%, "
+                f"compute_processes={gpu.get('compute_process_count', '?')}"
+            )
+        else:
+            details = 'status unavailable'
+        state = 'ELIGIBLE' if gpu['eligible'] else 'REJECTED: ' + '; '.join(gpu['reasons'])
+        print(f"  physical {gpu['index']}: {details} -> {state}")
+
+
+def take_gpu_snapshot() -> list[dict]:
+    snapshot = [probe_physical_gpu(gpu_id) for gpu_id in PHYSICAL_GPU_IDS]
+    print_gpu_snapshot(snapshot)
+    return snapshot
+
+
+def select_idle_gpus(num_gpus: int) -> list[dict]:
+    if type(num_gpus) is not int or not 1 <= num_gpus <= 2:
+        raise ValueError('NUM_GPUS must be the integer 1 or 2.')
+
+    snapshot = take_gpu_snapshot()
+    eligible = sorted(
+        (gpu for gpu in snapshot if gpu['eligible']),
+        key=lambda gpu: (
+            gpu['memory_mib'],
+            gpu['utilization_percent'],
+            gpu['index'],
+        ),
+    )
+    if len(eligible) < num_gpus:
+        eligible_ids = [gpu['index'] for gpu in eligible]
+        raise RuntimeError(
+            f'Requested {num_gpus} GPU(s), but only {len(eligible)} passed the guard. '
+            f'Currently eligible physical IDs: {eligible_ids}. Wait and rerun.'
+        )
+
+    selected = eligible[:num_gpus]
+    rechecked = [probe_physical_gpu(gpu['index']) for gpu in selected]
+    changed = [gpu for gpu in rechecked if not gpu['eligible']]
+    if changed:
+        details = {gpu['index']: gpu['reasons'] for gpu in changed}
+        raise RuntimeError(
+            f'A selected GPU changed state during validation: {details}. '
+            'Restart the kernel and run again.'
+        )
+
+    return rechecked
+
+
+os.environ.update(
+    {
+        'CUDA_DEVICE_ORDER': 'PCI_BUS_ID',
+        'HF_HOME': str(PROJECT_ROOT / '.cache' / 'huggingface'),
+        'TORCH_HOME': str(PROJECT_ROOT / '.cache' / 'torch'),
+        'PIP_CACHE_DIR': str(PROJECT_ROOT / '.cache' / 'pip'),
+        'TOKENIZERS_PARALLELISM': 'false',
+        'CUBLAS_WORKSPACE_CONFIG': ':4096:8',
+    }
+)
+
+print(f'Git worktree root: {PROJECT_ROOT}')
+print(f'Project virtual environment: {PROJECT_VENV}')
+print(f'genmol source: {GENMOL_SOURCE_PATH}')
+print(f'Discovered physical GPU IDs: {PHYSICAL_GPU_IDS}')
+discovery_snapshot = take_gpu_snapshot()
+print(
+    'Currently eligible GPU count:',
+    sum(gpu['eligible'] for gpu in discovery_snapshot),
+)
+print('Discovery only: CUDA_VISIBLE_DEVICES has not been set.')
+"""
+
+
+STAGE0_PROVENANCE_MARKDOWN = f"""
+## Stage 0.4 - Verify source and dependency provenance
+
+The next cell records the active Git worktree rather than assuming one fixed
+directory or branch. It requires:
+
+- the full UDLM implementation base commit `{UDLM_BASE_COMMIT}` to be an
+  ancestor of the active `HEAD`;
+- `HEAD` to equal its local upstream-tracking commit, establishing that the
+  recorded commit has been pushed;
+- `genmol` to have resolved from this worktree's `src/` directory;
+- `python -m pip check` to pass in the shared project `.venv`.
+
+The branch name, tracking ref, full commits, and working-tree status are
+recorded. Uncommitted paths are evidence, not silently discarded. The ancestor
+check permits later fixes on top of the base implementation; an equality check
+against an obsolete notebook commit would make every legitimate update fail.
+
+**Concrete example.** If `HEAD=A` and `origin/branch=A`, the pushed-HEAD check
+passes. If the required UDLM base lies in `git log A`, the ancestry check also
+passes even when documentation fixes were committed later.
+
+**Difference from released code.** These provenance assertions are notebook
+engineering controls, not GenMol or UDLM algorithms.
+
+### Comprehension checkpoint
+
+1. Why is ancestry more appropriate than equality for the implementation base?
+2. What does `HEAD == @{{upstream}}` establish, and what does it not establish?
+3. Why record dirty paths rather than pretending they belong to the pushed commit?
+4. Does a successful provenance check prove scientific correctness?
+"""
+
+
+STAGE0_PROVENANCE_CODE = f"""
+def run_text(command: list[str]) -> str:
+    completed = subprocess.run(
+        command,
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return completed.stdout.strip()
+
+
+UDLM_BASE_COMMIT = '{UDLM_BASE_COMMIT}'
+actual_commit = run_text(['git', 'rev-parse', 'HEAD'])
+branch = run_text(['git', 'branch', '--show-current']) or '(detached HEAD)'
+tracking_ref = run_text(
+    ['git', 'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{{upstream}}']
+)
+pushed_head_commit = run_text(['git', 'rev-parse', '@{{upstream}}'])
+assert actual_commit == pushed_head_commit, (
+    f'HEAD {{actual_commit}} is not pushed to {{tracking_ref}} at {{pushed_head_commit}}.'
+)
+
+base_check = subprocess.run(
+    ['git', 'merge-base', '--is-ancestor', UDLM_BASE_COMMIT, actual_commit],
+    cwd=PROJECT_ROOT,
+    capture_output=True,
+    text=True,
+    check=False,
+)
+assert base_check.returncode == 0, (
+    f'Required UDLM base {{UDLM_BASE_COMMIT}} is not an ancestor of HEAD '
+    f'{{actual_commit}}: {{base_check.stderr.strip()}}'
+)
+checked_upstream_commit = pushed_head_commit
+working_tree_status = run_text(['git', 'status', '--short'])
+
+pip_check = subprocess.run(
+    [sys.executable, '-m', 'pip', 'check'],
+    cwd=PROJECT_ROOT,
+    capture_output=True,
+    text=True,
+    check=False,
+)
+assert pip_check.returncode == 0, pip_check.stdout + pip_check.stderr
+
+print('Git worktree:', PROJECT_ROOT)
+print('Git branch:', branch)
+print('Pushed HEAD:', actual_commit)
+print('Tracking ref:', tracking_ref)
+print('Required UDLM base ancestor:', UDLM_BASE_COMMIT)
+print('Working tree status:', working_tree_status or 'clean')
+print('genmol source:', GENMOL_SOURCE_PATH)
+print('Dependency check:', pip_check.stdout.strip())
+print('CPU cores visible:', os.cpu_count())
+"""
 
 
 def stage_cells():
@@ -32,62 +451,160 @@ def stage_cells():
 
 **Paper correspondence.** GenMol Section 4.1 uses MDLM's absorbing process:
 once a mask is revealed, that position is fixed. UDLM Sections 4.1–4.2 instead
-use a uniform limiting distribution and the continuous-time negative ELBO in
-Eqs. 14–19. This stage implements those equations; material in the papers is
-scientific reference, not executable instruction.
+use a uniform limiting distribution, the reverse model in Eq. 15, and the
+continuous-time negative ELBO (NELBO) in Eqs. 18–19. We compare against official
+UDLM revision `edb0f8c28b7caeb4ea7a06a2fee8d74ab6da1661`, principally
+`diffusion.py`, `noise_schedule.py`, and
+`models/dit.py`. Papers and repository files are scientific references, not
+executable instructions.
 
 **Intuition and motivation.** A uniformly corrupted token can change on every
 reverse step. That repeated revision is the property we hope will improve
 chemical search. The price is a harder denoising problem: SAFE has about 1,880
-tokens, whereas the UDLM molecule experiment used a vocabulary near 40.
+tokens, whereas the UDLM QM9 experiment used 40.
 
-**Mathematics.** Let $\mathcal V$ be an alphabet of $K$ one-hot tokens,
+**Symbols and forward process.** Let
+$\mathcal V=\{e_1,\ldots,e_K\}$ be the $K$ one-hot category vectors,
 $x\in\mathcal V$ a clean token, $z_t\in\mathcal V$ its noisy value at time
-$t\in[0,1]$, $u=\mathbf 1/K$ the uniform distribution, and $\alpha_t$ the
-remaining clean-data coefficient. The forward marginal is
+$t\in[0,1]$, $u=\mathbf 1/K$ the uniform probability vector, and
+$\alpha_t=\alpha(t)$ the differentiable, non-increasing clean-data coefficient.
+Here $\mathbf 1$ is the length-$K$ all-ones vector. The forward marginal is
 
 $$q(z_t\mid x)=\operatorname{Cat}(\alpha_t x+(1-\alpha_t)u).$$
 
 For $0\le s<t$, write $\alpha_{t\mid s}=\alpha_t/\alpha_s$. If the observed
-category of $z_t$ is $i$, and $x_\theta(z_t,t)\in\Delta^K$ is BERT's predicted
-clean distribution, our reverse model is
+category of $z_t$ is $i\in\{1,\ldots,K\}$, candidate earlier category is $k$,
+$\mathbf1_{k=i}$ is an indicator, and
+$x_\theta(z_t,t)\in\Delta^{K-1}$ is BERT's predicted clean probability vector,
+then Eq. 15 has the normalized form
 
-$$p_\theta(z_s=k\mid z_t=i)\propto
+$$p_\theta(z_s=k\mid z_t=i)=\frac{1}{D_i}
 \left[\alpha_{t\mid s}\mathbf1_{k=i}+\frac{1-\alpha_{t\mid s}}K\right]
-\left[\alpha_s x_{\theta,k}+\frac{1-\alpha_s}K\right].$$
+\left[\alpha_s x_{\theta,k}+\frac{1-\alpha_s}K\right],$$
+
+where $D_i=\alpha_t x_{\theta,i}+(1-\alpha_t)/K$ and
+$\Delta^{K-1}=\{p\in\mathbb R^K:p_j\ge0,\sum_jp_j=1\}$.
+
+**Full variational objective.** On a finite reverse grid
+$1=t_T>t_{T-1}>\cdots>t_0>0$, write $s_m=t_{m-1}$ and let $q$ denote the
+joint forward path. Before taking a continuous-time limit, the non-negative
+variational upper bound is
+
+$$\mathcal L_T=\mathbb E_q\!\left[
+-\log p_\theta(x\mid z_{t_0})
++\sum_{m=1}^{T}D_{\rm KL}\!\left(
+q(z_{s_m}\mid z_{t_m},x)\,\|\,p_\theta(z_{s_m}\mid z_{t_m})\right)
++D_{\rm KL}\!\left(q(z_{t_T}\mid x)\,\|\,p(z_{t_T})\right)
+\right].$$
+
+Here $T$ is the number of finite transitions and $D_{\rm KL}$ is categorical
+Kullback--Leibler divergence. Under the ideal endpoint conditions
+$\alpha(0)=1$ and $\alpha(1)=0$, a copying reconstruction parameterization and
+$p(z_1)=u$ make the first and last terms vanish as $T\to\infty$. The middle
+sum then becomes the Eq. 18 integral below.
 
 For the loss, define $\bar x=K\alpha_t x+(1-\alpha_t)\mathbf1$,
 $\bar x_\theta=K\alpha_t x_\theta+(1-\alpha_t)\mathbf1$,
-$r_j=\bar x_j/\bar x_i$, $s_j=\bar x_{\theta,j}/\bar x_{\theta,i}$, and
-$v_j=\log s_j-\log r_j$. UDLM Eq. 18 is evaluated by the exactly equivalent,
-non-negative expression
+$r_j=\bar x_j/\bar x_i$, $\hat r_j=\bar x_{\theta,j}/\bar x_{\theta,i}$,
+and $v_j=\log\hat r_j-\log r_j$ for $j\in\{1,\ldots,K\}$. For
+$t\in(0,1)$, with $\alpha'_t=d\alpha(t)/dt\le0$, the per-token integrand is
 
-$$\mathcal L_t=\frac{-\alpha'_t}{K\alpha_t}
+$$\ell_\theta(x,z_t,t)=\frac{-\alpha'_t}{K\alpha_t}
 \sum_{j\ne i}r_j\,[\exp(v_j)-1-v_j].$$
 
-Every symbol above is per token; sequence training sums or averages it over the
-selected content positions.
+Since $\exp(v)-1-v\ge0$, this form is non-negative and avoids cancellation.
+For a length-$L$ sequence $x^{(1:L)}$, let $p_{\rm data}$ be the clean-sequence
+distribution, let $q(z_t^{(1:L)}\mid x^{(1:L)})$ be the token-factorized forward
+law, and let $C(x)\subseteq\{1,\ldots,L\}$ contain exactly the positions that
+are valid under the attention mask **and are not PAD, BOS, or EOS**. Thus $C(x)$
+is the molecular-content support used by `GenMol.diffusion_token_mask`, not just
+"all non-padding positions." Let $\theta$ denote all denoiser parameters. The
+prediction for position $\ell$ is $x_\theta^{(\ell)}(z_t^{(1:L)},t)$, so
+$\ell_\theta^{(\ell)}(x,z_t,t)$ means the scalar integrand above evaluated at
+that position while conditioning on the whole noisy sequence. The full
+sequence objective is
+
+$$\mathcal L^\infty=
+\mathbb E_{x^{(1:L)}\sim p_{\rm data}}\int_0^1
+\mathbb E_{z_t^{(1:L)}\sim q(\cdot\mid x^{(1:L)})}
+\left[\sum_{\ell\in C(x)}
+\ell_\theta^{(\ell)}(x,z_t,t)\right]dt.$$
+
+Training estimates both expectations with sampled data, one sampled time per
+sequence, and one sampled noisy sequence. Within one process-local microbatch,
+the configured `global_mean_loss=True` reduction for $B$ sequences is
+
+$$\widehat{\mathcal L}_{\rm token}=
+\frac{\sum_{b=1}^B\sum_{\ell\in C(x_b)}
+\ell_\theta^{(\ell)}(x_b,z_{t_b},t_b)}
+{\sum_{b=1}^B|C(x_b)|}.$$
+
+For one fixed microbatch this is exactly $B/\sum_b|C(x_b)|$ times the mean of
+the $B$ sequence sums, so it does **not** change their relative contributions
+inside that fixed group; longer sequences contain more summands in both forms.
+The scale factor does vary with the length composition of successive
+microbatches, so their stochastic contributions can differ. There is also an
+important distributed-training qualification. Let $R$ be the number of DDP
+ranks and $A$ the number of gradient-accumulation microbatches in a complete
+optimizer step. Ordinary DDP and Lightning accumulation produce an equal mean
+of the $RA$ local ratios,
+
+$$\frac1{RA}\sum_{r=1}^{R}\sum_{a=1}^{A}
+\frac{\sum_{b,\ell\in C(x_{r,a,b})}\ell_\theta^{(\ell)}}
+{\sum_b |C(x_{r,a,b})|},$$
+
+not one numerator divided by the token count pooled across all ranks and
+microbatches. The two coincide when $R=A=1$ or all local denominators match.
+This follows NVIDIA's released process-local `global_mean` behavior for a
+faithful baseline; it is a labeled weighting limitation, not an exact global
+token mean. With `global_mean_loss=False`, the code first divides each sequence
+sum by $|C(x_b)|$ and then averages sequences locally before the same DDP and
+accumulation averaging, giving each sequence equal weight inside its
+microbatch. These normalizations are not a single constant rescaling unless the
+relevant content lengths and group denominators are equal. An exact
+cross-rank/accumulation token reduction must be tested as a separate repair.
+
+The definition of $C(x)$ is a **GenMol-specific training-support adaptation**.
+The current faithful MDLM path uses the full attention mask and therefore may
+corrupt and supervise BOS/EOS, whereas this UDLM path clamps and removes them
+from the loss. This support change is distinct from the separate prior-alphabet
+ablation that optionally removes UNK/CLS/SEP/PAD/MASK from uniform refreshes.
+Consequently a final method-causality claim requires an MDLM control with the
+same content-only framing; without it, the support mismatch must remain an
+explicit limitation even if the operational UDLM system wins.
 
 **Concrete example.** With $K=3$, clean token A, and $\alpha_t=0.2$, the noisy
 probabilities are $(0.2+0.8/3,\,0.8/3,\,0.8/3)=(0.4667,0.2667,0.2667)$.
 Unlike masking, B or C can later return to A—or change again.
 
-**Code below.** `x0` and `xt` have shape `(batch=1, length=3)`; logits have
-shape `(1, 3, K)`. The checks enforce a normalized posterior, a zero loss for a
-perfect clean predictor, and finite loss for an imperfect predictor.
+**Code below.** Notebook-native functions implement the forward probabilities,
+Eq. 15 posterior, and stable Eq. 18 integrand directly. They are independent
+oracles for `ContinuousUniformDiffusion`. Token IDs are `(B,L)`, logits and
+probabilities are `(B,L,K)`, and times are `(B,)`. We also compare empirical
+forward frequencies with the analytical three-token example.
 
-**Difference from released code.** The released implementation subtracts two
-large Eq. 18 terms. `ContinuousUniformDiffusion` uses the equivalent
-`expm1(v)-v` form to avoid cancellation. Compatibility mode retains the
-release's documented schedule mismatch: corruption uses
-$\alpha_t=1-0.999t$, while the loss uses the idealized $1-t$.
+**Released code and schedule qualification.** The release evaluates Eq. 18 by
+subtracting two potentially large terms; production GenMol uses the equivalent
+`expm1(v)-v` identity. The release contains a compatibility mismatch, which we
+preserve for the faithful control:
+corruption and reverse sampling use
+$\alpha_{\rm rel}(t)=1-(1-\epsilon)t$ with $\epsilon=10^{-3}$, while the loss
+hard-codes $\alpha_{\rm ideal}(t)=1-t$ and $\alpha'_{\rm ideal}=-1$. Therefore
+the stable loss is exactly equivalent to the *released idealized loss*, but is
+not the exact NELBO of the residual-clean forward schedule. In particular,
+$\alpha_{\rm rel}(1)=10^{-3}$ means $q(z_1\mid x)$ is not exactly uniform, so
+the paper's analytically zero prior-loss condition does not hold exactly even
+though sampling starts from an exact uniform prior. A schedule-consistent repair
+is a later, separately labeled ablation.
 
 **Comprehension checkpoint.** Why can UDLM repair an early mistake while MDLM
 cannot? Expected reasoning: uniform reverse transitions resample all editable
 positions, whereas the absorbing posterior copies every already-visible MDLM
-token. Why is large $K$ risky? Expected reasoning: corruption can replace a
-token with any of many rare/incompatible alternatives, so clean prediction is
-harder.
+token. Why is the compatibility loss not the exact NELBO of its forward process?
+Expected reasoning: the forward process uses $\alpha_{\rm rel}$ with a nonzero
+endpoint, while the loss and zero-prior derivation use $\alpha_{\rm ideal}$.
+Why is large $K$ risky? Expected reasoning: corruption can replace a token with
+any of many rare or incompatible alternatives, so clean prediction is harder.
 """,
             f"{STAGE_TAG_PREFIX}-math",
         ),
@@ -95,38 +612,197 @@ harder.
             "code",
             r"""
 import torch
+from torch.nn import functional as F
 from genmol.diffusion import ContinuousUniformDiffusion
+
+
+def reference_uniform_forward_probs(clean_ids, alpha, num_classes):
+    '''Implement q(z_t | x) directly; return shape (B, L, K).'''
+    if clean_ids.ndim != 2 or alpha.shape != (clean_ids.shape[0],):
+        raise ValueError("expected clean_ids (B,L) and alpha (B,)")
+    clean_one_hot = F.one_hot(clean_ids, num_classes=num_classes).to(torch.float64)
+    alpha = alpha.to(torch.float64)[:, None, None]
+    return alpha * clean_one_hot + (1.0 - alpha) / num_classes
+
+
+def reference_uniform_reverse_probs(clean_logits, noisy_ids, t, s, noise_eps):
+    '''Implement the normalized Eq. 15 product directly.'''
+    num_classes = clean_logits.shape[-1]
+    clean_probs = clean_logits.to(torch.float64).softmax(-1)
+    noisy_one_hot = F.one_hot(noisy_ids, num_classes).to(torch.float64)
+    alpha_t = (1.0 - (1.0 - noise_eps) * t.to(torch.float64))[:, None, None]
+    alpha_s = (1.0 - (1.0 - noise_eps) * s.to(torch.float64))[:, None, None]
+    alpha_t_given_s = alpha_t / alpha_s
+    transition_to_observation = (
+        alpha_t_given_s * noisy_one_hot
+        + (1.0 - alpha_t_given_s) / num_classes
+    )
+    predicted_marginal_s = alpha_s * clean_probs + (1.0 - alpha_s) / num_classes
+    observed_clean_probability = torch.gather(
+        clean_probs, -1, noisy_ids[..., None]
+    )
+    normalizer = alpha_t * observed_clean_probability + (1.0 - alpha_t) / num_classes
+    return transition_to_observation * predicted_marginal_s / normalizer
+
+
+def reference_stable_udlm_integrand(clean_logits, clean_ids, noisy_ids, t):
+    '''Implement the release-compatible idealized Eq. 18 integrand.'''
+    num_classes = clean_logits.shape[-1]
+    clean_probs = clean_logits.to(torch.float64).softmax(-1)
+    alpha = (1.0 - t.to(torch.float64))[:, None, None]
+    clean_one_hot = F.one_hot(clean_ids, num_classes).to(torch.float64)
+    noisy_one_hot = F.one_hot(noisy_ids, num_classes).to(torch.bool)
+    x_bar = num_classes * alpha * clean_one_hot + (1.0 - alpha)
+    x_bar_theta = num_classes * alpha * clean_probs + (1.0 - alpha)
+    gather_index = noisy_ids[..., None]
+    log_r = x_bar.log() - torch.gather(x_bar.log(), -1, gather_index)
+    log_r_hat = x_bar_theta.log() - torch.gather(
+        x_bar_theta.log(), -1, gather_index
+    )
+    v = log_r_hat - log_r
+    phi = torch.expm1(v) - v
+    phi = torch.where(noisy_one_hot, torch.zeros_like(phi), phi)
+    return (log_r.exp() * phi).sum(-1) / (num_classes * alpha.squeeze(-1))
+
+
+def reference_released_literal_udlm_integrand(clean_logits, clean_ids, noisy_ids, t):
+    '''Implement the released Eq. 18 subtraction before stable rearrangement.'''
+    num_classes = clean_logits.shape[-1]
+    clean_probs = clean_logits.to(torch.float64).log_softmax(-1).exp()
+    alpha = (1.0 - t.to(torch.float64))[:, None, None]
+    clean_one_hot = F.one_hot(clean_ids, num_classes).to(torch.float64)
+    x_bar = num_classes * alpha * clean_one_hot + (1.0 - alpha)
+    x_bar_theta = num_classes * alpha * clean_probs + (1.0 - alpha)
+    gather_index = noisy_ids[..., None]
+    x_bar_i = torch.gather(x_bar, -1, gather_index)
+    x_bar_theta_i = torch.gather(x_bar_theta, -1, gather_index)
+    coefficient = -1.0 / (num_classes * alpha)
+    term_1 = num_classes / x_bar_i - num_classes / x_bar_theta_i
+    term_2 = (
+        (x_bar / x_bar_i)
+        * (
+            x_bar_theta_i.log()
+            - x_bar_theta.log()
+            + x_bar.log()
+            - x_bar_i.log()
+        )
+    ).sum(-1, keepdim=True)
+    return (coefficient * (term_1 - term_2)).squeeze(-1)
+
 
 toy_udlm = ContinuousUniformDiffusion(
     num_classes=3,
     noise_eps=1e-3,
     antithetic_sampling=False,
 )
-x0 = torch.tensor([[0, 1, 2]])                         # (B=1, L=3)
-xt = torch.tensor([[2, 1, 0]])                         # (B=1, L=3)
-t = torch.tensor([0.8])                                # (B=1,)
-s = torch.tensor([0.5])                                # (B=1,)
+x0 = torch.tensor([[0, 1, 2]])                           # (B=1, L=3)
+xt = torch.tensor([[2, 1, 0]])                           # (B=1, L=3)
+t = torch.tensor([0.8], dtype=torch.float64)             # (B=1,)
+s = torch.tensor([0.5], dtype=torch.float64)             # (B=1,)
 
-imperfect_logits = torch.zeros(1, 3, 3)               # (B, L, K)
+forward_probs = reference_uniform_forward_probs(x0, toy_udlm.alpha(t), 3)
+expected_first_forward = torch.tensor(
+    [0.2008 + 0.7992 / 3, 0.7992 / 3, 0.7992 / 3],
+    dtype=torch.float64,
+)
+assert torch.allclose(forward_probs[0, 0], expected_first_forward, atol=1e-12)
+
+draw_count = 30_000
+draw_clean = torch.zeros((draw_count, 1), dtype=torch.long)
+draw_times = torch.full((draw_count,), 0.8)
+draws = toy_udlm.forward_process(
+    draw_clean,
+    draw_times,
+    generator=torch.Generator().manual_seed(20),
+)
+empirical_forward = torch.bincount(draws[:, 0], minlength=3) / draw_count
+assert torch.allclose(empirical_forward, expected_first_forward.float(), atol=0.01)
+
+imperfect_logits = torch.zeros(1, 3, 3, dtype=torch.float64)  # (B, L, K)
+posterior_reference = reference_uniform_reverse_probs(
+    imperfect_logits, xt, t, s, noise_eps=1e-3
+)
 posterior = toy_udlm.posterior_probs(imperfect_logits, xt, t, s)
 assert posterior.shape == (1, 3, 3)
 assert torch.all(posterior >= 0)
-assert torch.allclose(posterior.sum(-1), torch.ones(1, 3))
+assert torch.allclose(posterior.sum(-1), torch.ones(1, 3, dtype=torch.float64))
+assert torch.allclose(posterior, posterior_reference, atol=1e-12, rtol=1e-12)
 
 perfect_logits = torch.full((1, 3, 3), -100.0, dtype=torch.float64)
 perfect_logits.scatter_(-1, x0[..., None], 100.0)
 perfect_loss = toy_udlm.loss_per_token(
-    perfect_logits,
-    x0,
-    xt,
-    t.to(torch.float64),
+    perfect_logits, x0, xt, t
 )
 imperfect_loss = toy_udlm.loss_per_token(imperfect_logits, x0, xt, t)
+reference_imperfect_loss = reference_stable_udlm_integrand(
+    imperfect_logits, x0, xt, t
+)
 assert torch.allclose(perfect_loss, torch.zeros_like(perfect_loss), atol=1e-12)
-assert torch.isfinite(imperfect_loss).all() and torch.all(imperfect_loss >= 0)
+assert torch.isfinite(imperfect_loss).all() and torch.all(imperfect_loss > 0)
+assert torch.allclose(imperfect_loss, reference_imperfect_loss, atol=1e-12, rtol=1e-12)
 
-print("posterior for position 0:", posterior[0, 0].tolist())
-print("imperfect per-token loss:", imperfect_loss.tolist())
+batched_x0 = torch.tensor([[0, 1], [2, 0]])
+batched_xt = torch.tensor([[1, 1], [0, 2]])
+batched_t = torch.tensor([0.35, 0.9], dtype=torch.float64)
+batched_s = torch.tensor([0.1, 0.4], dtype=torch.float64)
+batched_logits = torch.randn(
+    2, 2, 3, dtype=torch.float64, generator=torch.Generator().manual_seed(21)
+)
+batched_posterior_reference = reference_uniform_reverse_probs(
+    batched_logits, batched_xt, batched_t, batched_s, noise_eps=1e-3
+)
+batched_posterior = toy_udlm.posterior_probs(
+    batched_logits, batched_xt, batched_t, batched_s
+)
+batched_loss_reference = reference_stable_udlm_integrand(
+    batched_logits, batched_x0, batched_xt, batched_t
+)
+batched_loss = toy_udlm.loss_per_token(
+    batched_logits, batched_x0, batched_xt, batched_t
+)
+assert batched_posterior.shape == (2, 2, 3)
+assert batched_loss.shape == (2, 2)
+assert torch.allclose(
+    batched_posterior, batched_posterior_reference, atol=1e-12, rtol=1e-12
+)
+assert torch.allclose(
+    batched_loss, batched_loss_reference, atol=1e-12, rtol=1e-12
+)
+
+gradient_logits = batched_logits.detach().clone().requires_grad_()
+production_for_gradient = toy_udlm.loss_per_token(
+    gradient_logits, batched_x0, batched_xt, batched_t
+)
+released_literal = reference_released_literal_udlm_integrand(
+    gradient_logits, batched_x0, batched_xt, batched_t
+)
+production_gradient = torch.autograd.grad(
+    production_for_gradient.sum(), gradient_logits, retain_graph=True
+)[0]
+released_literal_gradient = torch.autograd.grad(
+    released_literal.sum(), gradient_logits
+)[0]
+assert torch.allclose(
+    production_for_gradient, released_literal, atol=2e-12, rtol=2e-12
+)
+assert torch.allclose(
+    production_gradient, released_literal_gradient, atol=2e-11, rtol=2e-11
+)
+
+stage20_reference_checks = {
+    "forward_shape": tuple(forward_probs.shape),
+    "analytical_forward_A": forward_probs[0, 0].tolist(),
+    "empirical_forward_A": empirical_forward.tolist(),
+    "posterior_shape": tuple(posterior.shape),
+    "posterior_matches_reference": True,
+    "stable_loss_matches_reference": True,
+    "batched_loss_shape": tuple(batched_loss.shape),
+    "batched_cross_checks_passed": True,
+    "released_literal_value_and_gradient_match": True,
+    "perfect_loss_zero": True,
+}
+
+print(stage20_reference_checks)
 """,
             f"{STAGE_TAG_PREFIX}-math-code",
         ),
@@ -138,26 +814,34 @@ print("imperfect per-token loss:", imperfect_loss.tolist())
 **Paper correspondence and motivation.** UDLM predicts
 $x_\theta(z_t,t)$, so the denoiser must know the noise level. The official DiT
 maps the log-linear total noise $\sigma(t)=-\log[1-(1-\epsilon)t]$ through
-sinusoidal features and adaptive layer normalization. GenMol's BERT has no
-time input.
+sinusoidal features and adaptive layer normalization (AdaLN). Here
+$\epsilon=10^{-3}$ is the residual clean coefficient at $t=1$. GenMol's
+released BERT has no time input.
 
-**Mathematics and intuition.** For feature dimension $d$, pair frequencies
-$\omega_m=\exp[-\log(10{,}000)m/(d/2)]$ with
-$(\cos(\sigma\omega_m),\sin(\sigma\omega_m))$. An MLP maps these features to a
-vector $c\in\mathbb R^H$, where $H$ is BERT's hidden size, and the implementation
-adds $c$ to every token embedding. Low $\sigma$ means nearly clean input; high
-$\sigma$ means the network should rely more on global context.
+**Mathematics and intuition.** For an even feature dimension $d$, let
+$m\in\{0,\ldots,d/2-1\}$ and
+$\omega_m=\exp[-\log(10{,}000)m/(d/2)]$. Concatenating
+$(\cos(\sigma\omega_m))_m$ and $(\sin(\sigma\omega_m))_m$ gives a vector in
+$\mathbb R^d$; an odd $d$ receives one trailing zero. An MLP maps it to
+$c\in\mathbb R^H$, where $H$ is BERT's hidden size, and our adaptation adds $c$
+to every word embedding. Low $\sigma$ means nearly clean input; high $\sigma$
+means the network should rely more on global context.
 
-**Concrete example and code below.** A tiny BERT receives token IDs of shape
-`(2, 4)` and one noise value per sequence `(2,)`; its logits are `(2, 4, 13)`.
-The adapter's output projection starts at zero, so an MDLM warm-start is not
-immediately perturbed. The gradient check shows that the adapter can learn.
+**Concrete example and code below.** Times `(0.1, 0.9)` become two scalar noise
+levels and then sinusoidal tensors `(2,16)`. The reference features must match
+the production embedder exactly. A tiny BERT receives two copies of token IDs
+with shape `(2,4)` and produces logits `(2,4,13)`. The adapter output projection
+starts at zero, so the two outputs agree before training; its nonzero gradient
+shows that time conditioning can begin learning on the first update.
 
 **Difference from released code.** Additive conditioning preserves GenMol's
-BERT and isolates the diffusion change, but it is not the official DiT's
-per-block AdaLN. An MDLM checkpoint is therefore a backbone-only initialization,
-never a resumed UDLM run: optimizer, scheduler, step counter, adapter, and EMA
-must restart.
+BERT and absolute positional embeddings. It is not the official DiT, which
+applies an outer SiLU to the timestep MLP, uses rotary positions, and injects
+zero-initialized shift/scale/gate vectors through every AdaLN block and the
+output layer. Zero-initializing our adapter output is a GenMol warm-start
+adaptation, not a released-UDLM detail. An MDLM checkpoint is therefore only a
+BERT/MLM-head initialization, never a resumed UDLM run: optimizer, scheduler,
+step counter, adapter, and EMA restart.
 
 **Comprehension checkpoint.** Why not omit time because MDLM did? Expected
 reasoning: MDLM's SUBS parameterization can be time-independent, but UDLM must
@@ -172,7 +856,30 @@ gradient on the first update.
             "code",
             r"""
 from transformers.models.bert.configuration_bert import BertConfig
-from genmol.backbone import TimeConditionedBertForMaskedLM
+from genmol.backbone import TimestepEmbedder, TimeConditionedBertForMaskedLM
+
+
+def reference_sinusoidal_noise_embedding(values, dimension, max_period=10_000):
+    '''Notebook-native version of the official timestep features.'''
+    half = dimension // 2
+    frequencies = torch.exp(
+        -torch.log(values.new_tensor(float(max_period), dtype=torch.float32))
+        * torch.arange(half, device=values.device, dtype=torch.float32)
+        / half
+    )
+    arguments = values.float()[:, None] * frequencies[None]
+    features = torch.cat((torch.cos(arguments), torch.sin(arguments)), dim=-1)
+    if dimension % 2:
+        features = torch.cat((features, torch.zeros_like(features[:, :1])), dim=-1)
+    return features
+
+
+time_values = torch.tensor([0.1, 0.9])                   # (B=2,)
+noise = -torch.log1p(-(1.0 - 1e-3) * time_values)        # sigma(t), (B=2,)
+reference_features = reference_sinusoidal_noise_embedding(noise, 16)
+production_features = TimestepEmbedder.sinusoidal_embedding(noise, 16)
+assert reference_features.shape == (2, 16)
+assert torch.allclose(reference_features, production_features)
 
 tiny_bert = TimeConditionedBertForMaskedLM(
     BertConfig(
@@ -186,19 +893,35 @@ tiny_bert = TimeConditionedBertForMaskedLM(
     ),
     time_embedding_size=16,
 )
-token_ids = torch.tensor([[1, 5, 8, 2], [1, 6, 7, 2]])  # (B=2, L=4)
+token_ids = torch.tensor([[1, 5, 8, 2], [1, 5, 8, 2]])  # same input, (B=2,L=4)
 attention = torch.ones_like(token_ids)                    # (B=2, L=4)
-noise = torch.tensor([0.1, 3.0])                          # (B=2,)
-logits = tiny_bert(token_ids, attention, noise_level=noise).logits
-assert logits.shape == (2, 4, 13)
+conditioner_at_initialization = tiny_bert.time_conditioner(noise)
+assert torch.count_nonzero(conditioner_at_initialization) == 0
 
-logits.square().mean().backward()
+tiny_bert.eval()
+with torch.no_grad():
+    initial_logits = tiny_bert(token_ids, attention, noise_level=noise).logits
+assert initial_logits.shape == (2, 4, 13)
+assert torch.allclose(initial_logits[0], initial_logits[1])
+
+tiny_bert.train()
+tiny_bert.zero_grad(set_to_none=True)
+training_logits = tiny_bert(token_ids, attention, noise_level=noise).logits
+training_logits.square().mean().backward()
 adapter_gradient = tiny_bert.time_conditioner.mlp[-1].weight.grad
 assert adapter_gradient is not None
 assert torch.isfinite(adapter_gradient).all()
 assert torch.count_nonzero(adapter_gradient) > 0
-print("logit shape:", tuple(logits.shape))
-print("adapter gradient norm:", float(adapter_gradient.norm()))
+
+stage20_time_checks = {
+    "time_shape": tuple(time_values.shape),
+    "noise_levels": noise.tolist(),
+    "feature_shape": tuple(reference_features.shape),
+    "logit_shape": tuple(initial_logits.shape),
+    "zero_init_preserves_same_input": True,
+    "adapter_output_gradient_norm": float(adapter_gradient.norm()),
+}
+print(stage20_time_checks)
 """,
             f"{STAGE_TAG_PREFIX}-time-code",
         ),
@@ -210,8 +933,10 @@ print("adapter gradient norm:", float(adapter_gradient.norm()))
 **Paper correspondence.** UDLM sampling begins with iid uniform tokens at
 $t=1$ and walks a fixed grid $1=t_M>\cdots>t_0\approx0$. At each step BERT
 predicts $x_\theta$, the posterior from 20.1 is formed, and every editable
-position is sampled again. There is no MDLM confidence ranking, monotone
-unmasking, or cache.
+position is sampled again. Here $M$ is the number of reverse steps and $t_m$ is
+one grid time. There is no MDLM confidence ranking or monotone unmasking. The
+official UDLM configurations disable cache reuse because the denoiser is time
+conditioned, although the generic released sampler contains a cache path.
 
 **Molecular adaptation and intuition.** GenMol represents a requested edit with
 `[MASK]` placeholders. The UDLM sampler first records their boolean locations,
@@ -220,10 +945,13 @@ padding, and supplied fragment context after every reverse step. For example,
 `[BOS] context [MASK] [MASK] [EOS]` may revise the two editable tokens many
 times, but `context` cannot drift.
 
-**Shapes and invariants in the code below.** `state` is `(1, 4)`, posterior
-logits are `(1, 4, K)`, and `editable` is a boolean `(1, 4)` tensor. The final
-assertion proves that positions 0 and 3 remain byte-for-byte unchanged. The
-production sampler repeats this operation for 16/32/64-step ablations.
+**Shapes and invariants in the code below.** `state` is `(1,4)`, clean-token
+logits are `(1,4,K)`, and `editable` is Boolean `(1,4)`. A seeded two-step toy
+trajectory first draws the editable positions from the uniform prior and then
+uses two different clean predictions. Both editable tokens change on both
+steps, while positions 0 and 3 remain exactly unchanged throughout. Production
+experiments will separately compare 32/64 reverse steps and retain the official
+128-step setting as the faithful control.
 
 **Differences and hypotheses.** Clamping is absent from the released QM9 code
 and is labeled here as required molecular inpainting behavior. Excluding five
@@ -232,12 +960,9 @@ compared against the faithful full-vocabulary prior. GenMol's raw-logit MCG is
 disabled: UDLM D-CFG must combine conditional and unconditional *reverse
 posterior* log probabilities.
 
-**Concrete evidence gate.** A toy CPU run may establish only that loss falls,
-gradients remain finite, and sampling executes. It cannot establish superiority.
-We next test 10, 100, 500, and 1,000 full-size updates, evaluating 32 then 100
-samples. A final claim requires three 1,000-sample seeds against the audited
-MDLM means (quality 85.80%, diversity 0.8230, uniqueness 99.87%), with matched
-definitions and no more than two user-selected idle GPUs.
+**Concrete example.** Starting from `[BOS, 4, 3, EOS]`, the seeded toy path below
+visits `[BOS, 2, 0, EOS]` and then `[BOS, 4, 4, EOS]`. Revision means the first
+generated value need not be permanent; clamping means BOS and EOS are permanent.
 
 **Comprehension checkpoint.** Why is cache reuse invalid even if a sampled state
 does not change? Expected reasoning: the next denoiser call receives a different
@@ -251,35 +976,1256 @@ small pilot has wide uncertainty and serves only as a progression gate.
             "code",
             r"""
 sampling_udlm = ContinuousUniformDiffusion(5, noise_eps=1e-3)
-state = torch.tensor([[1, 3, 4, 2]])
+template = torch.tensor([[1, 3, 4, 2]])
 editable = torch.tensor([[False, True, True, False]])
-initial_context = state[~editable].clone()
+initial_context = template[~editable].clone()
+sampling_generator = torch.Generator().manual_seed(0)
+prior_draw = sampling_udlm.sample_prior(template.shape, generator=sampling_generator)
+state = torch.where(editable, prior_draw, template)
+trajectory = [state.clone()]
 
-# A sharply concentrated clean prediction makes this step deterministic enough
-# for the invariant demonstration; only editable positions may be replaced.
-clean_logits = torch.full((1, 4, 5), -80.0)
-clean_logits[..., 0] = 80.0
-next_state = sampling_udlm.step(
-    clean_logits,
-    state,
-    t=torch.tensor([0.5]),
-    s=torch.tensor([0.0]),
-    mutable_mask=editable,
-    generator=torch.Generator().manual_seed(0),
+for target_id, time_t, time_s in ((0, 1.0, 0.5), (4, 0.5, 0.0)):
+    clean_logits = torch.full((1, 4, 5), -80.0)
+    clean_logits[..., target_id] = 80.0
+    state = sampling_udlm.step(
+        clean_logits,
+        state,
+        t=torch.tensor([time_t]),
+        s=torch.tensor([time_s]),
+        mutable_mask=editable,
+        generator=sampling_generator,
+    )
+    assert torch.equal(state[~editable], initial_context)
+    trajectory.append(state.clone())
+
+changed_on_both_steps = (
+    (trajectory[0][editable] != trajectory[1][editable])
+    & (trajectory[1][editable] != trajectory[2][editable])
 )
-assert torch.equal(next_state[~editable], initial_context)
-assert torch.equal(next_state[editable], torch.zeros(2, dtype=torch.long))
-print("before:", state.tolist())
-print("after: ", next_state.tolist())
-print("context clamped:", torch.equal(next_state[~editable], initial_context))
+assert torch.all(changed_on_both_steps)
+assert all(torch.equal(item[~editable], initial_context) for item in trajectory)
+
+stage20_sampling_trace = [
+    {"step": index, "time": time_value, "token_ids": item.tolist()[0]}
+    for index, (time_value, item) in enumerate(zip((1.0, 0.5, 0.0), trajectory))
+]
+print(stage20_sampling_trace)
 """,
             f"{STAGE_TAG_PREFIX}-sampling-code",
+        ),
+        _cell(
+            "markdown",
+            r"""
+## 20.4 Validate bounded evidence and define the advancement gate
+
+**Why this stage exists.** Equation checks establish correctness, not molecular
+quality. The committed MDLM manifest in
+[`experiments/udlm/baselines/`](experiments/udlm/baselines/) freezes the exact
+local comparator, and the recorded CPU overfit artifacts in
+[`experiments/udlm/cpu_smoke/`](experiments/udlm/cpu_smoke/) report git SHA
+`02595d1ecf994bbd432ec67ef21b0d56ed97918d`, seed 1, 100 updates on the same
+16-molecule toy set, and a 32-step chain. Their byte hashes freeze the recorded
+results, but the generating runner revision, source-tree cleanliness, tokenizer
+and model-config hashes, and exact command were not retained; they are bounded
+integration evidence, not exactly reproducible benchmark evidence. The next
+cell reads those JSON files; it does not train, sample, call an oracle, use a
+GPU, or access a network.
+
+**Concrete evidence.** Both full-vocabulary and special-token-excluded runs must
+have finite lower last-five-step loss, improved fixed-$t=0.5$ loss, and at least
+one strictly decoded molecule. These are integration gates only. Comparing 5/16
+with 3/16 does not rank the priors because the sample is tiny and stochastic.
+
+**Progressive experiment gate.** Next comes a one-GPU, full-size 10-update
+engineering check. Warm-start pilots then advance through 100, 500, and 1,000
+updates, decoding 32 samples before 256, comparing 32/64 reverse steps, and
+retaining 128 steps as the faithful official-UDLM control. The user requests a
+count of one or two GPUs; physical IDs are selected dynamically from freshly
+verified idle devices. Before final generation, one checkpoint and sampling
+configuration must be frozen in a committed, pushed manifest using only
+training, the fixed validation panel, and explicitly labeled pilot seeds. The
+three final seeds are then evaluated once, with 1,000 requests each, under the
+same repaired definitions as the audited MDLM control.
+
+The exact point-estimate gates use fractions, not rounded display labels:
+
+- repaired validity must be at least $1.0$ (therefore all 3,000 requests);
+- repaired uniqueness must be at least $0.9986666666666667$;
+- repaired quality must exceed $0.858$; and
+- repaired diversity must be at least
+  $0.8230213192558725-0.005=0.8180213192558725$.
+
+Uncertainty is metric-specific. Validity is a request-level binary outcome, so
+its pooled UDLM-minus-MDLM lower bound uses the one-sided 95% Newcombe--Wilson
+hybrid score interval; this remains non-degenerate when both observed rates are
+100%. Uniqueness and quality are nonlinear per-run set functionals because the
+released metric deduplicates first, and diversity is a per-run pairwise
+functional. For those three metrics, the primary lower bound is the one-sided
+95% Welch interval over the three independent seed-level UDLM estimates versus
+the three MDLM estimates. No row bootstrap may re-deduplicate resampled rows:
+that would manufacture duplicate molecules and invalidate uniqueness. The
+quality lower bound must exceed 0; validity, uniqueness, and diversity lower
+bounds must exceed -0.005. Seed means and sample SDs remain the paper-compatible
+summaries. With only three runs per method, the Welch normality assumption and
+low power are explicit limitations.
+
+Report strict unrepaired diagnostics, checkpoint and source hashes, training
+and generation seeds, initialization, added optimizer updates and token
+exposure, parameter counts, checkpoint-selection rule, device mapping, 128-NFE
+UDLM inference cost, wall time, and exact denominators. Passing a small pilot is
+only permission to continue. If the locked candidate is an MDLM-EMA warm start
+with extra UDLM training, passing the gate supports only an operational
+continuation-system claim on molecular metrics, not a from-scratch causal claim
+for the diffusion method and not a speed win. A method-only claim requires a
+from-scratch UDLM comparison or an equal-extra-update MDLM continuation control.
+
+**Difference from released code.** The full-vocabulary artifact is the faithful
+UDLM prior control. Excluding UNK/CLS/SEP/PAD/MASK is a GenMol-specific ablation.
+Neither is a paper-scale result, and the notebook keeps that distinction in the
+reproduction and PDF ledgers.
+
+**Comprehension checkpoint.** Why does falling toy loss not show that UDLM beats
+GenMol? Expected reasoning: it checks optimization mechanics on 16 memorized
+molecules, not the matched de-novo distribution. Why retain strict diagnostics
+when the headline comparison is repaired? Expected reasoning: repair can hide
+invalid raw SAFE generations, so both views are needed.
+""",
+            f"{STAGE_TAG_PREFIX}-evidence",
+        ),
+        _cell(
+            "code",
+            rf"""
+import hashlib as stage20_hashlib
+import json as stage20_json
+import math as stage20_math
+import pandas as stage20_pd
+
+stage20_baseline_path = (
+    PROJECT_ROOT / "experiments" / "udlm" / "baselines" / "mdlm_50000.json"
+)
+stage20_baseline_bytes = stage20_baseline_path.read_bytes()
+stage20_baseline_manifest_sha256 = stage20_hashlib.sha256(
+    stage20_baseline_bytes
+).hexdigest()
+assert (
+    stage20_baseline_manifest_sha256
+    == "6da46fc615dedbcca436da087a2c1e9145f5d110036e0c15bb431ded3c2e5539"
+)
+stage20_mdlm_baseline = stage20_json.loads(stage20_baseline_bytes)
+assert stage20_mdlm_baseline["schema_version"] == 1
+assert stage20_mdlm_baseline["purpose"] == (
+    "frozen audited local MDLM comparator for UDLM; not an exact paper reproduction"
+)
+assert (
+    isinstance(stage20_mdlm_baseline["historical_run_caveats"], list)
+    and len(stage20_mdlm_baseline["historical_run_caveats"]) == 5
+    and all(
+        isinstance(caveat, str) and caveat
+        for caveat in stage20_mdlm_baseline["historical_run_caveats"]
+    )
+)
+assert stage20_mdlm_baseline["protocol"] == {{
+    "seeds": [0, 1, 2],
+    "samples_per_seed": 1000,
+    "total_requested_samples": 3000,
+    "single_generation_batch_per_seed": True,
+    "softmax_temperature": 0.5,
+    "randomness": 0.5,
+    "minimum_added_length": 40,
+    "safe_version": "V1",
+    "use_bracket_safe": False,
+}}
+assert stage20_mdlm_baseline["checkpoint"]["sha256"] == (
+    "8d00aa47b02f64bf39ff6b0b2e786f213587366fc2c3d29712a00f3f84108dd6"
+)
+assert stage20_mdlm_baseline["source_aggregate"]["sha256"] == (
+    "b474efc593b665489359425dbe1ed0873f8ae1d44b77478b871aff6d6b555904"
+)
+stage20_exact_mdlm_means = stage20_mdlm_baseline["released_comparable"]["mean"]
+assert stage20_exact_mdlm_means == {{
+    "validity": 1.0,
+    "uniqueness": 0.9986666666666667,
+    "quality": 0.858,
+    "diversity": 0.8230213192558725,
+}}
+
+stage20_expected_smoke_commit = "{UDLM_BASE_COMMIT}"
+assert stage20_expected_smoke_commit == UDLM_BASE_COMMIT
+stage20_evidence_paths = (
+    PROJECT_ROOT / "experiments" / "udlm" / "cpu_smoke" / "full_vocab_s100.json",
+    PROJECT_ROOT / "experiments" / "udlm" / "cpu_smoke" / "no_special_s100.json",
+)
+stage20_expected_artifact_sha256 = {{
+    "full_vocab_s100.json": "2a9dd7078887a7c679fc4c673981b52791c0a03c8b46e7743b061209a61ec06a",
+    "no_special_s100.json": "7fe113dd227d144ea46c222fb1c0a3b579d634a4490f4f9ed570ae2a5ee16df7",
+}}
+stage20_cpu_rows = []
+for evidence_path in stage20_evidence_paths:
+    raw_bytes = evidence_path.read_bytes()
+    artifact_sha256 = stage20_hashlib.sha256(raw_bytes).hexdigest()
+    assert artifact_sha256 == stage20_expected_artifact_sha256[evidence_path.name]
+    evidence = stage20_json.loads(raw_bytes)
+    required_keys = {{
+        "device", "exclude_special_tokens", "fixed_diagnostics_before",
+        "fixed_diagnostics_after", "generated_smiles", "git_sha",
+        "loss_first_five_mean", "loss_last_five_mean", "purpose",
+        "runtime_seconds", "sample_count_requested", "sampling_steps",
+        "seed", "steps", "strict_valid_samples",
+    }}
+    assert required_keys <= evidence.keys()
+    assert evidence["git_sha"] == stage20_expected_smoke_commit
+    assert evidence["purpose"] == "integration smoke test; not benchmark evidence"
+    assert evidence["device"] == "cpu"
+    assert evidence["seed"] == 1 and evidence["steps"] == 100
+    assert evidence["sample_count_requested"] == 16
+    assert evidence["sampling_steps"] == 32
+    assert isinstance(evidence["exclude_special_tokens"], bool)
+    assert isinstance(evidence["generated_smiles"], list)
+    assert stage20_math.isfinite(evidence["runtime_seconds"])
+    assert evidence["runtime_seconds"] > 0
+    assert stage20_math.isfinite(evidence["loss_first_five_mean"])
+    assert stage20_math.isfinite(evidence["loss_last_five_mean"])
+    assert evidence["loss_first_five_mean"] >= 0
+    assert evidence["loss_last_five_mean"] >= 0
+    assert evidence["loss_last_five_mean"] < evidence["loss_first_five_mean"]
+    assert stage20_math.isfinite(
+        evidence["fixed_diagnostics_before"]["0.5"]["loss"]
+    )
+    assert stage20_math.isfinite(
+        evidence["fixed_diagnostics_after"]["0.5"]["loss"]
+    )
+    assert (
+        evidence["fixed_diagnostics_after"]["0.5"]["loss"]
+        < evidence["fixed_diagnostics_before"]["0.5"]["loss"]
+    )
+    assert evidence["strict_valid_samples"] == len(evidence["generated_smiles"])
+    assert 0 < evidence["strict_valid_samples"] <= evidence["sample_count_requested"]
+    stage20_cpu_rows.append(
+        {{
+            "artifact": str(evidence_path.relative_to(PROJECT_ROOT)),
+            "sha256": artifact_sha256,
+            "exclude_special_tokens": evidence["exclude_special_tokens"],
+            "seed": evidence["seed"],
+            "updates": evidence["steps"],
+            "first_5_loss": evidence["loss_first_five_mean"],
+            "last_5_loss": evidence["loss_last_five_mean"],
+            "strict_valid": evidence["strict_valid_samples"],
+            "requested": evidence["sample_count_requested"],
+        }}
+    )
+
+assert {{row["exclude_special_tokens"] for row in stage20_cpu_rows}} == {{False, True}}
+stage20_cpu_evidence = stage20_pd.DataFrame(stage20_cpu_rows)
+stage20_full_vocab_row = next(
+    row for row in stage20_cpu_rows if not row["exclude_special_tokens"]
+)
+stage20_excluded_vocab_row = next(
+    row for row in stage20_cpu_rows if row["exclude_special_tokens"]
+)
+stage20_prior_ablation_summary = (
+    f"full vocabulary: {{stage20_full_vocab_row['strict_valid']}}/"
+    f"{{stage20_full_vocab_row['requested']}} strict valid; control-token excluded: "
+    f"{{stage20_excluded_vocab_row['strict_valid']}}/"
+    f"{{stage20_excluded_vocab_row['requested']}}; artifact-byte hashes validated; "
+    "generating runner revision, source cleanliness, config hashes, and command "
+    "were not retained"
+)
+stage20_prior_ablation_sample_scope = (
+    "2 configurations x 16 requested; same seed 1; paired engineering smoke, "
+    "not independent replicates"
+)
+stage20_success_criteria = {{
+    "metric_family": "released-compatible repaired de-novo metrics",
+    "baseline_manifest": {{
+        "path": str(stage20_baseline_path.relative_to(PROJECT_ROOT)),
+        "sha256": stage20_baseline_manifest_sha256,
+        "source_aggregate_sha256": stage20_mdlm_baseline["source_aggregate"]["sha256"],
+        "checkpoint_sha256": stage20_mdlm_baseline["checkpoint"]["sha256"],
+        "metric_definition_schema": stage20_mdlm_baseline["source_aggregate"]["schema_version"],
+        "metric_runner_sha256": stage20_mdlm_baseline["source_aggregate"]["runner_sha256"],
+    }},
+    "protocol": {{
+        "final_generation_seeds": [0, 1, 2],
+        "requested_samples_per_seed": 1000,
+        "final_seeds_evaluated_once_after_lock": True,
+        "candidate_manifest_committed_and_pushed_before_final_seeds": True,
+        "candidate_selected_without_final_seed_results": True,
+        "faithful_udlm_sampling_nfe": 128,
+        "required_matching": [
+            "training data and tokenizer",
+            "BERT width and depth",
+            "generation length distribution",
+            "released-compatible and strict metric definitions",
+        ],
+        "training_support_fairness_requirement": (
+            "Run an MDLM-matched content-only framing control or retain the "
+            "BOS/EOS training-support mismatch as a method-causality limitation."
+        ),
+        "required_candidate_provenance": [
+            "initialization checkpoint and raw-or-EMA choice",
+            "optimizer updates and training-token exposure",
+            "base and adapter parameter counts",
+            "checkpoint-selection rule",
+            "sampling temperature, NFE, seeds, source and checkpoint hashes",
+            "device UUID mapping and wall time",
+        ],
+    }},
+    "local_mdlm_baseline_exact_fractions": stage20_exact_mdlm_means,
+    "point_estimate_gate": {{
+        "validity_fraction_min": 1.0,
+        "uniqueness_fraction_min": 0.9986666666666667,
+        "quality_fraction_strictly_above": 0.858,
+        "diversity_min": 0.8180213192558725,
+    }},
+    "one_sided_95pct_lower_bound_gate": {{
+        "validity": {{
+            "method": "Newcombe-Wilson hybrid score difference on pooled request counts",
+            "udlm_minus_mdlm_strictly_above": -0.005,
+            "boundary_safe": True,
+        }},
+        "uniqueness": {{
+            "method": "Welch interval over three independent seed-level estimates per method",
+            "udlm_minus_mdlm_strictly_above": -0.005,
+        }},
+        "quality": {{
+            "method": "Welch interval over three independent seed-level estimates per method",
+            "udlm_minus_mdlm_strictly_above": 0.0,
+        }},
+        "diversity": {{
+            "method": "Welch interval over three independent seed-level estimates per method",
+            "udlm_minus_mdlm_strictly_above": -0.005,
+        }},
+    }},
+    "forbidden_inference": "row bootstrap that re-deduplicates resampled molecule identities",
+    "welch_small_sample_limitation_reported": True,
+    "strict_metrics_reported_separately": True,
+    "claim_scope": (
+        "If MDLM-EMA warm-started with extra UDLM updates, passing supports a locked "
+        "continuation-system molecular-metric claim only; it does not isolate diffusion "
+        "method causality and does not claim an inference-speed win."
+    ),
+}}
+stage20_interval_gates = stage20_success_criteria[
+    "one_sided_95pct_lower_bound_gate"
+]
+stage20_point_gate = stage20_success_criteria["point_estimate_gate"]
+stage20_decision_gate_report_rows = [
+    (
+        "Comparator status",
+        f"{{stage20_mdlm_baseline['purpose']}}; manifest SHA-256 "
+        f"{{stage20_baseline_manifest_sha256}}; checkpoint SHA-256 "
+        f"{{stage20_mdlm_baseline['checkpoint']['sha256']}}",
+    ),
+    (
+        "Comparator exact means",
+        "validity=1; uniqueness=0.9986666666666667; quality=0.858; "
+        "diversity=0.8230213192558725",
+    ),
+    (
+        "Comparator implementation provenance",
+        f"source aggregate SHA-256 "
+        f"{{stage20_mdlm_baseline['source_aggregate']['sha256']}}; metric runner "
+        f"SHA-256 {{stage20_mdlm_baseline['source_aggregate']['runner_sha256']}}; "
+        f"metric schema {{stage20_mdlm_baseline['source_aggregate']['schema_version']}}",
+    ),
+    *[
+        (f"Comparator caveat {{index}}", caveat)
+        for index, caveat in enumerate(
+            stage20_mdlm_baseline["historical_run_caveats"], start=1
+        )
+    ],
+    (
+        "Point-estimate gate",
+        f"validity >= {{stage20_point_gate['validity_fraction_min']}}; "
+        f"uniqueness >= {{stage20_point_gate['uniqueness_fraction_min']}}; "
+        f"quality > {{stage20_point_gate['quality_fraction_strictly_above']}}; "
+        f"diversity >= {{stage20_point_gate['diversity_min']}}",
+    ),
+    (
+        "Validity uncertainty gate",
+        f"{{stage20_interval_gates['validity']['method']}}; lower bound of "
+        f"UDLM-MDLM > {{stage20_interval_gates['validity']['udlm_minus_mdlm_strictly_above']}}",
+    ),
+    *[
+        (
+            f"{{metric.title()}} uncertainty gate",
+            f"{{stage20_interval_gates[metric]['method']}}; lower bound of "
+            f"UDLM-MDLM > {{stage20_interval_gates[metric]['udlm_minus_mdlm_strictly_above']}}",
+        )
+        for metric in ("uniqueness", "quality", "diversity")
+    ],
+    (
+        "Final-candidate lock",
+        "Commit and push the candidate manifest before seeds 0,1,2; evaluate each "
+        "final seed once; do not select or tune from final-seed results.",
+    ),
+    (
+        "Final evaluation protocol",
+        "3 seeds x 1000 requests = exact denominator 3000; seeds 0,1,2; each "
+        "evaluated once after lock; faithful UDLM sampling cost = 128 NFE.",
+    ),
+    (
+        "Matching constraints",
+        "; ".join(stage20_success_criteria["protocol"]["required_matching"]),
+    ),
+    (
+        "Required candidate provenance",
+        "; ".join(
+            stage20_success_criteria["protocol"]["required_candidate_provenance"]
+        ),
+    ),
+    (
+        "Training-support fairness",
+        stage20_success_criteria["protocol"][
+            "training_support_fairness_requirement"
+        ],
+    ),
+    (
+        "Forbidden inference",
+        stage20_success_criteria["forbidden_inference"],
+    ),
+    (
+        "Small-sample limitation",
+        "Welch intervals use only three independent seed-level estimates per method; "
+        "normality is weakly checkable at n=3.",
+    ),
+    (
+        "Strict metrics",
+        "Report strict metrics separately from released-compatible repaired metrics.",
+    ),
+    ("Claim scope", stage20_success_criteria["claim_scope"]),
+]
+assert len(stage20_decision_gate_report_rows) == 22
+assert stage20_decision_gate_report_rows[-1][0] == "Claim scope"
+STAGE20_UDLM_SMOKE_TESTS_PASSED = True
+stage20_summary = {{
+    "status": "bounded equation and integration evidence only",
+    "official_udlm_revision": "edb0f8c28b7caeb4ea7a06a2fee8d74ab6da1661",
+    "implementation_base_commit": stage20_expected_smoke_commit,
+    "reference_checks": stage20_reference_checks,
+    "time_checks": stage20_time_checks,
+    "sampling_trace": stage20_sampling_trace,
+    "cpu_artifact_count": len(stage20_cpu_evidence),
+    "mdlm_baseline_manifest_sha256": stage20_baseline_manifest_sha256,
+    "paper_scale_superiority_claim": False,
+}}
+
+REPRODUCTION_LEDGER = [
+    row for row in REPRODUCTION_LEDGER if row["stage"] != "20 UDLM extension"
+]
+stage20_ledger_record = {{
+    "stage": "20 UDLM extension",
+    "implemented": True,
+    "smoke tested": True,
+    "paper scale": False,
+}}
+REPRODUCTION_LEDGER.append(stage20_ledger_record)
+
+display(stage20_cpu_evidence)
+print(stage20_summary)
+""",
+            f"{STAGE_TAG_PREFIX}-evidence-code",
         ),
     ]
 
 
+def _replace_required(text: str, old: str, new: str, *, label: str) -> str:
+    """Apply one migration exactly once while remaining idempotent."""
+    if new in text:
+        return text
+    if old in text:
+        count = text.count(old)
+        if count != 1:
+            raise ValueError(f"{label}: expected one old fragment, found {count}")
+        return text.replace(old, new, 1)
+    raise ValueError(f"{label}: found neither the old nor updated fragment")
+
+
+def _update_stage0(notebook: dict) -> None:
+    _set_source(notebook, "stage0-gpu-count", STAGE0_GPU_COUNT_CODE)
+    _set_source(notebook, "stage0-setup", STAGE0_SETUP_CODE)
+    _set_source(notebook, "stage0-provenance-note", STAGE0_PROVENANCE_MARKDOWN)
+    _set_source(notebook, "stage0-provenance", STAGE0_PROVENANCE_CODE)
+
+    gpu_note = """# Stage 0 - Runtime and reproducibility
+
+## Goal and scientific context
+
+Before chemistry or diffusion, we need a reproducible process that uses only
+GPUs which appear unused. Stage 0 discovers the active Git worktree, verifies
+that imports come from its `src/` directory, locates the shared project virtual
+environment, records source provenance, and establishes device visibility and
+random seeds.
+
+### Paper, released repository, and notebook distinction
+
+- **Paper:** Appendix D.1 reports training on 8 NVIDIA A100 GPUs for about 5
+  hours and generation on one A100 with 32 CPU cores. Appendix D.2 reports a
+  global batch size of 2,048 and 50,000 optimizer steps.
+- **Released repository:** the trainer uses the CUDA devices visible to the
+  process. It does not define this notebook's shared-server eligibility guard.
+- **Notebook-only safety:** the notebook checks process count, memory,
+  utilization, and compute mode before exposing devices. This local guard is
+  not an algorithm from the paper.
+
+An A6000 is not computationally equivalent to an A100. Matching the GPU count
+does not reproduce the paper's wall-clock time. This project lets the user
+request a GPU count of one or two; physical IDs are selected dynamically.
+
+## What the next code cell does
+
+The next cell defines `NUM_GPUS` as the integer 1 or 2. It is a count, not a
+physical GPU index and not a list of device IDs. For example,
+
+```python
+NUM_GPUS = 2
+```
+
+means "require exactly two eligible GPUs." It does not mean physical GPU 2.
+The validation rejects zero, values above two, floats, strings, and Booleans.
+
+The cell prints the requested count. It does not inspect, reserve, or initialize
+any GPU. Changing the count requires a kernel restart and a run from the top
+because CUDA visibility must be fixed before PyTorch is imported.
+
+Stage 0 contains no SAFE encoding, diffusion, BERT, optimizer, or training.
+
+### Comprehension checkpoint
+
+1. Does `NUM_GPUS = 2` select physical GPU 2?
+2. What should happen if fewer than two GPUs later pass the guard?
+3. Why is the two-GPU ceiling distinct from the paper's eight-GPU setup?
+4. Why must the kernel be restarted after changing `NUM_GPUS`?
+"""
+    setup_note = """## Stage 0.2 - Resolve this worktree and inspect the server
+
+Before any scientific-library import, the next cell asks Git for the active
+worktree root and common repository directory. It requires the shared project
+`.venv`, prepends this checkout's `src/` to both `sys.path` and `PYTHONPATH`,
+imports `genmol`, and proves that `genmol.__file__` lies under that `src/`.
+This prevents an editable install from silently importing a different checkout.
+
+It then discovers physical GPU indices from `nvidia-smi`; no fixed inventory or
+assumption about physical GPU 0 is encoded. Every discovered card is queried
+independently. A card is eligible only if:
+
+- its status, physical index, and UUID can be verified;
+- it has no active compute process;
+- used memory is at most 100 MiB;
+- utilization is at most 5 percent; and
+- compute mode is not prohibited.
+
+For example, a card with zero compute processes and 8 MiB used can pass, while
+a card with one process is rejected even if instantaneous utilization is zero.
+Querying cards independently means a fault on one physical index does not hide
+all healthy cards. Eligible cards are ordered by memory use, utilization, and
+physical index. Caches are redirected into this worktree's `.cache` directory.
+
+Expected output includes the dynamic root, virtual environment, resolved
+`genmol` source, discovered physical indices, one status row per card, and the
+eligible count. CUDA visibility remains unchanged.
+
+**Notebook-only scope:** this point-in-time cooperative guard is not an atomic
+scheduler reservation. The cell still does not select a device or import
+PyTorch.
+
+### Comprehension checkpoint
+
+1. Why verify `genmol.__file__` before importing PyTorch?
+2. Why discover physical indices instead of assuming `range(8)`?
+3. At the end of this cell, has `CUDA_VISIBLE_DEVICES` been set?
+4. Can this snapshot guarantee that another process will not claim a card later?
+"""
+    gate_note = f"""## Stage 0 completion gate
+
+The completed runtime path is:
+
+```text
+requested count in {{1, 2}}
+    -> dynamic worktree and source resolution
+    -> discovered physical GPU inventory and eligibility checks
+    -> selected UUIDs
+    -> logical CUDA devices
+    -> per-device tensor probes
+    -> pushed HEAD and UDLM-base ancestry provenance
+```
+
+A successful run demonstrates that exactly `NUM_GPUS` eligible cards became
+visible, every logical device completed a tensor test, imports came from this
+worktree, `HEAD` matches its upstream-tracking commit, and full UDLM base commit
+`{UDLM_BASE_COMMIT}` is an ancestor. Versions, seeds, branch, tracking ref, and
+dirty paths are recorded.
+
+It does not guarantee that a card remains unused forever, that the local
+upstream-tracking ref was refreshed from the network moments ago, or that an
+A6000 reproduces A100 timing. It also does not distribute a model or prove
+scientific correctness.
+
+### Comprehension checkpoint
+
+1. Is `NUM_GPUS` a count or a physical card ID?
+2. If physical GPU 5 is selected first, what logical CUDA name does it receive?
+3. Why must `CUDA_VISIBLE_DEVICES` be set before importing PyTorch?
+4. Why is base-commit ancestry checked instead of requiring `HEAD` equality?
+5. What does a dirty-path record distinguish from the pushed commit?
+6. What safety limitation remains after both GPU snapshots pass?
+
+Stop here until the physical-versus-logical mapping and the limits of the
+safety and provenance guards are clear.
+"""
+    _set_source(notebook, "stage0-gpu-count-note", gpu_note)
+    _set_source(notebook, "stage0-setup-note", setup_note)
+    _set_source(notebook, "stage0-gate", gate_note)
+
+    stage6_note = _find_cell(notebook, "stage6-bert-update-note")
+    stage6_source = "".join(stage6_note.get("source", []))
+    old_gpu_wording = (
+        "Stage 0 already exposed exactly <code>NUM_GPUS</code> user-requested GPUs "
+        "and stored their physical IDs in <code>SELECTED_PHYSICAL_GPU_IDS</code>."
+    )
+    new_gpu_wording = (
+        "Stage 0 already exposed the requested count of dynamically selected GPUs "
+        "and stored their physical IDs in <code>SELECTED_PHYSICAL_GPU_IDS</code>."
+    )
+    if new_gpu_wording not in stage6_source:
+        if stage6_source.count(old_gpu_wording) != 1:
+            raise ValueError("Stage 6 GPU-count wording was not found exactly once")
+        stage6_note["source"] = stage6_source.replace(
+            old_gpu_wording, new_gpu_wording, 1
+        )
+
+    # Its source is unchanged, but its saved output was produced with the old
+    # GPU count/root setup and would be misleading after the prerequisite edit.
+    _clear_code_output(notebook, "stage0-runtime")
+
+
+def _update_report(notebook: dict) -> None:
+    report_note = _find_cell(notebook, "stage19-report-note")
+    report_note_source = """# Final reporting stage - Automatic PDF benchmark report
+
+## Why this stage exists
+
+After Stages 0-18 and the UDLM Stage 20 checks have run, the final code cell
+writes `output/pdf/genmol_benchmark_report.pdf`. Running report collection last
+means the Stage 20 evidence and its reproduction-ledger row are present. The
+benchmark suites remain the primary content:
+
+- training provenance and checkpoint scale;
+- de novo generation, including strict and repaired metrics;
+- fragment-constrained generation;
+- PMO, lead optimization, and real docking; and
+- published MDLM ablations plus the bounded UDLM-prior comparison.
+
+## Read-only reporting rule
+
+This cell summarizes an explicit whitelist of results produced by earlier
+cells. It never launches training, generation, an oracle, docking, a network
+call, or new GPU work. Generating a report must not spend another oracle budget
+or create a different stochastic sample.
+
+## Status semantics
+
+- `EXECUTED - PAPER SCALE` means the complete benchmark result object exists at
+  the required scale.
+- `EXECUTED - NUMERICAL ORACLE` or `EXECUTED - BOUNDED SMOKE TEST` means only a
+  mechanism was checked.
+- `NOT EXECUTED - DISABLED` means the full benchmark guard was false or absent.
+- `INCOMPLETE - EXPECTED RESULT MISSING` means a benchmark was enabled without
+  its required result object.
+- `FAILED - INVARIANT VIOLATION` means a scientific check failed.
+
+`None` is different from a measured score of zero.
+
+## Benchmark result contracts
+
+The PDF expects dedicated paper-scale summaries for training, de novo,
+fragment-constrained, PMO, lead, docking, and published-ablation results. Rows
+must retain run IDs, seeds, denominators, checkpoint identity, metric
+definitions, and failures. The Stage 20 record instead contains bounded native
+equation cross-checks, a revisability trace, validated CPU-artifact provenance,
+and explicit final success thresholds; it cannot fill a paper-scale row.
+
+## Relation to the paper and released code
+
+The paper defines benchmark scale and scientific metrics. NVIDIA's release
+resolves GenMol implementation details, and official UDLM revision
+`edb0f8c28b7caeb4ea7a06a2fee8d74ab6da1661` anchors the uniform-diffusion
+equations and architecture comparison. Paper,
+released-code, and local bounded results remain separate fields.
+
+## What the code below does
+
+1. Collects Stages 0-18 and 20 plus paper-scale ledgers by explicit name.
+2. Validates ordered coverage, status semantics, and finite summaries.
+3. Builds a benchmark-first PDF with suite and ablation pages.
+4. Reopens and renders every page, checks headings and nonblank pages, and
+   deletes only its temporary renders.
+5. Prints the absolute benchmark PDF path.
+
+## Comprehension checkpoint
+
+1. Why can a bounded UDLM CPU overfit not fill the 3 x 1,000 de-novo row?
+2. Which denominators distinguish strict from repaired validity?
+3. Why must a report record the checkpoint and all generation seeds?
+4. What status applies when a full-run guard is true but evidence is absent?
+5. Why is report generation intentionally last and read-only scientifically?
+"""
+    report_note["source"] = report_note_source.strip() + "\n"
+
+    report_cell = _find_cell(notebook, "stage19-report")
+    source = "".join(report_cell.get("source", []))
+
+    stage18_tail = '''        {
+            "id": "stage18.evaluation",
+            "stage": 18,
+            "title": "Generation metrics and reproduction ledger",
+            "kind": "bounded_smoke",
+            "evidence_names": ("stage18_metrics", "REPRODUCTION_LEDGER", "NOTEBOOK_V1_SMOKE_TESTS_PASSED"),
+            "config_names": (),
+            "paper_source": "Evaluation metrics and benchmark protocol",
+            "repository_source": "src/genmol/utils/utils_chem.py",
+            "notes": "Computes bounded validity/uniqueness/quality/diversity and records all missing paper-scale work.",
+            "checkpoint": "Distinguish a smoke metric from a three-run paper benchmark.",
+        },
+    ]'''
+    stage20_tail = '''        {
+            "id": "stage18.evaluation",
+            "stage": 18,
+            "title": "Generation metrics and reproduction ledger",
+            "kind": "bounded_smoke",
+            "evidence_names": ("stage18_metrics", "REPRODUCTION_LEDGER", "NOTEBOOK_V1_SMOKE_TESTS_PASSED"),
+            "config_names": (),
+            "paper_source": "Evaluation metrics and benchmark protocol",
+            "repository_source": "src/genmol/utils/utils_chem.py",
+            "notes": "Computes bounded validity/uniqueness/quality/diversity and records all missing paper-scale work.",
+            "checkpoint": "Distinguish a smoke metric from a three-run paper benchmark.",
+        },
+        {
+            "id": "stage20.udlm",
+            "stage": 20,
+            "title": "Uniform-diffusion extension",
+            "kind": "bounded_smoke",
+            "evidence_names": (
+                "stage20_reference_checks",
+                "stage20_time_checks",
+                "stage20_sampling_trace",
+                "stage20_cpu_evidence",
+                "stage20_mdlm_baseline",
+                "stage20_ledger_record",
+                "STAGE20_UDLM_SMOKE_TESTS_PASSED",
+            ),
+            "config_names": ("UDLM_BASE_COMMIT", "stage20_success_criteria"),
+            "paper_source": "UDLM Sections 4.1-4.2 and GenMol de-novo metrics",
+            "repository_source": "official UDLM edb0f8c28b7caeb4ea7a06a2fee8d74ab6da1661; src/genmol/diffusion.py; src/genmol/backbone.py",
+            "notes": "Cross-checks native equations, time conditioning, revisable sampling, two pinned CPU artifacts, and the frozen local MDLM manifest; it is not benchmark-scale UDLM evidence.",
+            "checkpoint": "Explain why bounded optimization evidence cannot establish a de-novo win.",
+        },
+    ]'''
+    source = source.replace(
+        "official UDLM edb0f8c; src/genmol/diffusion.py; src/genmol/backbone.py",
+        "official UDLM edb0f8c28b7caeb4ea7a06a2fee8d74ab6da1661; "
+        "src/genmol/diffusion.py; src/genmol/backbone.py",
+    )
+    source = source.replace(
+        '''                "stage20_cpu_evidence",
+                "STAGE20_UDLM_SMOKE_TESTS_PASSED",''',
+        '''                "stage20_cpu_evidence",
+                "stage20_ledger_record",
+                "STAGE20_UDLM_SMOKE_TESTS_PASSED",''',
+    )
+    source = source.replace(
+        '''                "stage20_cpu_evidence",
+                "stage20_ledger_record",''',
+        '''                "stage20_cpu_evidence",
+                "stage20_mdlm_baseline",
+                "stage20_ledger_record",''',
+    )
+    source = source.replace(
+        "Cross-checks native equations, time conditioning, revisable sampling, and two pinned CPU artifacts; it is not benchmark-scale evidence.",
+        "Cross-checks native equations, time conditioning, revisable sampling, two pinned CPU artifacts, and the frozen local MDLM manifest; it is not benchmark-scale UDLM evidence.",
+    )
+    source = source.replace(
+        '            "; ".join(udlm_local["evidence"][:2]),',
+        '            "; ".join((udlm_local["evidence"][0], udlm_local["evidence"][4])),',
+    )
+    source = _replace_required(
+        source, stage18_tail, stage20_tail, label="Stage 20 report specification"
+    )
+
+    source = _replace_required(
+        source,
+        '        failed = spec["stage"] == 18 and not bool(namespace.get("NOTEBOOK_V1_SMOKE_TESTS_PASSED", False))',
+        '''        failed = (
+            spec["stage"] == 18
+            and not bool(namespace.get("NOTEBOOK_V1_SMOKE_TESTS_PASSED", False))
+        ) or (
+            spec["stage"] == 20
+            and not bool(namespace.get("STAGE20_UDLM_SMOKE_TESTS_PASSED", False))
+        )''',
+        label="report invariant status",
+    )
+
+    old_ablation = '    ablations = [\n        {"comparison": "Equation 2 ancestral vs confidence sampling"'
+    new_ablation = '''    ablations = [
+        {"comparison": "UDLM full-vocabulary vs control-token-excluded prior", "paper_result": "Uniform over all K categories is the faithful UDLM prior; control-token exclusion is a labeled molecular ablation.", "local_result": evidence_for("stage20.udlm"), "sample_size": by_id["stage20.udlm"]["sample_size"], "status": by_id["stage20.udlm"]["status"], "interpretation": "Two seed-1 CPU toy integrations were validated; their 5/16 versus 3/16 strict-valid counts do not rank the priors."},
+        {"comparison": "Equation 2 ancestral vs confidence sampling"'''
+    final_ablation_marker = '"local_result": compact_value(namespace.get("stage20_prior_ablation_summary"))'
+    if final_ablation_marker not in source:
+        source = _replace_required(
+            source, old_ablation, new_ablation, label="UDLM report ablation"
+        )
+    source = _replace_required(
+        source,
+        '''    def evidence_for(record_id):
+        evidence = by_id[record_id]["evidence"]
+        return "; ".join(evidence[:2]) if evidence else "No local result."
+
+    ablations = [''',
+        '''    def evidence_for(record_id):
+        evidence = by_id[record_id]["evidence"]
+        return "; ".join(evidence[:2]) if evidence else "No local result."
+
+    udlm_decision_gate = namespace.get("stage20_decision_gate_report_rows")
+    assert isinstance(udlm_decision_gate, list) and udlm_decision_gate
+    assert all(
+        isinstance(row, tuple)
+        and len(row) == 2
+        and all(isinstance(value, str) and value for value in row)
+        for row in udlm_decision_gate
+    )
+    udlm_decision_gate = [tuple(row) for row in udlm_decision_gate]
+
+    ablations = [''',
+        label="raw UDLM decision-gate collection",
+    )
+    source = _replace_required(
+        source,
+        '''        {"comparison": "UDLM full-vocabulary vs control-token-excluded prior", "paper_result": "Uniform over all K categories is the faithful UDLM prior; control-token exclusion is a labeled molecular ablation.", "local_result": evidence_for("stage20.udlm"), "sample_size": by_id["stage20.udlm"]["sample_size"], "status": by_id["stage20.udlm"]["status"], "interpretation": "Two seed-1 CPU toy integrations were validated; their 5/16 versus 3/16 strict-valid counts do not rank the priors."},''',
+        '''        {"comparison": "UDLM full-vocabulary vs control-token-excluded prior", "paper_result": "Uniform over all K categories is the faithful UDLM prior; control-token exclusion is a labeled molecular ablation.", "local_result": compact_value(namespace.get("stage20_prior_ablation_summary")), "sample_size": compact_value(namespace.get("stage20_prior_ablation_sample_scope")), "status": by_id["stage20.udlm"]["status"], "interpretation": "The paired seed-1 CPU smoke verifies both pathways only; 5/16 versus 3/16 strict-valid counts do not rank priors or estimate a population effect."},''',
+        label="honest UDLM prior-ablation evidence",
+    )
+    source = _replace_required(
+        source,
+        '''    return {
+        "records": records,
+        "ablations": ablations,
+        "metadata": {''',
+        '''    return {
+        "records": records,
+        "ablations": ablations,
+        "udlm_decision_gate": udlm_decision_gate,
+        "metadata": {''',
+        label="raw UDLM gate payload",
+    )
+
+    old_metadata = '''            "upstream_commit": compact_value(namespace.get("checked_upstream_commit")),
+            "run_flags": run_flags,'''
+    new_metadata = '''            "pushed_head_commit": compact_value(namespace.get("pushed_head_commit")),
+            "active_branch": compact_value(namespace.get("branch")),
+            "tracking_ref": compact_value(namespace.get("tracking_ref")),
+            "udlm_base_commit": compact_value(namespace.get("UDLM_BASE_COMMIT")),
+            "working_tree_status": compact_value(namespace.get("working_tree_status")),
+            "run_flags": run_flags,'''
+    source = _replace_required(
+        source, old_metadata, new_metadata, label="dynamic report provenance"
+    )
+    source = _replace_required(
+        source,
+        '''            "udlm_base_commit": compact_value(namespace.get("UDLM_BASE_COMMIT")),
+            "run_flags": run_flags,''',
+        '''            "udlm_base_commit": compact_value(namespace.get("UDLM_BASE_COMMIT")),
+            "working_tree_status": compact_value(namespace.get("working_tree_status")),
+            "run_flags": run_flags,''',
+        label="report dirty-path provenance",
+    )
+
+    source = _replace_required(
+        source,
+        '    assert [record["stage"] for record in stage_records] == list(range(19)), "Stages 0-18 must be ordered and complete."',
+        '    assert [record["stage"] for record in stage_records] == [*range(19), 20], "Stages 0-18 and 20 must be ordered and complete."',
+        label="report stage coverage",
+    )
+    source = _replace_required(
+        source,
+        '    assert ReportPath(payload["metadata"]["project_root"]).name == "genmolv2"',
+        '    assert (ReportPath(payload["metadata"]["project_root"]) / "src" / "genmol").is_dir()',
+        label="dynamic report root validation",
+    )
+    source = _replace_required(
+        source,
+        '        "Ordered Stage 0-18 coverage",',
+        '        "Ordered Stage 0-18 and 20 coverage",',
+        label="report validation wording",
+    )
+    source = _replace_required(
+        source,
+        '        "Output root is the remote genmolv2 project",',
+        '        "Output root contains this checkout\'s src/genmol package",',
+        label="report root wording",
+    )
+    # Migrate the immediately preceding generated report shape as well as the
+    # pristine pre-Stage-20 notebook.  This keeps the updater idempotent while
+    # allowing the raw, untruncated gate table to gain provenance rows.
+    if (
+        '    gate_rows = payload["udlm_decision_gate"]' in source
+        and '        "Comparator implementation provenance",' not in source
+    ):
+        source = source.replace(
+            '''        "Comparator exact means",
+        *[f"Comparator caveat {index}" for index in range(1, 6)],''',
+            '''        "Comparator exact means",
+        "Comparator implementation provenance",
+        *[f"Comparator caveat {index}" for index in range(1, 6)],''',
+            1,
+        )
+        source = source.replace(
+            '''        "Final-candidate lock",
+        "Forbidden inference",''',
+            '''        "Final-candidate lock",
+        "Final evaluation protocol",
+        "Matching constraints",
+        "Required candidate provenance",
+        "Training-support fairness",
+        "Forbidden inference",''',
+            1,
+        )
+        source = source.replace(
+            '''        "Welch interval",
+        "continuation-system",''',
+            '''        "Welch interval",
+        "b474efc593b665489359425dbe1ed0873f8ae1d44b77478b871aff6d6b555904",
+        "a77d7c84d8628403c6d7a11edebce5bf9b8405e3f8b79a326a6e06bd7f444cea",
+        "3 seeds x 1000 requests",
+        "128 NFE",
+        "initialization checkpoint and raw-or-EMA choice",
+        "device UUID mapping and wall time",
+        "MDLM-matched content-only framing control",
+        "continuation-system",''',
+            1,
+        )
+
+    source = _replace_required(
+        source,
+        '''    for ablation in payload["ablations"]:
+        assert ablation["status"] in allowed_statuses
+        assert ablation["local_result"] != ""
+
+    paper_records =''',
+        '''    for ablation in payload["ablations"]:
+        assert ablation["status"] in allowed_statuses
+        assert ablation["local_result"] != ""
+
+    gate_rows = payload["udlm_decision_gate"]
+    expected_gate_labels = [
+        "Comparator status",
+        "Comparator exact means",
+        "Comparator implementation provenance",
+        *[f"Comparator caveat {index}" for index in range(1, 6)],
+        "Point-estimate gate",
+        "Validity uncertainty gate",
+        "Uniqueness uncertainty gate",
+        "Quality uncertainty gate",
+        "Diversity uncertainty gate",
+        "Final-candidate lock",
+        "Final evaluation protocol",
+        "Matching constraints",
+        "Required candidate provenance",
+        "Training-support fairness",
+        "Forbidden inference",
+        "Small-sample limitation",
+        "Strict metrics",
+        "Claim scope",
+    ]
+    assert [row[0] for row in gate_rows] == expected_gate_labels
+    assert all(len(row) == 2 and all(value for value in row) for row in gate_rows)
+    gate_text = " ".join(value for row in gate_rows for value in row)
+    for required_text in (
+        "not an exact paper reproduction",
+        "dirty source tree",
+        "Newcombe-Wilson",
+        "Welch interval",
+        "b474efc593b665489359425dbe1ed0873f8ae1d44b77478b871aff6d6b555904",
+        "a77d7c84d8628403c6d7a11edebce5bf9b8405e3f8b79a326a6e06bd7f444cea",
+        "3 seeds x 1000 requests",
+        "128 NFE",
+        "initialization checkpoint and raw-or-EMA choice",
+        "device UUID mapping and wall time",
+        "MDLM-matched content-only framing control",
+        "continuation-system",
+    ):
+        assert required_text in gate_text
+
+    paper_records =''',
+        label="UDLM gate validation",
+    )
+    source = _replace_required(
+        source,
+        '''        "Paper-scale and smoke-test statuses remain separate",
+        "Output root contains this checkout's src/genmol package",''',
+        '''        "Paper-scale and smoke-test statuses remain separate",
+        "UDLM gate, comparator caveats, uncertainty methods, and claim scope are explicit",
+        "Output root contains this checkout's src/genmol package",''',
+        label="UDLM gate validation summary",
+    )
+    source = _replace_required(
+        source,
+        '        ("Inspected upstream commit", metadata["upstream_commit"]),',
+        '''        ("Pushed HEAD commit", metadata["pushed_head_commit"]),
+        ("Active branch and tracking ref", f"{metadata['active_branch']} -> {metadata['tracking_ref']}"),
+        ("Required UDLM base ancestor", metadata["udlm_base_commit"]),''',
+        label="report cover provenance",
+    )
+    source = _replace_required(
+        source,
+        '        "paper.de_novo": ("stage11.de_novo", "stage18.evaluation"),',
+        '        "paper.de_novo": ("stage11.de_novo", "stage18.evaluation", "stage20.udlm"),',
+        label="UDLM dashboard linkage",
+    )
+    source = _replace_required(
+        source,
+        '''    evaluation_local = stage_by_id["stage18.evaluation"]
+    fragment_local = stage_by_id["stage13.fragment_constraints"]''',
+        '''    evaluation_local = stage_by_id["stage18.evaluation"]
+    udlm_local = stage_by_id["stage20.udlm"]
+    fragment_local = stage_by_id["stage13.fragment_constraints"]''',
+        label="UDLM generation-page lookup",
+    )
+    udlm_generation_row = '''        (
+            "UDLM - bounded implementation evidence",
+            udlm_local["status"],
+            "Native equations, revisability, and two 16-request CPU artifacts",
+            "; ".join((udlm_local["evidence"][0], udlm_local["evidence"][4])),
+        ),
+'''
+    accurate_udlm_generation_row = '''        (
+            "UDLM - bounded implementation evidence",
+            udlm_local["status"],
+            "Native equation parity, a revisability trace, and two hash-validated 16-request CPU smoke artifacts",
+            "; ".join((udlm_local["evidence"][0], udlm_local["evidence"][2], udlm_local["evidence"][3])),
+        ),
+'''
+    while udlm_generation_row + udlm_generation_row in source:
+        source = source.replace(
+            udlm_generation_row + udlm_generation_row,
+            udlm_generation_row,
+            1,
+        )
+    if accurate_udlm_generation_row not in source:
+        source = _replace_required(
+            source,
+            '''        (
+            "Fragment constrained - full benchmark",''',
+            udlm_generation_row
+            + '''        (
+            "Fragment constrained - full benchmark",''',
+            label="UDLM generation-page row",
+        )
+    source = _replace_required(
+        source,
+        udlm_generation_row,
+        accurate_udlm_generation_row,
+        label="accurate UDLM generation-page evidence",
+    )
+    full_gate_marker = 'payload["udlm_decision_gate"],'
+    if full_gate_marker not in source:
+        source = _replace_required(
+            source,
+            '''    )
+    story.append(Spacer(1, 5 * mm))
+    story.append(para("Required de novo result columns", "GenMolH2"))''',
+            '''    )
+    story.append(Spacer(1, 4 * mm))
+    story.append(para("Registered UDLM decision gate", "GenMolH2"))
+    story.append(para(udlm_local["config"]["stage20_success_criteria"], "GenMolSmall"))
+    story.append(Spacer(1, 5 * mm))
+    story.append(para("Required de novo result columns", "GenMolH2"))''',
+            label="UDLM decision gate in report",
+        )
+    source = _replace_required(
+        source,
+        '''    story.append(para("Registered UDLM decision gate", "GenMolH2"))
+    story.append(para(udlm_local["config"]["stage20_success_criteria"], "GenMolSmall"))''',
+        '''    story.append(para("Registered UDLM decision gate", "GenMolH2"))
+    story.append(
+        make_table(
+            ("Gate or provenance field", "Exact registered requirement"),
+            payload["udlm_decision_gate"],
+            (48 * mm, 122 * mm),
+            font_size=6.2,
+        )
+    )''',
+        label="untruncated UDLM decision gate in report",
+    )
+    source = _replace_required(
+        source,
+        '        ("Upstream commit", metadata["upstream_commit"]),',
+        '''        ("Pushed HEAD commit", metadata["pushed_head_commit"]),
+        ("Active branch", metadata["active_branch"]),
+        ("Tracking ref", metadata["tracking_ref"]),
+        ("UDLM base ancestor", metadata["udlm_base_commit"]),''',
+        label="report provenance table migration",
+    )
+    source = _replace_required(
+        source,
+        '''        ("Pushed HEAD commit", metadata["pushed_head_commit"]),
+        ("Active branch", metadata["active_branch"]),
+        ("Tracking ref", metadata["tracking_ref"]),
+        ("UDLM base ancestor", metadata["udlm_base_commit"]),''',
+        '''        ("Pushed HEAD commit", metadata["pushed_head_commit"]),
+        ("Active branch", metadata["active_branch"]),
+        ("Tracking ref", metadata["tracking_ref"]),
+        ("UDLM base ancestor", metadata["udlm_base_commit"]),
+        ("Uncommitted paths at provenance check", metadata["working_tree_status"]),''',
+        label="report provenance table",
+    )
+    source = _replace_required(
+        source,
+        '        ("Noise endpoint", "The paper idealizes alpha(1)=0; the numerical repository endpoint uses epsilon = 0.001."),',
+        '        ("UDLM schedule mismatch", "The release uses residual-clean alpha for corruption/sampling but ideal alpha=1-t in its loss; prior loss is therefore not exactly zero for the implemented forward endpoint."),',
+        label="report schedule qualification",
+    )
+    source = _replace_required(
+        source,
+        '''        ("UDLM schedule mismatch", "The release uses residual-clean alpha for corruption/sampling but ideal alpha=1-t in its loss; prior loss is therefore not exactly zero for the implemented forward endpoint."),''',
+        '''        ("UDLM schedule mismatch", "The release uses residual-clean alpha for corruption/sampling but ideal alpha=1-t in its loss; prior loss is therefore not exactly zero for the implemented forward endpoint."),
+        ("Distributed loss weighting", "Released global_mean is process-local. DDP and gradient accumulation average local token ratios rather than forming one token ratio across all ranks and microbatches; an exact-global repair must be a labeled ablation."),''',
+        label="distributed loss weighting qualification",
+    )
+    source = source.replace(
+        '''        "Process-local token-ratio averaging across DDP ranks and accumulation windows is not an exact globally pooled token mean.",
+        "Fragment distance, full PMO, real docking, and three-run mean/std remain absent unless their ledger rows say EXECUTED - PAPER SCALE.",''',
+        '''        "Process-local token-ratio averaging across DDP ranks and accumulation windows is not an exact globally pooled token mean.",
+        "The current UDLM content-only training support excludes BOS/EOS while faithful MDLM uses the full attention mask; without an MDLM-matched framing control this remains a method-causality confound.",
+        "Fragment distance, full PMO, real docking, and three-run mean/std remain absent unless their ledger rows say EXECUTED - PAPER SCALE.",''',
+        1,
+    )
+    source = _replace_required(
+        source,
+        '''        "Bounded validity, uniqueness, quality, and diversity do not replace repeated paper-scale evaluation.",
+        "Fragment distance, full PMO, real docking, and three-run mean/std remain absent unless their ledger rows say EXECUTED - PAPER SCALE.",''',
+        '''        "Bounded validity, uniqueness, quality, and diversity do not replace repeated paper-scale evaluation.",
+        "The frozen local MDLM comparator is not an exact paper reproduction; its five historical caveats are rendered verbatim in the registered gate table.",
+        "Process-local token-ratio averaging across DDP ranks and accumulation windows is not an exact globally pooled token mean.",
+        "The current UDLM content-only training support excludes BOS/EOS while faithful MDLM uses the full attention mask; without an MDLM-matched framing control this remains a method-causality confound.",
+        "Fragment distance, full PMO, real docking, and three-run mean/std remain absent unless their ledger rows say EXECUTED - PAPER SCALE.",''',
+        label="UDLM report limitations",
+    )
+    source = _replace_required(
+        source,
+        '''        "Paper-scale execution ledger",
+        "Verification and limitations",''',
+        '''        "Paper-scale execution ledger",
+        "Registered UDLM decision gate",
+        "Verification and limitations",''',
+        label="UDLM gate rendered-heading audit",
+    )
+    source = source.replace(
+        '''        "udlm_claim_language_present": all(
+            fragment in extracted
+            for fragment in ("Newcombe-Wilson", "dirty source tree", "continuation-system")
+        ),''',
+        '''        "udlm_claim_language_present": all(
+            fragment in extracted
+            for fragment in (
+                "Newcombe-Wilson",
+                "dirty source tree",
+                "continuation-system",
+                "metric runner",
+                "128 NFE",
+                "raw-or-EMA",
+                "device UUID",
+                "MDLM-matched",
+            )
+        ),''',
+        1,
+    )
+    source = _replace_required(
+        source,
+        '''        "all_required_headings_present": all(heading in extracted for heading in required_headings),
+        "status_labels_consistent":''',
+        '''        "all_required_headings_present": all(heading in extracted for heading in required_headings),
+        "udlm_claim_language_present": all(
+            fragment in extracted
+            for fragment in (
+                "Newcombe-Wilson",
+                "dirty source tree",
+                "continuation-system",
+                "metric runner",
+                "128 NFE",
+                "raw-or-EMA",
+                "device UUID",
+                "MDLM-matched",
+            )
+        ),
+        "status_labels_consistent":''',
+        label="UDLM claim-language PDF audit",
+    )
+    source = _replace_required(
+        source,
+        '''assert REPORT_AUDIT["all_required_headings_present"]
+assert REPORT_AUDIT["status_labels_consistent"]''',
+        '''assert REPORT_AUDIT["all_required_headings_present"]
+assert REPORT_AUDIT["udlm_claim_language_present"]
+assert REPORT_AUDIT["status_labels_consistent"]''',
+        label="UDLM claim-language report assertion",
+    )
+
+    report_cell["source"] = source
+    report_cell["execution_count"] = None
+    report_cell["outputs"] = []
+
+
+def _update_completion_gate(notebook: dict) -> None:
+    cell = _find_cell(notebook, "remaining-final-gate")
+    source = "".join(cell.get("source", []))
+    source = source.replace(
+        "# Completion gate - all planned stages are implemented",
+        "# Completion gate - bounded implementation stages are in place",
+        1,
+    )
+    source = source.replace(
+        "- Implemented and smoke-tested: all stages.",
+        "- Implemented and bounded-smoke-tested: GenMol Stages 0-18 and UDLM Stage 20.",
+        1,
+    )
+    source = _replace_required(
+        source,
+        "- Cross-rank loss uses a global numerator and denominator, inference uses EMA weights, and MCG logit normalization equivalence is stated.",
+        "- Stage 8 teaches an exact-global numerator/denominator reduction as a labeled repair; the faithful/current training path keeps released process-local token ratios, which DDP and accumulation average. Inference uses EMA weights, and MCG logit-normalization equivalence is stated.",
+        label="completion-gate distributed loss qualification",
+    )
+    marker = "\n## UDLM extension status"
+    if marker in source:
+        source = source.split(marker, 1)[0].rstrip()
+    udlm_note = f"""
+
+## UDLM extension status
+
+- Stage 20 derives the uniform forward law, normalized reverse posterior, and
+  full content-position objective, then cross-checks notebook-native functions
+  against production diffusion and time-conditioning code.
+- The released residual-clean corruption schedule and idealized loss schedule
+  are deliberately distinguished; the paper's zero-prior-loss statement does
+  not hold exactly for the implemented residual-clean endpoint.
+- Two pinned seed-1 CPU toy artifacts at implementation base
+  `{UDLM_BASE_COMMIT}` are linked, hashed, and schema-validated. They are bounded
+  integration evidence, not evidence that UDLM beats GenMol.
+- The final success gate is three matched 1,000-request seeds with repaired and
+  strict metrics, checkpoint/seeds/device/runtime provenance, and thresholds
+  recorded in `stage20_success_criteria`.
+- Final checkpoint: why is clean-logit interpolation not valid UDLM
+  classifier-free guidance? Expected reasoning: clean probabilities are
+  transformed nonlinearly into the reverse posterior, so guidance must combine
+  conditional and unconditional reverse-posterior log probabilities.
+"""
+    cell["source"] = source + udlm_note
+
+
 def update_notebook(source: Path, destination: Path):
     notebook = json.loads(source.read_text())
+    _update_stage0(notebook)
+    _update_report(notebook)
+    _update_completion_gate(notebook)
     notebook["cells"] = [
         cell
         for cell in notebook["cells"]
@@ -288,39 +2234,23 @@ def update_notebook(source: Path, destination: Path):
             for tag in cell.get("metadata", {}).get("tags", [])
         )
     ]
-    insert_at = len(notebook["cells"])
-    for index, cell in enumerate(notebook["cells"]):
-        if cell.get("cell_type") == "markdown" and "# Completion gate" in "".join(
-            cell.get("source", [])
-        ):
-            insert_at = index
-            break
+    insert_at = next(
+        index
+        for index, cell in enumerate(notebook["cells"])
+        if cell.get("id") == "stage19-report-note"
+    )
     notebook["cells"][insert_at:insert_at] = stage_cells()
-    completion_note = """
-
-## UDLM extension status
-
-- Stage 20 adds the uniform forward process, exact continuous-time objective,
-  time-conditioned BERT, revisable posterior sampler, molecular clamping rules,
-  and progressive evidence gates.
-- CPU equation tests and a toy overfit are implementation evidence only. No
-  claim that UDLM beats the audited MDLM baseline is made before matched,
-  multi-seed experiments.
-- Final checkpoint: can you explain why clean-logit interpolation is not valid
-  UDLM classifier-free guidance? Expected reasoning: the clean distribution is
-  transformed nonlinearly into a reverse posterior, so guidance must combine
-  the conditional and unconditional posterior log probabilities.
-"""
+    # Stage 0 changes the device count, source checkout, and provenance state.
+    # Every prior saved execution is therefore stale, including downstream
+    # tables and launch commands that were produced with three GPUs.  Keep the
+    # teaching artifact honest and clean-kernel executable by clearing all
+    # outputs and execution timestamps; committed result artifacts remain the
+    # source of bounded numerical evidence.
     for cell in notebook["cells"]:
-        if cell.get("cell_type") != "markdown":
-            continue
-        source_text = "".join(cell.get("source", []))
-        if "# Completion gate" in source_text and "## UDLM extension status" not in source_text:
-            if isinstance(cell.get("source"), list):
-                cell["source"].extend(completion_note.splitlines(keepends=True))
-            else:
-                cell["source"] = source_text.rstrip() + completion_note
-            break
+        if cell.get("cell_type") == "code":
+            cell["execution_count"] = None
+            cell["outputs"] = []
+            cell.setdefault("metadata", {}).pop("execution", None)
     destination.write_text(json.dumps(notebook, indent=1, ensure_ascii=False) + "\n")
 
 
