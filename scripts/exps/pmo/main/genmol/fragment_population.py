@@ -51,7 +51,8 @@ class FragmentSeed:
 class FragmentObservation:
     """One scored child molecule presented to the vocabulary.
 
-    Delta mode uses ``child_score - parent_score``.  If
+    Delta mode uses ``child_score - parent_score`` while delta-control mode
+    uses the absolute ``child_score``.  If
     ``credit_fragments`` is supplied, only those fragments receive the policy's
     credit; otherwise all fragments returned by the injected child fragmenter
     do.  The explicit set is also used by absolute-score matched controls so
@@ -94,9 +95,11 @@ class FragmentPopulation:
 
     Args:
         seeds: Initial vocabulary rows.  Input order is preserved by released
-            mode and is retained as the bootstrap order for delta mode.
+            mode and is retained as the bootstrap order for delta and
+            delta-control modes.
         capacity: Maximum number of active fragments.
-        mode: ``released``, ``mean``, ``bayes``, or ``delta``.
+        mode: ``released``, ``mean``, ``bayes``, ``delta``, or
+            ``delta_control``.
         fragmenter: Callable mapping a SMILES string to fragment strings.
         rng: Object supporting ``sample``.  The default is Python's global
             ``random`` module, preserving the released optimizer's seeding.
@@ -111,11 +114,12 @@ class FragmentPopulation:
             once.  Defaults to false for exact released behavior and true for
             statistical modes.
         delta_missing_parent: ``skip`` or ``raise`` when delta mode receives no
-            parent score.
+            parent score.  Delta-control mode never requires a parent score.
     """
 
     STATE_VERSION = 1
-    MODES = frozenset({"released", "mean", "bayes", "delta"})
+    MODES = frozenset({"released", "mean", "bayes", "delta", "delta_control"})
+    NEUTRAL_SEED_MODES = frozenset({"delta", "delta_control"})
     MISSING_PARENT_POLICIES = frozenset({"skip", "raise"})
 
     def __init__(
@@ -229,9 +233,9 @@ class FragmentPopulation:
         # Retaining later seed rows as a hidden registry would let statistical
         # arms backfill from fragments unavailable to the released arm.
         for order, seed in enumerate(seeds[: self.capacity]):
-            if self.mode == "delta":
+            if self.mode in self.NEUTRAL_SEED_MODES:
                 # Offline absolute scores bootstrap deterministic ties but are
-                # not mixed into the delta estimand.
+                # not mixed into either matched arm's online estimand.
                 total = 0.0
                 count = 0
             else:
@@ -339,15 +343,15 @@ class FragmentPopulation:
             return (record.total + self.prior_strength * self.prior_mean) / (
                 record.count + self.prior_strength
             )
-        if self.mode == "delta":
+        if self.mode in self.NEUTRAL_SEED_MODES:
             return record.total / record.count if record.count else 0.0
         raise RuntimeError("released populations do not rank FragmentStats")
 
     def _statistical_sort_key(self, record: FragmentStats) -> tuple[Any, ...]:
         rank = self._rank(record)
-        if self.mode == "delta":
-            # Absolute seed quality is only a tie-break for neutral delta
-            # estimates; it is never added to the delta value.
+        if self.mode in self.NEUTRAL_SEED_MODES:
+            # Absolute seed quality is only a tie-break for neutral matched-arm
+            # estimates; it is never added to the online value.
             seed_score = record.seed_score if record.seed_score is not None else -math.inf
             return (-rank, -seed_score)
         return (-rank,)

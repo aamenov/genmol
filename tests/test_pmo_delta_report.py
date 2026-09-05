@@ -51,15 +51,22 @@ CSV_FIELDS = (
 
 
 class DeltaReportTests(unittest.TestCase):
-    def _oracle_outcome(self, score: float, call: int, smiles: str) -> dict[str, object]:
+    def _oracle_outcome(
+        self,
+        score: float,
+        call: int,
+        smiles: str,
+        *,
+        charged: bool = True,
+    ) -> dict[str, object]:
         return {
             "raw_smiles": smiles,
             "canonical_smiles": smiles,
             "valid": True,
             "score": score,
-            "charged": True,
+            "charged": charged,
             "call_index": call,
-            "reason": "scored",
+            "reason": "scored" if charged else "cache_hit",
         }
 
     def _empty_attribution(self, reason: str) -> dict[str, object]:
@@ -81,29 +88,39 @@ class DeltaReportTests(unittest.TestCase):
         }
 
     def _attribution(self, index: int) -> dict[str, object]:
+        shared = f"shared_fragment_{index}"
+        if index % 10 == 0:
+            parent = child = [shared]
+            credited: list[str] = []
+        else:
+            parent = sorted([f"parent_fragment_{index}", shared])
+            child = sorted([f"child_fragment_{index}", shared])
+            credited = [f"child_fragment_{index}"]
         return {
             "applicable": True,
             "reason": "deterministic_mapping",
             "attribution_mode": "novel_vs_parent",
-            "parent_all_fragments": [f"parent_fragment_{index}"],
-            "child_all_fragments": [f"child_fragment_{index}"],
-            "credited_fragments": [f"child_fragment_{index}"],
+            "parent_all_fragments": parent,
+            "child_all_fragments": child,
+            "credited_fragments": credited,
             "mapping_counts": {
-                "parent_all": 1,
-                "child_all": 1,
-                "shared": 0,
-                "credited": 1,
+                "parent_all": len(parent),
+                "child_all": len(child),
+                "shared": len(set(parent) & set(child)),
+                "credited": len(credited),
             },
-            "mapping_covered": True,
-            "mapping_coverage": 1.0,
+            "mapping_covered": bool(credited),
+            "mapping_coverage": len(credited) / len(child),
         }
 
     def _events(self, variant: str) -> list[dict[str, object]]:
         target = variant in report.TARGET_VARIANTS
         events: list[dict[str, object]] = []
         calls = 0
-        delta_totals: dict[str, float] = {}
-        delta_counts: dict[str, int] = {}
+        fragment_totals: dict[str, float] = {}
+        fragment_counts: dict[str, int] = {}
+        target_child_score = 0.55 if variant == "delta" else 0.5
+        target_parent_score = 0.45 if variant == "delta" else 0.4
         index = 0
         while calls < 1000:
             remask = index > 100
@@ -118,39 +135,76 @@ class DeltaReportTests(unittest.TestCase):
                 update = {"updated": False, "reason": "score_below_cutoff"}
             elif not remask:
                 calls += 1
-                child = self._oracle_outcome(0.5, calls, f"warmup_child_{variant}_{index}")
+                child = self._oracle_outcome(
+                    target_child_score,
+                    calls,
+                    f"warmup_child_{variant}_{index}",
+                )
                 update = {"updated": False, "reason": "frozen_warmup"}
                 attribution = self._empty_attribution("warmup_frozen")
+            elif index == 102:
+                parent = self._oracle_outcome(
+                    target_parent_score,
+                    calls - 1,
+                    f"parent_{variant}_101",
+                    charged=False,
+                )
+                child = self._oracle_outcome(
+                    target_child_score,
+                    calls,
+                    f"child_{variant}_101",
+                    charged=False,
+                )
+                attribution = self._attribution(101)
+                update = {"updated": False, "reason": "duplicate_observation"}
             else:
                 calls += 1
-                parent = self._oracle_outcome(0.4, calls, f"parent_{variant}_{index}")
+                parent = self._oracle_outcome(
+                    target_parent_score,
+                    calls,
+                    f"parent_{variant}_{index}",
+                )
                 if calls == 1000:
                     update = {"updated": False, "reason": "budget_after_parent"}
                     attribution = self._empty_attribution("budget_after_parent")
                 else:
                     calls += 1
-                    child = self._oracle_outcome(0.5, calls, f"child_{variant}_{index}")
+                    child = self._oracle_outcome(
+                        target_child_score,
+                        calls,
+                        f"child_{variant}_{index}",
+                    )
                     attribution = self._attribution(index)
-                    fragment = f"child_fragment_{index}"
-                    update = {
-                        "updated": True,
-                        "reason": "updated",
-                        "observed_fragments": [fragment],
-                        "admitted": [],
-                        "displaced": [],
-                    }
-                    if variant == "delta":
-                        delta_totals[fragment] = delta_totals.get(fragment, 0.0) + 0.1
-                        delta_counts[fragment] = delta_counts.get(fragment, 0) + 1
+                    credited = list(attribution["credited_fragments"])
+                    if credited:
+                        update = {
+                            "updated": True,
+                            "reason": "updated",
+                            "observed_fragments": credited,
+                            "admitted": [],
+                            "displaced": [],
+                        }
+                        credit = (
+                            target_child_score - target_parent_score
+                            if variant == "delta"
+                            else target_child_score
+                        )
+                        fragment = credited[0]
+                        fragment_totals[fragment] = (
+                            fragment_totals.get(fragment, 0.0) + credit
+                        )
+                        fragment_counts[fragment] = fragment_counts.get(fragment, 0) + 1
                         statistics[fragment] = {
                             "fragment": fragment,
-                            "total": delta_totals[fragment],
-                            "count": delta_counts[fragment],
+                            "total": fragment_totals[fragment],
+                            "count": fragment_counts[fragment],
                             "seed_score": None,
                             "seed_order": None,
                             "first_seen": index - 100,
                             "last_seen": index - 100,
                         }
+                    else:
+                        update = {"updated": False, "reason": "no_fragments"}
             events.append(
                 {
                     "event_index": index,
@@ -208,6 +262,8 @@ class DeltaReportTests(unittest.TestCase):
             "prior_mean": None,
             "prior_mean_source": None,
             "legacy_seed_count": 1,
+            "seed_initialization_policy": report.EXPECTED_SEED_INITIALIZATION[variant],
+            "credit_value_policy": report.EXPECTED_CREDIT_VALUE_POLICY[variant],
             "delta_attribution": "novel_vs_parent",
             "population_sampling_order": "canonical fragment string before uniform sampling",
             "statistical_duplicate_policy": (
@@ -244,7 +300,7 @@ class DeltaReportTests(unittest.TestCase):
         archive.mkdir()
         matrix_source = (
             Path(report.__file__).resolve().parents[3]
-            / "experiments/fragment_vocabulary/configs/qed_50k_delta_1k_v1.yaml"
+            / "experiments/fragment_vocabulary/configs/qed_50k_delta_1k_v2.yaml"
         )
         matrix_path = root / matrix_source.name
         matrix_path.write_bytes(matrix_source.read_bytes())
@@ -465,8 +521,15 @@ class DeltaReportTests(unittest.TestCase):
             self.assertEqual(len(reader.pages), 4)
             text = "\n".join(page.extract_text() or "" for page in reader.pages)
             self.assertIn("Delta-y and attribution diagnostics", text)
+            self.assertIn("Common first 500 charged child evaluations", text)
+            self.assertIn("Matched first-500-charged-child diagnostic", text)
+            self.assertIn("released (contextual)", text)
             manifest = json.loads(Path(first["report_path"]).read_text())
+            self.assertEqual(manifest["schema_version"], 2)
             self.assertEqual(manifest["design"]["run_count"], 12)
+            self.assertEqual(manifest["design"]["common_charged_child_horizon"], 500)
+            self.assertTrue(manifest["execution"]["all_jobs_shared"])
+            self.assertEqual(manifest["execution"]["shared_job_count"], 12)
             self.assertEqual(
                 manifest["reporter"]["sha256"],
                 sha256_file(report.REPORTER_PATH),
@@ -476,10 +539,34 @@ class DeltaReportTests(unittest.TestCase):
                 paired["all_charged_molecules"]["auc_top_10"]["mean"],
                 0.005,
             )
+            self.assertAlmostEqual(
+                paired[report.COMMON_CHILD_VIEW]["top_10"]["mean"],
+                0.05,
+            )
+            self.assertAlmostEqual(
+                paired[report.COMMON_CHILD_VIEW]["auc_top_10"]["mean"],
+                0.045,
+            )
             diagnostics = manifest["aggregates"]["delta"]["diagnostics_by_seed"]["0"]
             self.assertEqual(diagnostics["charged_parent_calls"], 450)
             self.assertEqual(diagnostics["charged_child_calls"], 550)
+            self.assertEqual(diagnostics["cached_parent_lookups"], 1)
+            self.assertEqual(diagnostics["total_parent_lookups"], 451)
+            self.assertAlmostEqual(diagnostics["cached_parent_lookup_rate"], 1 / 451)
             self.assertEqual(diagnostics["delta_y_unique_transitions"]["positive"], 449)
+            attribution = diagnostics["attribution"]
+            self.assertEqual(attribution["applicable_unique_transitions"], 449)
+            self.assertEqual(attribution["unique_transitions_with_any_credit"], 404)
+            self.assertAlmostEqual(attribution["any_credit_fraction"], 404 / 449)
+            self.assertAlmostEqual(
+                attribution["mean_fragment_level_coverage"],
+                0.5 * 404 / 449,
+            )
+            accounting = manifest["runs"][-1]["event_accounting"]
+            self.assertEqual(accounting["logged_events"], 552)
+            self.assertEqual(accounting["cached_child_lookups"], 1)
+            self.assertIn("top_k", manifest["metric_definitions"])
+            self.assertIn("All 12 jobs shared a GPU", " ".join(manifest["caveats"]))
 
     def test_rejects_wrong_checkpoint_hash(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -488,6 +575,37 @@ class DeltaReportTests(unittest.TestCase):
             collection["runs"][0]["provenance"]["model_sha256"] = "0" * 64
             collection_path.write_text(json.dumps(collection, sort_keys=True), encoding="utf-8")
             with self.assertRaisesRegex(report.ReportError, "final checkpoint SHA-256"):
+                report.load_report_data(collection_path)
+
+    def test_rejects_seed_initialization_or_credit_policy_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            collection_path, collection = self._bundle(root)
+            control = next(
+                run
+                for run in collection["runs"]
+                if run["identity"]["variant"] == report.MATCHED_CONTROL
+            )
+            control["config"]["seed_initialization_policy"] = "absolute_seed_statistics"
+            collection_path.write_text(
+                json.dumps(collection, sort_keys=True),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(report.ReportError, "seed_initialization_policy"):
+                report.load_report_data(collection_path)
+
+            collection_path, collection = self._bundle(root / "credit")
+            delta = next(
+                run
+                for run in collection["runs"]
+                if run["identity"]["variant"] == "delta"
+            )
+            delta["config"]["credit_value_policy"] = "absolute_child_score"
+            collection_path.write_text(
+                json.dumps(collection, sort_keys=True),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(report.ReportError, "credit_value_policy"):
                 report.load_report_data(collection_path)
 
     def test_rejects_tampered_attribution_even_with_updated_hashes(self) -> None:
@@ -501,7 +619,7 @@ class DeltaReportTests(unittest.TestCase):
             )
             events_path = Path(collection["experiment_root"]) / target["sources"]["events"]["path"]
             events = [json.loads(line) for line in events_path.read_text().splitlines()]
-            events[101]["attribution"]["mapping_coverage"] = 0.5
+            events[101]["attribution"]["mapping_coverage"] = 0.25
             events_path.write_text(
                 "".join(json.dumps(event, sort_keys=True) + "\n" for event in events),
                 encoding="utf-8",

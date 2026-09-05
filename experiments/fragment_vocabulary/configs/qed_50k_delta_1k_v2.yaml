@@ -1,0 +1,40 @@
+schema_version: 1
+experiment_id: fragment_vocab_qed_50k_delta_1k_v2
+scientific_status: >-
+  Exploratory paired three-seed QED delta-y credit-assignment study using the
+  final 50k checkpoint, a 1,000-unique-oracle-call budget, warmup parameter 100
+  (101 frozen iterations under the legacy iteration > warmup boundary), and
+  neutral zero seed estimates with absolute seed scores used only for matched
+  tie-breaking. The delta and transition-absolute control arms
+  share parent/child oracle accounting, domains, transition deduplication,
+  deterministic attribution, and warmup; only the post-warmup credit target
+  differs. This QED-only reduced-budget study is not paper-comparable, causal,
+  or confirmatory.
+model_path: outputs/paper_v1/checkpoints/50000.ckpt
+tasks:
+  - oracle: qed
+    gamma: 0.0
+    prior_mean: null
+    prior_mean_source: null
+variants:
+  - released
+  - running_mean
+  - running_mean_delta_control
+  - delta
+seeds: [0, 1, 2]
+stop_on_failure: true
+common:
+  output_root: output/pmo_ablation
+  max_oracle_calls: 1000
+  reporting_frequency: 100
+  checkpoint_every: 100
+  max_iterations: 10000
+  population_size: 100
+  warmup: 100
+  legacy_warmup_off_by_one: true
+  softmax_temp: 1.2
+  randomness: 2.0
+  guidance_scale: 2.0
+  legacy_seed_count: 1
+  delta_attribution: novel_vs_parent
+  durable_events: true

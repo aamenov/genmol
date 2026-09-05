@@ -150,12 +150,63 @@ class ConfigurationTests(unittest.TestCase):
                     variant=variant,
                 )
                 config = _resolved_config(args)
+                expected_mode = (
+                    "delta" if variant == "delta" else "delta_control"
+                )
+                self.assertEqual(config["policy_mode"], expected_mode)
+                self.assertEqual(
+                    config["seed_initialization_policy"],
+                    "neutral_zero_with_seed_score_tiebreak",
+                )
                 for key, value in expected.items():
                     self.assertEqual(config[key], value)
 
         first = _transition_observation_id("CCO", "CCOC")
         self.assertEqual(first, _transition_observation_id("CCO", "CCOC"))
         self.assertNotEqual(first, _transition_observation_id("CCN", "CCOC"))
+
+    def test_resolved_config_records_seed_initialization_policy_for_all_modes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model = root / "model.ckpt"
+            model.write_bytes(b"model")
+            vocab = root / "vocab.csv"
+            vocab.write_text("frag,score\n[1*]CC,0.5\n[1*]CO,0.4\n")
+            cases = {
+                "released": "released_absolute_rows",
+                "running_mean": "absolute_seed_statistics",
+                "shrink1": "absolute_seed_statistics",
+                "delta": "neutral_zero_with_seed_score_tiebreak",
+                "running_mean_delta_control": (
+                    "neutral_zero_with_seed_score_tiebreak"
+                ),
+            }
+            for variant, expected in cases.items():
+                with self.subTest(variant=variant):
+                    overrides = {"variant": variant}
+                    if variant == "shrink1":
+                        overrides.update(
+                            prior_mean=0.5,
+                            prior_mean_source="unit-test prior",
+                        )
+                    args = RunnerIntegrationTests()._args(
+                        root,
+                        model,
+                        vocab,
+                        **overrides,
+                    )
+                    self.assertEqual(
+                        _resolved_config(args)["seed_initialization_policy"],
+                        expected,
+                    )
+                    self.assertEqual(
+                        _resolved_config(args)["credit_value_policy"],
+                        (
+                            "child_score_minus_parent_score"
+                            if variant == "delta"
+                            else "absolute_child_score"
+                        ),
+                    )
 
 
 class ChemistryTests(unittest.TestCase):

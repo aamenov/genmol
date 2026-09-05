@@ -164,7 +164,7 @@ VARIANT_SETTINGS: dict[str, dict[str, Any]] = {
         "prior_strength": 0.0,
     },
     "running_mean_delta_control": {
-        "mode": "mean",
+        "mode": "delta_control",
         "min_support": 1,
         "parent_control": True,
         "prior_strength": 0.0,
@@ -469,6 +469,24 @@ def _protocol_metadata(variant: str, delta_attribution: str) -> dict[str, str]:
     }
 
 
+def _seed_initialization_policy(mode: str) -> str:
+    """Describe how offline vocabulary rows initialize online statistics."""
+
+    if mode == "released":
+        return "released_absolute_rows"
+    if mode in FragmentPopulation.NEUTRAL_SEED_MODES:
+        return "neutral_zero_with_seed_score_tiebreak"
+    return "absolute_seed_statistics"
+
+
+def _credit_value_policy(mode: str) -> str:
+    """Describe the scalar target assigned to each credited fragment."""
+
+    if mode == "delta":
+        return "child_score_minus_parent_score"
+    return "absolute_child_score"
+
+
 def _transition_observation_id(parent_smiles: str, child_smiles: str) -> str:
     """Return an unambiguous identity for one canonical parent/child contrast."""
 
@@ -711,6 +729,8 @@ def _resolved_config(args: argparse.Namespace) -> dict[str, Any]:
         "oracle": args.oracle,
         "variant": args.variant,
         "policy_mode": settings["mode"],
+        "seed_initialization_policy": _seed_initialization_policy(settings["mode"]),
+        "credit_value_policy": _credit_value_policy(settings["mode"]),
         "parent_control": settings["parent_control"],
         "model_path": str(args.model_path.expanduser().resolve()),
         "vocab_path": str(vocab_path.expanduser().resolve()),

@@ -213,6 +213,61 @@ class StatisticalPopulationTests(unittest.TestCase):
         self.assertEqual(population.active_fragments, ["seed", "changed"])
         self.assertIsNone(population.get_stats("uncredited"))
 
+    def test_delta_control_matches_delta_bootstrap_and_only_changes_credit_value(self):
+        seeds = [
+            FragmentSeed("high", 0.9),
+            FragmentSeed("low", 0.2),
+            FragmentSeed("middle", 0.5),
+        ]
+        populations = {
+            mode: FragmentPopulation(
+                seeds,
+                capacity=3,
+                mode=mode,
+                fragmenter=MappingFragmenter({}),
+            )
+            for mode in ("delta", "delta_control")
+        }
+        delta = populations["delta"]
+        control = populations["delta_control"]
+
+        expected_initial_rows = [
+            (0.0, "high"),
+            (0.0, "middle"),
+            (0.0, "low"),
+        ]
+        self.assertEqual(delta.active_rows(), expected_initial_rows)
+        self.assertEqual(control.active_rows(), expected_initial_rows)
+        for fragment in ("high", "middle", "low"):
+            self.assertEqual(delta.get_stats(fragment), control.get_stats(fragment))
+            self.assertEqual(delta.get_stats(fragment).count, 0)
+            self.assertEqual(delta.get_stats(fragment).total, 0.0)
+
+        observation = FragmentObservation(
+            "parent-to-child",
+            "child",
+            child_score=0.8,
+            parent_score=0.55,
+            credit_fragments=frozenset({"high", "novel"}),
+        )
+        self.assertEqual(delta.observe(observation), control.observe(observation))
+        self.assertEqual(delta.active_fragments, control.active_fragments)
+
+        for fragment in ("high", "novel"):
+            delta_stats = delta.get_stats(fragment)
+            control_stats = control.get_stats(fragment)
+            assert delta_stats is not None and control_stats is not None
+            self.assertEqual(delta_stats.count, control_stats.count)
+            self.assertEqual(delta_stats.seed_score, control_stats.seed_score)
+            self.assertEqual(delta_stats.seed_order, control_stats.seed_order)
+            self.assertEqual(delta_stats.first_seen, control_stats.first_seen)
+            self.assertEqual(delta_stats.last_seen, control_stats.last_seen)
+            self.assertAlmostEqual(delta_stats.total, 0.25)
+            self.assertAlmostEqual(control_stats.total, 0.8)
+
+        self.assertEqual(delta.get_stats("middle"), control.get_stats("middle"))
+        self.assertEqual(delta.get_stats("low"), control.get_stats("low"))
+
     def test_delta_missing_parent_can_skip_or_raise(self):
         observation = FragmentObservation("1", "child", 0.8)
         skip = FragmentPopulation(

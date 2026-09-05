@@ -102,7 +102,7 @@ class LauncherTests(unittest.TestCase):
             )
             self.assertEqual(
                 launcher.VARIANT_SETTINGS["running_mean_delta_control"]["mode"],
-                "mean",
+                "delta_control",
             )
 
     def test_command_forwards_prior_for_every_bayesian_strength(self):
@@ -159,6 +159,7 @@ class LauncherTests(unittest.TestCase):
             root = Path(directory)
             matrix_path = (root / "matrix.yaml").resolve()
             matrix = self._matrix(root)
+            matrix["experiment_id"] = "fragment_vocab_qed_50k_delta_1k_v2"
             matrix_path.write_text(yaml.safe_dump(matrix))
             matrix_hash = launcher.hashlib.sha256(matrix_path.read_bytes()).hexdigest()
             job = launcher._jobs(matrix)[0]
@@ -171,11 +172,14 @@ class LauncherTests(unittest.TestCase):
                 "oracle": job.oracle,
                 "variant": job.variant,
                 "seed": job.seed,
+                "policy_mode": "released",
+                "seed_initialization_policy": "released_absolute_rows",
+                "credit_value_policy": "absolute_child_score",
                 "model_path": matrix["model_path"],
                 "matrix_path": str(matrix_path),
                 "matrix_sha256": matrix_hash,
             }
-            run_id = "test_matrix:qed:released:seed3"
+            run_id = f"{matrix['experiment_id']}:qed:released:seed3"
             config_hash = launcher._config_sha256(config)
             (run_dir / "manifest.json").write_text(
                 json.dumps(
@@ -211,6 +215,24 @@ class LauncherTests(unittest.TestCase):
             self.assertFalse(
                 launcher._completed(matrix_path, "b" * 64, matrix, job)
             )
+            manifest_path = run_dir / "manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            config.pop("seed_initialization_policy")
+            config_hash = launcher._config_sha256(config)
+            manifest["config"] = config
+            manifest["config_sha256"] = config_hash
+            summary["config_sha256"] = config_hash
+            manifest_path.write_text(json.dumps(manifest))
+            summary_path.write_text(json.dumps(summary))
+            self.assertFalse(
+                launcher._completed(matrix_path, matrix_hash, matrix, job)
+            )
+            config["seed_initialization_policy"] = "released_absolute_rows"
+            config_hash = launcher._config_sha256(config)
+            manifest["config"] = config
+            manifest["config_sha256"] = config_hash
+            summary["config_sha256"] = config_hash
+            manifest_path.write_text(json.dumps(manifest))
             summary["checkpoint_consistent"] = False
             summary_path.write_text(json.dumps(summary))
             self.assertFalse(

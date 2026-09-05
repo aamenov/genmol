@@ -50,11 +50,12 @@ class AblationCollectorTests(unittest.TestCase):
         summary_schema: int = 1,
         resume_count: int = 0,
         seed: int = 0,
+        experiment_id: str = "test_experiment",
         durable_events: bool | None = True,
         extra_config: dict | None = None,
     ) -> tuple[Path, Path]:
         workspace = Path(directory)
-        experiment_root = workspace / "test_experiment"
+        experiment_root = workspace / experiment_id
         run_dir = experiment_root / "qed" / "delta" / f"seed_{seed}"
         run_dir.mkdir(parents=True)
         model_path = workspace / "model.ckpt"
@@ -65,7 +66,7 @@ class AblationCollectorTests(unittest.TestCase):
             encoding="utf-8",
         )
         config = {
-            "experiment_id": "test_experiment",
+            "experiment_id": experiment_id,
             "scientific_status": "synthetic unit test; not a scientific result",
             "oracle": "qed",
             "variant": "delta",
@@ -112,7 +113,7 @@ class AblationCollectorTests(unittest.TestCase):
         }
         vocabulary_hash = sha256_file(vocabulary_path)
         manifest = build_manifest(
-            run_id=f"test_experiment:qed:delta:seed{seed}",
+            run_id=f"{experiment_id}:qed:delta:seed{seed}",
             model_path=model_path,
             config=config,
             task="qed",
@@ -699,8 +700,13 @@ class AblationCollectorTests(unittest.TestCase):
             "--delta-attribution": "novel_vs_parent",
         }
         config = collector._resolved_launch_config(parsed)
-        self.assertEqual(config["policy_mode"], "mean")
+        self.assertEqual(config["policy_mode"], "delta_control")
         self.assertTrue(config["parent_control"])
+        self.assertEqual(
+            config["seed_initialization_policy"],
+            "neutral_zero_with_seed_score_tiebreak",
+        )
+        self.assertEqual(config["credit_value_policy"], "absolute_child_score")
         self.assertEqual(config["warmup_update_policy"], "frozen")
         self.assertEqual(
             config["observation_identity"],
@@ -709,6 +715,12 @@ class AblationCollectorTests(unittest.TestCase):
         self.assertEqual(
             config["credit_fragment_policy"],
             "deterministic_cut_all_child_minus_parent",
+        )
+        delta_parsed = dict(parsed, **{"--variant": "delta"})
+        delta_config = collector._resolved_launch_config(delta_parsed)
+        self.assertEqual(
+            delta_config["credit_value_policy"],
+            "child_score_minus_parent_score",
         )
         config["min_mol_size"] = 3
         config["max_mol_size"] = 4
@@ -780,6 +792,34 @@ class AblationCollectorTests(unittest.TestCase):
                 event_index=0,
                 update_reason="updated",
             )
+
+    def test_v2_rejects_missing_strict_estimator_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _, run_dir = self._completed_run(
+                directory,
+                experiment_id="fragment_vocab_qed_50k_delta_1k_v2",
+                extra_config={
+                    "warmup_update_policy": "frozen",
+                    "observation_identity": (
+                        "unique_canonical_parent_child_transition"
+                    ),
+                    "parent_domain_policy": (
+                        "parent_and_child_within_configured_atom_bounds"
+                    ),
+                    "credit_fragment_policy": (
+                        "deterministic_cut_all_child_minus_parent"
+                    ),
+                    "credit_value_policy": "child_score_minus_parent_score",
+                    "statistical_duplicate_policy": (
+                        "one update per unique canonical parent-child transition"
+                    ),
+                },
+            )
+            with self.assertRaisesRegex(
+                collector.CollectionError,
+                "missing strict matched-estimator metadata",
+            ):
+                self._collect_run(run_dir)
 
     def test_matrix_plan_resolves_only_the_declared_output_root(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -35,8 +35,25 @@ VARIANT_SETTINGS: dict[str, dict[str, Any]] = {
     "shrink30": {"mode": "bayes", "prior_strength": 30.0},
     "delta": {"mode": "delta", "prior_strength": 0.0},
     "running_mean_parent_control": {"mode": "mean", "prior_strength": 0.0},
-    "running_mean_delta_control": {"mode": "mean", "prior_strength": 0.0},
+    "running_mean_delta_control": {"mode": "delta_control", "prior_strength": 0.0},
 }
+STRICT_MATCHED_ESTIMATOR_EXPERIMENTS = frozenset(
+    {"fragment_vocab_qed_50k_delta_1k_v2"}
+)
+
+
+def _seed_initialization_policy(mode: str) -> str:
+    if mode == "released":
+        return "released_absolute_rows"
+    if mode in {"delta", "delta_control"}:
+        return "neutral_zero_with_seed_score_tiebreak"
+    return "absolute_seed_statistics"
+
+
+def _credit_value_policy(mode: str) -> str:
+    if mode == "delta":
+        return "child_score_minus_parent_score"
+    return "absolute_child_score"
 
 
 @dataclass(frozen=True)
@@ -276,6 +293,10 @@ def _completed(
         expected_run_id = (
             f"{matrix['experiment_id']}:{job.oracle}:{job.variant}:seed{job.seed}"
         )
+        expected_mode = str(VARIANT_SETTINGS[job.variant]["mode"])
+        strict_estimator_metadata = (
+            matrix["experiment_id"] in STRICT_MATCHED_ESTIMATOR_EXPERIMENTS
+        )
         return bool(
             manifest.get("schema_version") == 1
             and summary.get("schema_version") in {1, 2}
@@ -297,6 +318,16 @@ def _completed(
             and config.get("oracle") == job.oracle
             and config.get("variant") == job.variant
             and config.get("seed") == job.seed
+            and (
+                not strict_estimator_metadata
+                or (
+                    config.get("policy_mode") == expected_mode
+                    and config.get("seed_initialization_policy")
+                    == _seed_initialization_policy(expected_mode)
+                    and config.get("credit_value_policy")
+                    == _credit_value_policy(expected_mode)
+                )
+            )
             and config.get("model_path") == str(expected_model.resolve())
             and summary.get("scores", {})
             .get("all_charged_molecules", {})

@@ -48,19 +48,23 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from scripts.exps.pmo.main.genmol.experiment_io import sha256_file
+from scripts.exps.pmo.main.genmol.experiment_io import sha256_file, summarize_scores
 
 
-REPORT_SCHEMA_VERSION = 1
+REPORT_SCHEMA_VERSION = 2
 COLLECTION_SCHEMA_VERSION = 3
 REPORTER_PATH = Path(__file__).resolve()
-EXPERIMENT_ID = "fragment_vocab_qed_50k_delta_1k_v1"
+EXPERIMENT_ID = "fragment_vocab_qed_50k_delta_1k_v2"
 SCIENTIFIC_STATUS = (
     "Exploratory paired three-seed QED delta-y credit-assignment study using the "
-    "final 50k checkpoint, a 1,000-unique-oracle-call budget, a 100-iteration "
-    "warmup, and legacy seed count 1. The matched running-mean delta control uses "
-    "the same parent/child oracle accounting and warmup update schedule. This "
-    "QED-only reduced-budget study is not paper-comparable, causal, or confirmatory."
+    "final 50k checkpoint, a 1,000-unique-oracle-call budget, warmup parameter "
+    "100 (101 frozen iterations under the legacy iteration > warmup boundary), "
+    "and neutral zero seed estimates with absolute seed scores used only "
+    "for matched tie-breaking. The delta and transition-absolute control arms "
+    "share parent/child oracle accounting, domains, transition deduplication, "
+    "deterministic attribution, and warmup; only the post-warmup credit target "
+    "differs. This QED-only reduced-budget study is not paper-comparable, causal, "
+    "or confirmatory."
 )
 EXPECTED_ORACLE = "qed"
 EXPECTED_SEEDS = (0, 1, 2)
@@ -81,13 +85,28 @@ EXPECTED_BUDGET = 1_000
 EXPECTED_POLICY = {
     "released": ("released", False),
     "running_mean": ("mean", False),
-    MATCHED_CONTROL: ("mean", True),
+    MATCHED_CONTROL: ("delta_control", True),
     "delta": ("delta", True),
 }
+EXPECTED_SEED_INITIALIZATION = {
+    "released": "released_absolute_rows",
+    "running_mean": "absolute_seed_statistics",
+    MATCHED_CONTROL: "neutral_zero_with_seed_score_tiebreak",
+    "delta": "neutral_zero_with_seed_score_tiebreak",
+}
+EXPECTED_CREDIT_VALUE_POLICY = {
+    "released": "absolute_child_score",
+    "running_mean": "absolute_child_score",
+    MATCHED_CONTROL: "absolute_child_score",
+    "delta": "child_score_minus_parent_score",
+}
+COMMON_CHILD_HORIZON = 500
+COMMON_CHILD_VIEW = "first_500_charged_children"
 VIEW_PREFIX = {
     "all_charged_molecules": "all",
     "charged_children_total_call_axis": "child_total",
 }
+REPORT_VIEWS = (*VIEW_PREFIX, COMMON_CHILD_VIEW)
 SCALAR_NAMES = (
     "auc_top_1",
     "auc_top_10",
@@ -97,6 +116,47 @@ SCALAR_NAMES = (
     "top_100",
 )
 TARGET_VARIANTS = frozenset({MATCHED_CONTROL, "delta"})
+CONTEXTUAL_VARIANTS = frozenset({"released", "running_mean"})
+VARIANT_LABELS = {
+    "released": "released (contextual)",
+    "running_mean": "running_mean (contextual)",
+    MATCHED_CONTROL: "transition-absolute control",
+    "delta": "delta-y",
+}
+METRIC_DEFINITIONS = {
+    "top_k": {
+        "k_values": [1, 10, 100],
+        "definition": (
+            "At a stated horizon, top-k is the arithmetic mean of the highest "
+            "min(k, N) QED scores observed in that view, where N is the number "
+            "of included scores available by that horizon."
+        ),
+    },
+    "auc_top_k": {
+        "definition": (
+            "The top-k trajectory starts at (0, 0), is evaluated every 100 axis "
+            "units through the stated horizon, is integrated by the trapezoidal "
+            "rule, and is divided by that horizon."
+        ),
+    },
+    "views": {
+        "all_charged_molecules": (
+            "All charged unique parent and child QED evaluations in global "
+            "unique-oracle-call order; horizon and AUC divisor are 1,000 calls."
+        ),
+        "charged_children_total_call_axis": (
+            "Only charged child QED scores, located at their original global "
+            "unique-oracle-call indices; checkpoints, horizon, and AUC divisor "
+            "remain 0, 100, ..., 1,000 calls. This is not an equal-child-evaluation view."
+        ),
+        COMMON_CHILD_VIEW: (
+            "The first 500 charged child QED scores in event order, densely "
+            "indexed as charged-child evaluations 1 through 500; checkpoints are "
+            "0, 100, ..., 500 and the trapezoidal AUC divisor is 500 charged-child "
+            "evaluations."
+        ),
+    },
+}
 
 
 class ReportError(ValueError):
@@ -113,6 +173,7 @@ class RunEvidence:
     child_count: int
     elapsed_seconds: float
     diagnostics: dict[str, Any] | None
+    event_accounting: dict[str, int]
     provenance: dict[str, Any]
     launch: dict[str, Any]
     sources: dict[str, dict[str, Any]]
@@ -472,6 +533,8 @@ def _validate_config(
         "prior_mean": None,
         "prior_mean_source": None,
         "legacy_seed_count": 1,
+        "seed_initialization_policy": EXPECTED_SEED_INITIALIZATION[variant],
+        "credit_value_policy": EXPECTED_CREDIT_VALUE_POLICY[variant],
         "delta_attribution": "novel_vs_parent",
         "population_sampling_order": "canonical fragment string before uniform sampling",
         "statistical_duplicate_policy": (
@@ -537,7 +600,10 @@ def _metric_group(
             raise ReportError(f"{run_id} {view}.{name} is outside [0, 1]")
         _close(value, _csv_number(row.get(f"{prefix}_{name}"), f"{run_id} CSV {prefix}_{name}"), f"{run_id} CSV/collection {prefix}_{name}")
         result[name] = value
-    if not result["top_1"] >= result["top_10"] >= result["top_100"]:
+    if (
+        result["top_1"] + 1e-12 < result["top_10"]
+        or result["top_10"] + 1e-12 < result["top_100"]
+    ):
         raise ReportError(f"{run_id} {view} final top-k ordering is invalid")
     _equal(group.get("axis_budget"), EXPECTED_BUDGET, f"{run_id} {view} axis budget")
     _equal(group.get("reporting_frequency"), 100, f"{run_id} {view} reporting frequency")
@@ -576,7 +642,7 @@ def _validate_attribution(
     context: str,
     applicable: bool,
     empty_reason: str | None = None,
-) -> tuple[str, ...]:
+) -> tuple[tuple[str, ...], float]:
     row = _mapping(value, context)
     expected_keys = {
         "applicable",
@@ -617,7 +683,7 @@ def _validate_attribution(
         _equal(parent, (), f"{context}.parent_all_fragments")
         _equal(child, (), f"{context}.child_all_fragments")
         _equal(credited, (), f"{context}.credited_fragments")
-    return credited
+    return credited, expected_coverage
 
 
 def _distribution(values: Sequence[float]) -> dict[str, Any]:
@@ -653,19 +719,21 @@ def _event_diagnostics(
     variant: str,
     expected_events: int,
     expected_child_count: int,
-) -> dict[str, Any] | None:
+) -> tuple[dict[str, Any] | None, dict[str, float], dict[str, int]]:
     target = variant in TARGET_VARIANTS
     event_count = 0
     charged_parent = charged_child = cached_parent = cached_child = 0
     paired_events = 0
     unique_transitions: set[tuple[str, str]] = set()
     unique_deltas: list[float] = []
-    attribution_applicable = attribution_covered = 0
+    unique_transitions_with_credit = 0
+    unique_fragment_coverages: list[float] = []
     credited_fragment_observations = 0
     credited_unique: set[str] = set()
     population_updates = duplicate_transitions = 0
     last_calls = 0
-    delta_stats: dict[str, tuple[float, int]] = {}
+    fragment_stats: dict[str, tuple[float, int]] = {}
+    charged_child_scores: list[float] = []
     try:
         handle = path.open(encoding="utf-8")
     except OSError as error:
@@ -694,6 +762,7 @@ def _event_diagnostics(
                         cached_parent += 1
                 elif outcome[1]:
                     charged_child += 1
+                    charged_child_scores.append(outcome[0])
                 else:
                     cached_child += 1
             calls = _integer(event.get("oracle_calls"), f"{run_id} event {index} calls")
@@ -740,20 +809,20 @@ def _event_diagnostics(
                 continue
 
             paired_events += 1
-            credited = _validate_attribution(
+            credited, fragment_coverage = _validate_attribution(
                 event.get("attribution"),
                 context=f"{run_id} event {index} attribution",
                 applicable=True,
             )
-            attribution_applicable += 1
-            if credited:
-                attribution_covered += 1
             transition = (parent[2], child[2])
             is_new_transition = transition not in unique_transitions
             delta_value = child[0] - parent[0]
             if is_new_transition:
                 unique_transitions.add(transition)
                 unique_deltas.append(delta_value)
+                unique_fragment_coverages.append(fragment_coverage)
+                if credited:
+                    unique_transitions_with_credit += 1
                 credited_fragment_observations += len(credited)
                 credited_unique.update(credited)
             else:
@@ -767,20 +836,38 @@ def _event_diagnostics(
             if updated:
                 _equal(is_new_transition, True, f"{run_id} event {index} transition uniqueness")
                 _equal(observed, credited, f"{run_id} event {index} credited update fragments")
-                if variant == "delta":
-                    snapshots = _mapping(
-                        event.get("fragment_statistics_after"),
-                        f"{run_id} event {index} fragment statistics",
+                snapshots = _mapping(
+                    event.get("fragment_statistics_after"),
+                    f"{run_id} event {index} fragment statistics",
+                )
+                _equal(set(snapshots), set(credited), f"{run_id} event {index} statistic fragments")
+                credited_value = delta_value if variant == "delta" else child[0]
+                credit_label = "delta" if variant == "delta" else "absolute-child"
+                for fragment in credited:
+                    snapshot = _mapping(
+                        snapshots[fragment],
+                        f"{run_id} event {index} {fragment} statistics",
                     )
-                    _equal(set(snapshots), set(credited), f"{run_id} event {index} statistic fragments")
-                    for fragment in credited:
-                        snapshot = _mapping(snapshots[fragment], f"{run_id} event {index} {fragment} statistics")
-                        previous_total, previous_count = delta_stats.get(fragment, (0.0, 0))
-                        current_count = _integer(snapshot.get("count"), f"{run_id} event {index} {fragment} count")
-                        current_total = _number(snapshot.get("total"), f"{run_id} event {index} {fragment} total")
-                        _equal(current_count, previous_count + 1, f"{run_id} event {index} {fragment} count increment")
-                        _close(current_total, previous_total + delta_value, f"{run_id} event {index} {fragment} delta increment")
-                        delta_stats[fragment] = (current_total, current_count)
+                    previous_total, previous_count = fragment_stats.get(fragment, (0.0, 0))
+                    current_count = _integer(
+                        snapshot.get("count"),
+                        f"{run_id} event {index} {fragment} count",
+                    )
+                    current_total = _number(
+                        snapshot.get("total"),
+                        f"{run_id} event {index} {fragment} total",
+                    )
+                    _equal(
+                        current_count,
+                        previous_count + 1,
+                        f"{run_id} event {index} {fragment} count increment",
+                    )
+                    _close(
+                        current_total,
+                        previous_total + credited_value,
+                        f"{run_id} event {index} {fragment} {credit_label} increment",
+                    )
+                    fragment_stats[fragment] = (current_total, current_count)
             elif is_new_transition and credited:
                 raise ReportError(f"{run_id} event {index} skipped a creditable unique transition")
             event_count += 1
@@ -789,13 +876,47 @@ def _event_diagnostics(
     _equal(last_calls, EXPECTED_BUDGET, f"{run_id} final oracle calls")
     _equal(charged_parent + charged_child, EXPECTED_BUDGET, f"{run_id} charged call count")
     _equal(charged_child, expected_child_count, f"{run_id} charged child count")
+    if len(charged_child_scores) < COMMON_CHILD_HORIZON:
+        raise ReportError(
+            f"{run_id} has only {len(charged_child_scores)} charged children; "
+            f"{COMMON_CHILD_HORIZON} are required for the common charged-child view"
+        )
+    common_summary = summarize_scores(
+        charged_child_scores[:COMMON_CHILD_HORIZON],
+        reporting_frequency=100,
+        budget=COMMON_CHILD_HORIZON,
+    )
+    common_metrics = {
+        name: _number(common_summary.get(name), f"{run_id} {COMMON_CHILD_VIEW}.{name}")
+        for name in SCALAR_NAMES
+    }
+    if any(not 0.0 <= value <= 1.0 for value in common_metrics.values()):
+        raise ReportError(f"{run_id} {COMMON_CHILD_VIEW} contains a metric outside [0, 1]")
+    if (
+        common_metrics["top_1"] + 1e-12 < common_metrics["top_10"]
+        or common_metrics["top_10"] + 1e-12 < common_metrics["top_100"]
+    ):
+        raise ReportError(f"{run_id} {COMMON_CHILD_VIEW} final top-k ordering is invalid")
+    total_parent_lookups = charged_parent + cached_parent
+    event_accounting = {
+        "logged_events": event_count,
+        "runner_iterations_represented": event_count,
+        "charged_parent_evaluations": charged_parent,
+        "cached_parent_lookups": cached_parent,
+        "charged_child_evaluations": charged_child,
+        "cached_child_lookups": cached_child,
+    }
     if not target:
-        return None
+        return None, common_metrics, event_accounting
     return {
         "events": event_count,
         "charged_parent_calls": charged_parent,
         "charged_child_calls": charged_child,
+        "total_parent_lookups": total_parent_lookups,
         "cached_parent_lookups": cached_parent,
+        "cached_parent_lookup_rate": (
+            cached_parent / total_parent_lookups if total_parent_lookups else 0.0
+        ),
         "cached_child_lookups": cached_child,
         "paired_events": paired_events,
         "unique_parent_child_transitions": len(unique_transitions),
@@ -803,17 +924,22 @@ def _event_diagnostics(
         "population_updates": population_updates,
         "delta_y_unique_transitions": _distribution(unique_deltas),
         "attribution": {
-            "applicable_events": attribution_applicable,
-            "covered_events": attribution_covered,
-            "coverage_fraction": (
-                attribution_covered / attribution_applicable
-                if attribution_applicable
+            "applicable_unique_transitions": len(unique_transitions),
+            "unique_transitions_with_any_credit": unique_transitions_with_credit,
+            "any_credit_fraction": (
+                unique_transitions_with_credit / len(unique_transitions)
+                if unique_transitions
+                else 0.0
+            ),
+            "mean_fragment_level_coverage": (
+                statistics.fmean(unique_fragment_coverages)
+                if unique_fragment_coverages
                 else 0.0
             ),
             "credited_fragment_observations": credited_fragment_observations,
             "unique_credited_fragments": len(credited_unique),
         },
-    }
+    }, common_metrics, event_accounting
 
 
 def _summary(
@@ -841,7 +967,7 @@ def _aggregate(runs: Sequence[RunEvidence]) -> tuple[dict[str, Any], dict[str, A
     for variant, variant_runs in by_variant.items():
         _equal([run.seed for run in variant_runs], list(EXPECTED_SEEDS), f"{variant} seeds")
         views: dict[str, Any] = {}
-        for view in VIEW_PREFIX:
+        for view in REPORT_VIEWS:
             views[view] = {}
             for metric in SCALAR_NAMES:
                 by_seed = {
@@ -860,6 +986,9 @@ def _aggregate(runs: Sequence[RunEvidence]) -> tuple[dict[str, Any], dict[str, A
                 for run in variant_runs
                 if run.diagnostics is not None
             },
+            "event_accounting_by_seed": {
+                str(run.seed): run.event_accounting for run in variant_runs
+            },
         }
 
     controls = {run.seed: run for run in by_variant[MATCHED_CONTROL]}
@@ -868,7 +997,7 @@ def _aggregate(runs: Sequence[RunEvidence]) -> tuple[dict[str, Any], dict[str, A
         "contrast": f"delta - {MATCHED_CONTROL}",
         "metrics": {},
     }
-    for view in VIEW_PREFIX:
+    for view in REPORT_VIEWS:
         paired["metrics"][view] = {}
         for metric in SCALAR_NAMES:
             by_seed = {
@@ -902,6 +1031,7 @@ def _validate_launch(run_id: str, launch: Mapping[str, Any]) -> None:
     attempts = _sequence(launch.get("attempts"), f"{run_id} launch attempts")
     if not attempts:
         raise ReportError(f"{run_id} has no launch attempt")
+    observed_sharing = False
     for index, raw_attempt in enumerate(attempts):
         attempt = _mapping(raw_attempt, f"{run_id} launch attempt {index}")
         record = _mapping(attempt.get("record"), f"{run_id} launch record {index}")
@@ -913,10 +1043,16 @@ def _validate_launch(run_id: str, launch: Mapping[str, Any]) -> None:
         if utilization >= 10.0:
             raise ReportError(f"{run_id} launched at {utilization}% GPU utilization")
         if record.get("sharing_actual") is True:
+            observed_sharing = True
             _equal(record.get("sharing_authorized"), True, f"{run_id} sharing authorization")
         uuid = physical.get("uuid")
         if not isinstance(uuid, str) or not uuid:
             raise ReportError(f"{run_id} launch lacks a GPU UUID")
+    _equal(
+        launch.get("any_gpu_sharing"),
+        observed_sharing,
+        f"{run_id} launch sharing summary",
+    )
 
 
 def load_report_data(collection_manifest: str | os.PathLike[str]) -> ReportData:
@@ -1059,13 +1195,14 @@ def load_report_data(collection_manifest: str | os.PathLike[str]) -> ReportData:
             for metric in SCALAR_NAMES:
                 _close(summary_group.get(metric), metrics[view][metric], f"{run_id} summary {view}.{metric}")
 
-        diagnostics = _event_diagnostics(
+        diagnostics, common_child_metrics, event_accounting = _event_diagnostics(
             resolved_sources["events"],
             run_id=run_id,
             variant=str(variant),
             expected_events=_integer(run.get("events"), f"{run_id} events", minimum=1),
             expected_child_count=child_count,
         )
+        metrics[COMMON_CHILD_VIEW] = common_child_metrics
         for name, source in sources.items():
             _equal(sha256_file(Path(source["path"])), source["sha256"], f"{run_id} {name} hash after reading")
 
@@ -1079,6 +1216,7 @@ def load_report_data(collection_manifest: str | os.PathLike[str]) -> ReportData:
                 child_count=child_count,
                 elapsed_seconds=elapsed,
                 diagnostics=diagnostics,
+                event_accounting=event_accounting,
                 provenance=provenance,
                 launch=launch,
                 sources=sources,
@@ -1094,18 +1232,25 @@ def load_report_data(collection_manifest: str | os.PathLike[str]) -> ReportData:
         raise ReportError(f"experiment used more than four GPUs: {sorted(gpu_uuids)!r}")
     evidence.sort(key=lambda item: (EXPECTED_VARIANTS.index(item.variant), item.seed))
     aggregates, paired = _aggregate(evidence)
-    shared = any(run.launch.get("any_gpu_sharing") is True for run in evidence)
+    shared_job_count = sum(
+        run.launch.get("any_gpu_sharing") is True for run in evidence
+    )
     caveats = [
         "This is an exploratory QED-only, 1,000-call, three-seed experiment; it is neither confirmatory nor paper-comparable.",
         "Delta-y is an association for an adaptive parent-child proposal, not a causal fragment contribution.",
         "The deterministic all-cut child-minus-parent mapping is approximate; several credited fragments each receive the full molecular delta.",
         "Parent-scoring arms spend part of the fixed budget on parents and therefore evaluate fewer children than released or ordinary running mean.",
-        "Initial delta ranks are zero and legacy seed scores only break ties; the original initial-corpus fragment support counts are unavailable.",
-        "Full dense-child AUCs can have different horizons and are not used as an equal-step inferential contrast.",
+        "Both matched arms start with neutral zero online estimates; absolute seed scores only break ties. The released and ordinary running-mean arms are contextual references, not matched causal controls.",
+        "A unique oracle call is a newly scored canonical molecule. A charged child is a unique child evaluation, not an optimizer iteration; logged events and cached-child lookups are reported separately. Cached parent lookups are free under the unique-call budget.",
+        "The first-500-child view equalizes charged child evaluations, but those children can occur at different total oracle-call positions and remain adaptively generated.",
     ]
-    if shared:
+    if shared_job_count == len(evidence):
         caveats.append(
-            "At least one job shared a GPU. Score comparisons remain valid, but wall-time comparisons are suppressed."
+            "All 12 jobs shared a GPU. Score comparisons remain valid, but wall-time comparisons are suppressed."
+        )
+    elif shared_job_count:
+        caveats.append(
+            f"{shared_job_count} of 12 jobs shared a GPU. Score comparisons remain valid, but wall-time comparisons are suppressed."
         )
     _equal(sha256_file(collection_path), collection_sha, "collection hash after reading")
     _equal(sha256_file(csv_path), csv_sha, "results CSV hash after reading")
@@ -1258,9 +1403,23 @@ def render_report_pdf(data: ReportData) -> bytes:
             "The primary paired contrast is delta minus running_mean_delta_control. "
             "Both arms freeze vocabulary updates during warmup, score the same parent/child "
             "domains, deduplicate canonical parent-child transitions, and use the same "
-            "deterministic changed-fragment mapping. Only the credited value differs: "
-            "child minus parent versus the absolute child score.",
+            "deterministic changed-fragment mapping. Both initialize online estimates at "
+            "zero and use absolute seed scores only to break ties. Their sole configured "
+            "difference is post-warmup credit: child minus parent versus absolute child. "
+            "Released and ordinary running mean are contextual references only.",
             body,
+        )
+    )
+    story.append(_paragraph("Exact metric definitions", subheading))
+    story.append(
+        _table(
+            [
+                ("Quantity", "Definition"),
+                ("Final top-k", METRIC_DEFINITIONS["top_k"]["definition"]),
+                ("AUC top-k", METRIC_DEFINITIONS["auc_top_k"]["definition"]),
+            ],
+            widths=(40 * mm, 190 * mm),
+            font_size=6.9,
         )
     )
     primary = data.paired["metrics"]["all_charged_molecules"]
@@ -1291,7 +1450,8 @@ def render_report_pdf(data: ReportData) -> bytes:
     )
 
     story.append(PageBreak())
-    story.append(_paragraph("All-call metrics", heading))
+    story.append(_paragraph("Aggregate metric views", heading))
+    story.append(_paragraph("All-call metrics", subheading))
     story.append(
         _paragraph(
             "Every unique parent and child oracle evaluation occupies its true position on "
@@ -1306,7 +1466,7 @@ def render_report_pdf(data: ReportData) -> bytes:
         values = data.aggregates[variant]["metrics"]["all_charged_molecules"]
         all_rows.append(
             (
-                variant,
+                VARIANT_LABELS[variant],
                 *(_mean_sd(values[metric]) for metric in SCALAR_NAMES),
             )
         )
@@ -1317,8 +1477,13 @@ def render_report_pdf(data: ReportData) -> bytes:
             font_size=6.7,
         )
     )
-    story.append(Spacer(1, 6 * mm))
-    story.append(_paragraph("Child metrics on the true total-call axis", heading))
+    story.append(Spacer(1, 3 * mm))
+    story.append(
+        _paragraph(
+            "Charged-child score subset on the total unique-call axis (not equal child evaluations)",
+            subheading,
+        )
+    )
     child_rows: list[Sequence[Any]] = [
         ("Variant", "Children", "AUC top-1", "AUC top-10", "AUC top-100", "Final top-1", "Final top-10", "Final top-100")
     ]
@@ -1327,7 +1492,7 @@ def render_report_pdf(data: ReportData) -> bytes:
         values = aggregate["metrics"]["charged_children_total_call_axis"]
         child_rows.append(
             (
-                variant,
+                VARIANT_LABELS[variant],
                 _mean_sd(aggregate["charged_child_count"], digits=1),
                 *(_mean_sd(values[metric]) for metric in SCALAR_NAMES),
             )
@@ -1341,11 +1506,42 @@ def render_report_pdf(data: ReportData) -> bytes:
     )
     story.append(
         _paragraph(
-            "Child-only curves retain each child's actual global oracle-call index. They are "
-            "not compressed to the start of the budget. The count column exposes the parent "
-            "oracle cost directly.",
+            "Charged-child scores retain their actual global call indices; parent calls create "
+            "gaps. The count column is the number of unique charged-child evaluations reached, "
+            "not the number of runner iterations.",
             note,
         )
+    )
+    story.append(Spacer(1, 2 * mm))
+    story.append(_paragraph("Common first 500 charged child evaluations", subheading))
+    common_rows: list[Sequence[Any]] = [
+        (
+            "Variant",
+            "AUC top-1",
+            "AUC top-10",
+            "AUC top-100",
+            "Final top-1",
+            "Final top-10",
+            "Final top-100",
+        )
+    ]
+    for variant in EXPECTED_VARIANTS:
+        values = data.aggregates[variant]["metrics"][COMMON_CHILD_VIEW]
+        common_rows.append(
+            (
+                VARIANT_LABELS[variant],
+                *(_mean_sd(values[metric]) for metric in SCALAR_NAMES),
+            )
+        )
+    story.append(
+        _table(
+            common_rows,
+            widths=(43 * mm, 32 * mm, 32 * mm, 32 * mm, 32 * mm, 32 * mm, 32 * mm),
+            font_size=6.4,
+        )
+    )
+    story.append(
+        _paragraph(METRIC_DEFINITIONS["views"][COMMON_CHILD_VIEW], note)
     )
 
     story.append(PageBreak())
@@ -1353,20 +1549,23 @@ def render_report_pdf(data: ReportData) -> bytes:
     story.append(
         _paragraph(
             "Diagnostics are recomputed from hash-checked event streams. Delta distributions "
-            "use unique canonical parent-child transitions, matching the estimator's "
-            "deduplication unit.",
+            "and both attribution summaries use unique canonical parent-child transitions, "
+            "matching the estimator's deduplication unit. Fragment coverage is the credited "
+            "child-fragment fraction, averaged across those unique transitions.",
             body,
         )
     )
     diagnostic_rows: list[Sequence[Any]] = [
         (
             "Variant / seed",
-            "Parent calls",
-            "Child calls",
+            "Charged parents",
+            "Cached parents / all lookups",
+            "Charged children",
             "Unique transitions",
             "Delta-y mean +/- SD",
             "+ / 0 / -",
-            "Mapping coverage",
+            "Transitions with any credit",
+            "Mean fragment coverage",
             "Credited observations / unique",
         )
     ]
@@ -1378,25 +1577,44 @@ def render_report_pdf(data: ReportData) -> bytes:
         attribution = diagnostic["attribution"]
         diagnostic_rows.append(
             (
-                f"{run.variant} / {run.seed}",
+                (
+                    f"{VARIANT_LABELS[run.variant]} / {run.seed}\n"
+                    f"events {run.event_accounting['logged_events']}; cached child "
+                    f"{run.event_accounting['cached_child_lookups']}"
+                ),
                 diagnostic["charged_parent_calls"],
+                (
+                    f"{diagnostic['cached_parent_lookups']}/"
+                    f"{diagnostic['total_parent_lookups']} "
+                    f"({diagnostic['cached_parent_lookup_rate']:.3f})"
+                ),
                 diagnostic["charged_child_calls"],
                 diagnostic["unique_parent_child_transitions"],
                 f"{distribution['mean']:+.5f} +/- {distribution['sample_sd']:.5f}",
                 f"{distribution['positive']} / {distribution['zero']} / {distribution['negative']}",
-                f"{attribution['covered_events']}/{attribution['applicable_events']} ({attribution['coverage_fraction']:.3f})",
+                (
+                    f"{attribution['unique_transitions_with_any_credit']}/"
+                    f"{attribution['applicable_unique_transitions']} "
+                    f"({attribution['any_credit_fraction']:.3f})"
+                ),
+                f"{attribution['mean_fragment_level_coverage']:.3f}",
                 f"{attribution['credited_fragment_observations']} / {attribution['unique_credited_fragments']}",
             )
         )
     story.append(
         _table(
             diagnostic_rows,
-            widths=(44 * mm, 23 * mm, 23 * mm, 30 * mm, 42 * mm, 27 * mm, 42 * mm, 39 * mm),
-            font_size=6.5,
+            widths=(33 * mm, 19 * mm, 29 * mm, 19 * mm, 24 * mm, 38 * mm, 23 * mm, 29 * mm, 27 * mm, 27 * mm),
+            font_size=5.7,
         )
     )
-    story.append(Spacer(1, 5 * mm))
-    story.append(_paragraph("Matched child-axis contrast", subheading))
+    story.append(Spacer(1, 2 * mm))
+    story.append(
+        _paragraph(
+            "Matched charged-child subset on total unique-call axis (not equal child evaluations)",
+            subheading,
+        )
+    )
     child_paired = data.paired["metrics"]["charged_children_total_call_axis"]
     story.append(
         _table(
@@ -1415,6 +1633,39 @@ def render_report_pdf(data: ReportData) -> bytes:
                 ],
             ],
             widths=(48 * mm, 62 * mm, 120 * mm),
+            font_size=6.4,
+        )
+    )
+    story.append(Spacer(1, 2 * mm))
+    story.append(_paragraph("Matched first-500-charged-child diagnostic", subheading))
+    common_paired = data.paired["metrics"][COMMON_CHILD_VIEW]
+    story.append(
+        _table(
+            [
+                ("Metric", "Delta minus control", "Seed deltas"),
+                *[
+                    (
+                        metric,
+                        _mean_sd(common_paired[metric]),
+                        ", ".join(
+                            f"s{seed}={common_paired[metric]['by_seed'][str(seed)]:+.6f}"
+                            for seed in EXPECTED_SEEDS
+                        ),
+                    )
+                    for metric in SCALAR_NAMES
+                ],
+            ],
+            widths=(48 * mm, 62 * mm, 120 * mm),
+            font_size=6.4,
+        )
+    )
+    story.append(
+        _paragraph(
+            "This equalizes 500 unique charged-child evaluations per run. Its AUC uses dense "
+            "charged-child indices 1..500, the origin (0, 0), 100-evaluation checkpoints, "
+            "trapezoids, and a divisor of 500; it does not equalize total oracle calls or "
+            "runner iterations.",
+            note,
         )
     )
 
@@ -1425,16 +1676,41 @@ def render_report_pdf(data: ReportData) -> bytes:
         f"{first.provenance.get('git_commit')} | dirty={first.provenance.get('git_dirty')} | "
         f"tracked diff={first.provenance.get('tracked_diff_sha256')}"
     )
-    gpu_rows: list[str] = []
+    gpu_groups: dict[str, dict[str, Any]] = {}
     for run in data.runs:
         for raw_attempt in run.launch.get("attempts", []):
             record = raw_attempt["record"]
             gpu = record["physical_gpu"]
-            gpu_rows.append(
-                f"{run.variant}/s{run.seed}: GPU {gpu.get('index')} {gpu.get('uuid')} "
-                f"at {gpu.get('utilization_percent')}%, free "
-                f"{gpu.get('memory_total_mib', 0) - gpu.get('memory_used_mib', 0)} MiB"
+            uuid = str(gpu.get("uuid"))
+            group = gpu_groups.setdefault(
+                uuid,
+                {"indices": set(), "jobs": set(), "utilizations": [], "free_mib": []},
             )
+            group["indices"].add(gpu.get("index"))
+            group["jobs"].add(f"{run.variant}/s{run.seed}")
+            group["utilizations"].append(float(gpu.get("utilization_percent")))
+            group["free_mib"].append(
+                int(gpu.get("memory_total_mib", 0)) - int(gpu.get("memory_used_mib", 0))
+            )
+    gpu_rows = []
+    for uuid in sorted(gpu_groups):
+        group = gpu_groups[uuid]
+        indices = ",".join(str(value) for value in sorted(group["indices"]))
+        gpu_rows.append(
+            f"GPU {indices} {uuid}: {len(group['jobs'])} jobs; launch utilization "
+            f"{min(group['utilizations']):g}-{max(group['utilizations']):g}%; "
+            f"minimum free {min(group['free_mib'])} MiB"
+        )
+    shared_job_count = sum(
+        run.launch.get("any_gpu_sharing") is True for run in data.runs
+    )
+    sharing_label = (
+        "All 12 jobs shared a GPU; wall-time comparisons suppressed"
+        if shared_job_count == len(data.runs)
+        else f"{shared_job_count} of 12 jobs shared a GPU; wall-time comparisons suppressed"
+        if shared_job_count
+        else "No job shared a GPU"
+    )
     provenance_rows = [
         ("Item", "Value"),
         ("Model checkpoint", f"50000.ckpt | SHA-256 {EXPECTED_MODEL_SHA256}"),
@@ -1447,24 +1723,56 @@ def render_report_pdf(data: ReportData) -> bytes:
         ("Results CSV", f"{data.csv_path.name} | SHA-256 {data.csv_sha256}"),
         ("Reporter", f"{REPORTER_PATH} | SHA-256 {sha256_file(REPORTER_PATH)}"),
         ("Code identity", code_identity),
+        ("GPU sharing", sharing_label),
         ("GPU launches", "\n".join(gpu_rows)),
     ]
     story.append(_table(provenance_rows, widths=(48 * mm, 210 * mm), font_size=6.8))
-    story.append(Spacer(1, 5 * mm))
+    story.append(Spacer(1, 2 * mm))
     story.append(_paragraph("Locked hyperparameters", subheading))
     story.append(
         _table(
             [
                 ("Budget", "Warmup", "Population", "gamma", "Temperature", "Randomness", "Guidance", "Attribution"),
-                ("1,000 unique calls", "100 iterations; legacy > boundary", "100", "0.0", "1.2", "2.0", "2.0", "novel_vs_parent"),
+                ("1,000 unique calls", "parameter 100; 101 frozen (0..100)", "100", "0.0", "1.2", "2.0", "2.0", "novel_vs_parent"),
             ],
             widths=(39 * mm, 52 * mm, 29 * mm, 22 * mm, 31 * mm, 31 * mm, 27 * mm, 40 * mm),
         )
     )
-    story.append(Spacer(1, 5 * mm))
+    story.append(Spacer(1, 2 * mm))
+    story.append(_paragraph("Estimator controls", subheading))
+    story.append(
+        _table(
+            [
+                ("Arm", "Seed initialization", "Post-warmup credit value"),
+                (
+                    VARIANT_LABELS["released"],
+                    EXPECTED_SEED_INITIALIZATION["released"],
+                    EXPECTED_CREDIT_VALUE_POLICY["released"],
+                ),
+                (
+                    VARIANT_LABELS["running_mean"],
+                    EXPECTED_SEED_INITIALIZATION["running_mean"],
+                    EXPECTED_CREDIT_VALUE_POLICY["running_mean"],
+                ),
+                (
+                    "transition-absolute control",
+                    EXPECTED_SEED_INITIALIZATION[MATCHED_CONTROL],
+                    EXPECTED_CREDIT_VALUE_POLICY[MATCHED_CONTROL],
+                ),
+                (
+                    "delta-y",
+                    EXPECTED_SEED_INITIALIZATION["delta"],
+                    EXPECTED_CREDIT_VALUE_POLICY["delta"],
+                ),
+            ],
+            widths=(55 * mm, 105 * mm, 90 * mm),
+            font_size=6.7,
+        )
+    )
+    story.append(Spacer(1, 1 * mm))
     story.append(_paragraph("Scientific caveats", heading))
     for caveat in data.caveats:
-        story.append(_paragraph(f"- {caveat}", body))
+        story.append(_paragraph(f"- {caveat}", note))
 
     document.build(
         story,
@@ -1493,7 +1801,9 @@ def validate_pdf(payload: bytes) -> dict[str, Any]:
     for heading in (
         "GenMol QED Delta-y Credit Ablation",
         "All-call metrics",
+        "Common first 500 charged child evaluations",
         "Delta-y and attribution diagnostics",
+        "Matched first-500-charged-child diagnostic",
         "Configuration and provenance",
         "Scientific caveats",
     ):
@@ -1630,6 +1940,14 @@ def write_report(
             raise ReportError("PDF renderer is not deterministic")
         pdf_validation = validate_pdf(pdf_payload)
         pdf_path, pdf_sha = _publish_pdf(destination, pdf_payload)
+        shared_job_count = sum(
+            run.launch.get("any_gpu_sharing") is True for run in data.runs
+        )
+        gpu_uuids = {
+            str(raw_attempt["record"]["physical_gpu"]["uuid"])
+            for run in data.runs
+            for raw_attempt in run.launch.get("attempts", [])
+        }
         report = {
             "schema_version": REPORT_SCHEMA_VERSION,
             "report_type": "fixed QED delta-y credit-assignment ablation",
@@ -1663,7 +1981,22 @@ def write_report(
                 "unique_oracle_calls_per_run": EXPECTED_BUDGET,
                 "run_count": 12,
                 "matched_contrast": f"delta - {MATCHED_CONTROL}",
+                "matched_variants": [MATCHED_CONTROL, "delta"],
+                "contextual_reference_variants": sorted(CONTEXTUAL_VARIANTS),
                 "delta_attribution": "novel_vs_parent",
+                "common_charged_child_horizon": COMMON_CHILD_HORIZON,
+                "calls_vs_iterations": (
+                    "Unique oracle calls count newly scored canonical molecules; "
+                    "charged children count unique child evaluations, while runner "
+                    "iterations/events also include cached lookups."
+                ),
+            },
+            "metric_definitions": METRIC_DEFINITIONS,
+            "execution": {
+                "unique_gpu_count": len(gpu_uuids),
+                "shared_job_count": shared_job_count,
+                "all_jobs_shared": shared_job_count == len(data.runs),
+                "wall_time_comparisons_reported": False,
             },
             "aggregates": data.aggregates,
             "paired_delta_vs_matched_control": data.paired,
@@ -1673,6 +2006,7 @@ def write_report(
                     "variant": run.variant,
                     "seed": run.seed,
                     "charged_child_count": run.child_count,
+                    "event_accounting": run.event_accounting,
                     "metrics": run.metrics,
                     "delta_diagnostics": run.diagnostics,
                     "config": run.config,

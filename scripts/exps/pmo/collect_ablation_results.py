@@ -98,6 +98,8 @@ CSV_CONFIG_FIELDS = (
     "observation_identity",
     "parent_domain_policy",
     "credit_fragment_policy",
+    "credit_value_policy",
+    "seed_initialization_policy",
     "legacy_seed_count",
     "legacy_warmup_off_by_one",
     "durable_events",
@@ -243,7 +245,7 @@ VARIANT_SETTINGS: dict[str, dict[str, Any]] = {
         "prior_strength": 0.0,
     },
     "running_mean_delta_control": {
-        "mode": "mean",
+        "mode": "delta_control",
         "min_support": 1,
         "parent_control": True,
         "prior_strength": 0.0,
@@ -255,6 +257,9 @@ PROTOCOL_CONFIG_FIELDS = (
     "observation_identity",
     "parent_domain_policy",
     "credit_fragment_policy",
+)
+STRICT_MATCHED_ESTIMATOR_EXPERIMENTS = frozenset(
+    {"fragment_vocab_qed_50k_delta_1k_v2"}
 )
 SMALL_MOLECULE_ORACLES = {
     "albuterol_similarity",
@@ -594,6 +599,28 @@ def _protocol_metadata(variant: str, delta_attribution: str) -> dict[str, str]:
     }
 
 
+def _seed_initialization_policy(variant: str) -> str:
+    """Describe how initial vocabulary rows enter the online estimator."""
+
+    if variant == "released":
+        return "released_absolute_rows"
+    if variant in DELTA_MECHANICS_VARIANTS:
+        return "neutral_zero_with_seed_score_tiebreak"
+    return "absolute_seed_statistics"
+
+
+def _credit_value_policy(variant: str) -> str:
+    """Describe the scalar target assigned to each credited fragment."""
+
+    if variant == "delta":
+        return "child_score_minus_parent_score"
+    return "absolute_child_score"
+
+
+def _requires_matched_estimator_metadata(config: Mapping[str, Any]) -> bool:
+    return config.get("experiment_id") in STRICT_MATCHED_ESTIMATOR_EXPERIMENTS
+
+
 def _resolved_launch_config(parsed: Mapping[str, Any]) -> dict[str, Any]:
     required = (
         "--oracle",
@@ -683,6 +710,8 @@ def _resolved_launch_config(parsed: Mapping[str, Any]) -> dict[str, Any]:
         "legacy_seed_count": _optional(parsed, "--legacy-seed-count", int, None),
         "delta_attribution": delta_attribution,
         **_protocol_metadata(variant, delta_attribution),
+        "credit_value_policy": _credit_value_policy(variant),
+        "seed_initialization_policy": _seed_initialization_policy(variant),
         "statistical_duplicate_policy": (
             "one update per unique canonical parent-child transition"
             if variant in DELTA_MECHANICS_VARIANTS
@@ -882,6 +911,13 @@ def _validate_run_matrix(collected: CollectedRun, plan: MatrixPlan) -> bool:
             expected["statistical_duplicate_policy"] = (
                 "one update per unique canonical child"
             )
+    strict_estimator_metadata = _requires_matched_estimator_metadata(config)
+    if "credit_value_policy" not in config and not strict_estimator_metadata:
+        expected.pop("credit_value_policy", None)
+    if "seed_initialization_policy" not in config and not strict_estimator_metadata:
+        expected.pop("seed_initialization_policy", None)
+        if config.get("variant") == "running_mean_delta_control":
+            expected["policy_mode"] = "mean"
     for key, value in expected.items():
         if key not in {"matrix_path", "matrix_sha256"}:
             _equal(config.get(key), value, f"run {identity!r} matrix config {key}")
@@ -931,6 +967,13 @@ def _validate_launch(
             resolved["statistical_duplicate_policy"] = (
                 "one update per unique canonical child"
             )
+    strict_estimator_metadata = _requires_matched_estimator_metadata(config)
+    if "credit_value_policy" not in config and not strict_estimator_metadata:
+        resolved.pop("credit_value_policy", None)
+    if "seed_initialization_policy" not in config and not strict_estimator_metadata:
+        resolved.pop("seed_initialization_policy", None)
+        if config.get("variant") == "running_mean_delta_control":
+            resolved["policy_mode"] = "mean"
     if "population_sampling_order" in config:
         resolved["population_sampling_order"] = (
             "canonical fragment string before uniform sampling"
@@ -1579,6 +1622,28 @@ def collect_run(
             config.get("statistical_duplicate_policy"),
             expected_duplicate_policy,
             "manifest config statistical_duplicate_policy",
+        )
+    if _requires_matched_estimator_metadata(config):
+        missing_estimator_metadata = {
+            "credit_value_policy",
+            "seed_initialization_policy",
+        } - config.keys()
+        if missing_estimator_metadata:
+            raise CollectionError(
+                "manifest config is missing strict matched-estimator metadata: "
+                f"{sorted(missing_estimator_metadata)}"
+            )
+    if "credit_value_policy" in config:
+        _equal(
+            config["credit_value_policy"],
+            _credit_value_policy(path_variant),
+            "manifest config credit_value_policy",
+        )
+    if "seed_initialization_policy" in config:
+        _equal(
+            config["seed_initialization_policy"],
+            _seed_initialization_policy(path_variant),
+            "manifest config seed_initialization_policy",
         )
     run_id = f"{experiment_id}:{path_oracle}:{path_variant}:seed{path_seed}"
     for actual, expected, context in (
