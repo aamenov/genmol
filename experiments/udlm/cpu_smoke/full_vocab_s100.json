@@ -1,0 +1,51 @@
+{
+  "device": "cpu",
+  "exclude_special_tokens": false,
+  "fixed_diagnostics_after": {
+    "0.1": {
+      "clean_token_accuracy": 0.4912280738353729,
+      "loss": 3.178863286972046
+    },
+    "0.5": {
+      "clean_token_accuracy": 0.5877193212509155,
+      "loss": 1.6000655889511108
+    },
+    "0.9": {
+      "clean_token_accuracy": 0.4649122953414917,
+      "loss": 2.2963783740997314
+    }
+  },
+  "fixed_diagnostics_before": {
+    "0.1": {
+      "clean_token_accuracy": 0.0,
+      "loss": 7.92083215713501
+    },
+    "0.5": {
+      "clean_token_accuracy": 0.0,
+      "loss": 6.234570026397705
+    },
+    "0.9": {
+      "clean_token_accuracy": 0.0,
+      "loss": 5.313082695007324
+    }
+  },
+  "generated_smiles": [
+    "CC(C)C",
+    "CC(C)N",
+    "CCCl",
+    "CC(C)C",
+    "CC(O)[Ce+9]"
+  ],
+  "git_sha": "02595d1ecf994bbd432ec67ef21b0d56ed97918d",
+  "loss_first": 5.870141983032227,
+  "loss_first_five_mean": 6.219510650634765,
+  "loss_last": 0.6293231844902039,
+  "loss_last_five_mean": 0.5404752731323242,
+  "purpose": "integration smoke test; not benchmark evidence",
+  "runtime_seconds": 4.026934623718262,
+  "sample_count_requested": 16,
+  "sampling_steps": 32,
+  "seed": 1,
+  "steps": 100,
+  "strict_valid_samples": 5
+}
