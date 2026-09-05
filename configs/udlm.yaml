@@ -7,3 +7,6 @@ defaults:
 # diffusion process.  Use command-line overrides for deliberately small pilots.
 training:
   diffusion: udlm
+  udlm:
+    # Faithful default: absent selectors in older configs resolve identically.
+    prior_variant: release_uniform

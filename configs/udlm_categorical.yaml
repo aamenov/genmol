@@ -1,0 +1,15 @@
+defaults:
+  - udlm
+  - _self_
+
+# Experimental frequency-smoothed categorical UDLM. The pinned 10,000-row
+# frequency artifact is verified and parsed from the exact hashed bytes by
+# model.py. Always run a matched `prior_variant=schedule_uniform` control: both
+# use the same rank-one categorical process and exact residual-clean schedule,
+# so their difference isolates the stationary prior rather than the repair.
+# The process exposes the parameter-independent endpoint KL separately; it is
+# not part of the current training gradient.
+training:
+  udlm:
+    prior_variant: empirical_frequency
+    empirical_uniform_mix: 0.01

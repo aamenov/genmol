@@ -80,6 +80,19 @@ training:
     # The released UDLM uses all vocabulary entries. Excluding tokenizer
     # control symbols is a separate molecule-specific ablation.
     exclude_special_tokens: False
+    # `release_uniform` preserves the current official-UDLM-compatible process
+    # and old UDLM checkpoint state exactly. `schedule_uniform` changes only to
+    # the exact residual-clean schedule in ContinuousCategoricalDiffusion and
+    # is the required control for `empirical_frequency`. The empirical variant
+    # must never be compared only against release_uniform, because that would
+    # conflate the schedule repair with the non-uniform prior. Categorical
+    # training optimizes the model-dependent continuous-time integral; its
+    # parameter-independent endpoint KL is available separately on the process.
+    prior_variant: release_uniform
+    # For empirical_frequency, pi=(1-w)*frequency + w*uniform on the active
+    # alphabet. Require 0<w<1: positive uniform mass gives every active token
+    # support, while positive empirical mass keeps the treatment non-uniform.
+    empirical_uniform_mix: 0.01
     noise_eps: 1e-3
     inference_eps: 1e-5
     # 128 matches the official continuous-time sampling default. Smaller
