@@ -1,0 +1,530 @@
+{
+  "claim_scope": "engineering_selection_only_not_superiority_or_causal_evidence",
+  "common_training": {
+    "accumulate_grad_batches": 8,
+    "artifact_schema_versions": {
+      "denoising_report": 1,
+      "exit_receipt": 5,
+      "launch_manifest": 2,
+      "runtime_config": 2,
+      "training_summary": 5
+    },
+    "effective_global_batch_size": 16,
+    "global_batch_size": 16,
+    "gpu_count": 1,
+    "initialization": {
+      "checkpoint": {
+        "relative_path": "outputs/paper_v1/checkpoints/50000.ckpt",
+        "root": "project",
+        "sha256": "8d00aa47b02f64bf39ff6b0b2e786f213587366fc2c3d29712a00f3f84108dd6",
+        "size_bytes": 1396998679
+      },
+      "ema_reset": true,
+      "global_step_reset": true,
+      "mode": "fresh_independent_mdlm_ema_warm_start_each_arm",
+      "optimizer_reset": true,
+      "scheduler_reset": true,
+      "weights": "ema"
+    },
+    "micro_batch_size_per_process": 2,
+    "prior_variant": "empirical_frequency",
+    "training_seed": 17
+  },
+  "firewall": {
+    "failed_or_missing_evidence_policy": "incomplete_no_winner",
+    "final_generation_seeds": [
+      0,
+      1,
+      2
+    ],
+    "final_generation_seeds_forbidden": true,
+    "generation_metrics_allowed": false,
+    "health_gate_evidence_eligible": false,
+    "superiority_evidence_eligible": false,
+    "unregistered_attempts_allowed": false
+  },
+  "panel": {
+    "artifact": {
+      "canonical_sha256": "0fc90cb7cdd351b22da1e6b5ee369d97c3f1da0c51a3dd0976690433cc657c3c",
+      "relative_path": "experiments/udlm/validation_panel/first_256.json",
+      "root": "repository",
+      "schema_version": 1,
+      "sha256": "e2493da4f3cb3217b48c78dc2901dc7524d7d90dc3959cffa87a1b6f8a9a7658",
+      "size_bytes": 216103
+    },
+    "batch_size": 4,
+    "content_tokens_per_time_bin": 13627,
+    "corruption_seed": 17,
+    "device": "cpu",
+    "evaluator_report_schema_version": 4,
+    "evaluator_source": {
+      "relative_path": "scripts/udlm/evaluate_denoising_panel.py",
+      "root": "repository",
+      "sha256": "33b056c6ae4ffbc8976a84faea1cf47a3caf81ec524c9d5e9f37fad354c66630",
+      "size_bytes": 93538
+    },
+    "frequency_artifact": {
+      "canonical_sha256": "04acafcf4dd65c0ea6760d00fc92618cc96883c16f779a3cc48379fa4271e32a",
+      "relative_path": "experiments/udlm/token_frequency/train_first_10000.json",
+      "root": "repository",
+      "schema_version": 1,
+      "sha256": "088c78e75611f3cc42c4011e1da6f65a377e673b9cba07a28b126b0fc62f06ed",
+      "size_bytes": 21043
+    },
+    "frequency_ordered_text_sha256": "53aee8e5592fc96159788e86519abbbcc9f1ab7c6348a1cb59a939bd57051d8f",
+    "ordered_token_ids_sha256": "a641f0335f0c155040fdce6dcb131af3dd50be364a29e54c7517968e6f3e2be2",
+    "rows": 256,
+    "time_bins": [
+      0.1,
+      0.5,
+      0.9
+    ],
+    "weights": "ema"
+  },
+  "prerequisite_health_gate": {
+    "evidence": {
+      "checkpoint_members": [
+        {
+          "global_step": 10,
+          "position": 0,
+          "relative_path": "output/udlm/health-w1-r-34856c275049cd329320f6c01171f0d2d34cd814/checkpoints/10.ckpt",
+          "run_name": "health-w1-r-34856c275049cd329320f6c01171f0d2d34cd814",
+          "sha256": "03766c7c162958c0ddf4d0bd09cb436b3940beac5d2282f9fdf7894f6d96ecf1",
+          "size_bytes": 1409647617,
+          "training_variant": "udlm"
+        },
+        {
+          "global_step": 10,
+          "position": 1,
+          "relative_path": "output/udlm/health-w1-s-34856c275049cd329320f6c01171f0d2d34cd814/checkpoints/10.ckpt",
+          "run_name": "health-w1-s-34856c275049cd329320f6c01171f0d2d34cd814",
+          "sha256": "06a0bdb79e1749461cbe8d14262cf6a8a441f2f2c3a24cbcf5a9f1693a09bedd",
+          "size_bytes": 1409664576,
+          "training_variant": "schedule_uniform"
+        },
+        {
+          "global_step": 10,
+          "position": 2,
+          "relative_path": "output/udlm/health-w1-e-34856c275049cd329320f6c01171f0d2d34cd814/checkpoints/10.ckpt",
+          "run_name": "health-w1-e-34856c275049cd329320f6c01171f0d2d34cd814",
+          "sha256": "4423373049c9acd8f8e021f9b409601364a42f74e3ec98528d38a3f7214c5cbe",
+          "size_bytes": 1409665024,
+          "training_variant": "udlm_categorical"
+        }
+      ],
+      "claim_scope": "training_health_and_provenance_only",
+      "eligibility": {
+        "candidate_lock": false,
+        "generation": false,
+        "ranking": false,
+        "screen_authorization": true,
+        "superiority": false
+      },
+      "gpu_count": 1,
+      "health_source_revision": "34856c275049cd329320f6c01171f0d2d34cd814",
+      "matched_panel_spec_sha256": "01239492eca455200c5e2eae2947ffd11cb1c18b8cf76a43e2c96b524a482806",
+      "receipt_members": [
+        {
+          "position": 0,
+          "recorded_at_utc": "2026-09-06T16:53:31.566730+00:00",
+          "relative_path": "output/udlm/health-w1-r-34856c275049cd329320f6c01171f0d2d34cd814/pilot_exit_status.json",
+          "run_name": "health-w1-r-34856c275049cd329320f6c01171f0d2d34cd814",
+          "schema_version": 5,
+          "sha256": "6ddb6fcfbf4f558670be06529d1c3228a2784dcf6c317a046fa5033fb7dfbf13",
+          "training_variant": "udlm"
+        },
+        {
+          "position": 1,
+          "recorded_at_utc": "2026-09-06T17:00:02.568352+00:00",
+          "relative_path": "output/udlm/health-w1-s-34856c275049cd329320f6c01171f0d2d34cd814/pilot_exit_status.json",
+          "run_name": "health-w1-s-34856c275049cd329320f6c01171f0d2d34cd814",
+          "schema_version": 5,
+          "sha256": "10f80c52b435d030c6d59d7941101767c1021e4de3425e5970fcdbb0f48d5bcc",
+          "training_variant": "schedule_uniform"
+        },
+        {
+          "position": 2,
+          "recorded_at_utc": "2026-09-06T17:05:03.705854+00:00",
+          "relative_path": "output/udlm/health-w1-e-34856c275049cd329320f6c01171f0d2d34cd814/pilot_exit_status.json",
+          "run_name": "health-w1-e-34856c275049cd329320f6c01171f0d2d34cd814",
+          "schema_version": 5,
+          "sha256": "8e1457cf0def430a8bb9b128d63e256636fbcc7f1b01dd52e7a43f302a6154b9",
+          "training_variant": "udlm_categorical"
+        }
+      ],
+      "schema_version": 1,
+      "status": "validated",
+      "terminal_receipt": {
+        "canonical_sha256": "3aa5fa10a9db03a9048310a41493d9f1b49e9374bd2c30bedc4458e3e75afd89",
+        "position": 2,
+        "relative_path": "output/udlm/health-w1-e-34856c275049cd329320f6c01171f0d2d34cd814/pilot_exit_status.json",
+        "root": "repository",
+        "schema_version": 5,
+        "sha256": "8e1457cf0def430a8bb9b128d63e256636fbcc7f1b01dd52e7a43f302a6154b9",
+        "size_bytes": 12932,
+        "training_variant": "udlm_categorical"
+      }
+    },
+    "source_transition": {
+      "allowed_config_paths": [
+        "experiments/udlm/protocols/optimization_screen_configs_gpu1/conditioning_e_a0__e_l0.json",
+        "experiments/udlm/protocols/optimization_screen_configs_gpu1/conditioning_e_a0__e_l1.json",
+        "experiments/udlm/protocols/optimization_screen_configs_gpu1/conditioning_e_a1__e_l0.json",
+        "experiments/udlm/protocols/optimization_screen_configs_gpu1/conditioning_e_a1__e_l1.json",
+        "experiments/udlm/protocols/optimization_screen_configs_gpu1/scheduler_e_l0.json",
+        "experiments/udlm/protocols/optimization_screen_configs_gpu1/scheduler_e_l1.json"
+      ],
+      "exact_config_only_transition_verified": true,
+      "health_source_is_registry_source_parent": true,
+      "health_source_revision": "34856c275049cd329320f6c01171f0d2d34cd814",
+      "opposite_gpu_config_family_absent": true,
+      "registry_source_revision": "95bb3971354b4712135a30e6e58326a954917e1f"
+    }
+  },
+  "registry_id": "genmol_udlm_scheduler_conditioning_screen_v2",
+  "schema_version": 2,
+  "source": {
+    "blobs": [
+      {
+        "relative_path": "configs/base.yaml",
+        "root": "repository",
+        "sha256": "c337a2b2c3b5f7fd39f1337ae7c170a06c550560ff2ef306aa09d47da3629024",
+        "size_bytes": 5098
+      },
+      {
+        "relative_path": "configs/udlm.yaml",
+        "root": "repository",
+        "sha256": "2dfeca56388fe2adaafbd3467b6604f6bcbd865d7757d3d8da5fa9d3eca7728b",
+        "size_bytes": 416
+      },
+      {
+        "relative_path": "configs/udlm_categorical.yaml",
+        "root": "repository",
+        "sha256": "4a56aba22429d71b3e4ceaa5330391a7f3b624e8daff2b54204ecfc6b104c7dd",
+        "size_bytes": 627
+      },
+      {
+        "relative_path": "experiments/udlm/prior_geometry/floor_selection_train_rows_10001_30000.json",
+        "root": "repository",
+        "sha256": "02908dafaf589ca9a49e560aa1eab470a18d6bfe616b781164784c489f54a9f1",
+        "size_bytes": 73953
+      },
+      {
+        "relative_path": "scripts/train.py",
+        "root": "repository",
+        "sha256": "09b859b0b038ed830f19b471b6c919b7f5eeb44a51753329800cb7c21fc5e25f",
+        "size_bytes": 119065
+      },
+      {
+        "relative_path": "scripts/udlm/audit_conditioning_initialization.py",
+        "root": "repository",
+        "sha256": "0e8f959307cda7b81ee82b4432993247d4f0e52ccdeeae0c647b6f1fcdf0f1c7",
+        "size_bytes": 35350
+      },
+      {
+        "relative_path": "scripts/udlm/audit_empirical_prior_floor.py",
+        "root": "repository",
+        "sha256": "305db0bdb9195ef0bf0ff8da6c1fc31c42e562c513bd9bccaed34bcb2023ccc8",
+        "size_bytes": 26989
+      },
+      {
+        "relative_path": "scripts/udlm/collect_optimization_screen_evidence.py",
+        "root": "repository",
+        "sha256": "a696cd3b6ef6220285b245869a0399c4fc180ce8817a3be83c7319b1ec7945d3",
+        "size_bytes": 28471
+      },
+      {
+        "relative_path": "scripts/udlm/evaluate_denoising_panel.py",
+        "root": "repository",
+        "sha256": "33b056c6ae4ffbc8976a84faea1cf47a3caf81ec524c9d5e9f37fad354c66630",
+        "size_bytes": 93538
+      },
+      {
+        "relative_path": "scripts/udlm/launch_optimization_screen.py",
+        "root": "repository",
+        "sha256": "d1d0c23102fd2588847f36274497cce68c47ad9c484f1ca5e686d622d7a63786",
+        "size_bytes": 34319
+      },
+      {
+        "relative_path": "scripts/udlm/launch_health_panel.py",
+        "root": "repository",
+        "sha256": "8865af8d85f497d3c4eea984d52f25ce3557efd1b74168412da6ad27cafd951c",
+        "size_bytes": 7843
+      },
+      {
+        "relative_path": "scripts/udlm/launch_train_pilot.py",
+        "root": "repository",
+        "sha256": "8bcffd02becaec556cf7c8e6bba020b448d8b83f889bc70241b1fc376389d325",
+        "size_bytes": 188991
+      },
+      {
+        "relative_path": "scripts/udlm/materialize_validation_panel.py",
+        "root": "repository",
+        "sha256": "7e208e310daa282cedb2b55881481569fbac31270bbd0f397d26946c4473f544",
+        "size_bytes": 6982
+      },
+      {
+        "relative_path": "scripts/udlm/prepare_optimization_screen_registry.py",
+        "root": "repository",
+        "sha256": "66640116f7fd3f443982f5692f4ebf80e4995a969cf8e40c7e5682cf525a1268",
+        "size_bytes": 44987
+      },
+      {
+        "relative_path": "scripts/udlm/token_frequency_audit.py",
+        "root": "repository",
+        "sha256": "213573040e6e2634b5350a05f9916ec914576a1bfc8498c737443d2299ec131a",
+        "size_bytes": 9988
+      },
+      {
+        "relative_path": "scripts/udlm/validate_health_panel.py",
+        "root": "repository",
+        "sha256": "8df5857e18ec316be0f522e7d74a80eb3c0773e2046cf90eba4ffad1f4686c6b",
+        "size_bytes": 40810
+      },
+      {
+        "relative_path": "scripts/udlm/verify_optimization_screen.py",
+        "root": "repository",
+        "sha256": "d6be24a6de229cbfd38204c044abce669955922b31feae1fdbdca6d8356942de",
+        "size_bytes": 236451
+      },
+      {
+        "relative_path": "scripts/udlm/write_pilot_evidence.py",
+        "root": "repository",
+        "sha256": "6a9df17e116158fed35c236bf67614e97ccc8bd9d6b4e8ff2e3b0cb32ee942de",
+        "size_bytes": 69216
+      },
+      {
+        "relative_path": "scripts/udlm/write_pilot_exit_status.py",
+        "root": "repository",
+        "sha256": "7f5428c6fc750283cf9cdb1cd04d23e49b37664f2b1e9ea60275349388b1417e",
+        "size_bytes": 159678
+      },
+      {
+        "relative_path": "src/genmol/backbone.py",
+        "root": "repository",
+        "sha256": "0961363a10717b8d4aa82bdb1ff150853f00fb34087d11f8fff7af6bd209b618",
+        "size_bytes": 18764
+      },
+      {
+        "relative_path": "src/genmol/diffusion.py",
+        "root": "repository",
+        "sha256": "cad5e2093ebe62754def96f8652892ce16cb5e82ad5f2f0f9ddc2deaafa92d84",
+        "size_bytes": 39479
+      },
+      {
+        "relative_path": "src/genmol/model.py",
+        "root": "repository",
+        "sha256": "d7568329d2df58d8ee3e3f1533b95c8c3c027ef8161f8a4f4cf872d149518961",
+        "size_bytes": 60804
+      },
+      {
+        "relative_path": "src/genmol/utils/ema.py",
+        "root": "repository",
+        "sha256": "9b3fda01fe5f68d8e265a33423341d6bef460c480316ca8ee459151958efed49",
+        "size_bytes": 4213
+      },
+      {
+        "relative_path": "src/genmol/utils/utils_data.py",
+        "root": "repository",
+        "sha256": "981bdc9c3b10b80ab113bcba0bc6709febcb2b9f3d4447a5c5291d6f9daaaee7",
+        "size_bytes": 6613
+      }
+    ],
+    "clean": true,
+    "pushed": true,
+    "revision": "95bb3971354b4712135a30e6e58326a954917e1f"
+  },
+  "stages": [
+    {
+      "arm_order": [
+        "E-L0",
+        "E-L1"
+      ],
+      "arms": [
+        {
+          "arm_id": "E-L0",
+          "attempt_id": "scheduler-e-l0-g1",
+          "conditioner": {
+            "kind": "additive",
+            "post_timestep_mlp_silu": false,
+            "zero_initialized_per_layer_film": false
+          },
+          "resolved_configs": [
+            {
+              "config": {
+                "canonical_sha256": "3287914acfb052e08e5ad48b4566a0fce9c231dd5d199beb1c73f68d85e08b8c",
+                "relative_path": "experiments/udlm/protocols/optimization_screen_configs_gpu1/scheduler_e_l0.json",
+                "root": "repository",
+                "sha256": "644cca636219011c9567236daf966340fb9231238ec87a223320f79a3a362ef1",
+                "size_bytes": 2638
+              },
+              "output_directory": "output/udlm/screens/gpu1_scheduler_e_l0",
+              "scheduler_arm_id": null
+            }
+          ],
+          "role": "control",
+          "scheduler": {
+            "horizon_updates": null,
+            "kind": "constant_with_warmup",
+            "minimum_learning_rate": null,
+            "peak_learning_rate": 0.0003,
+            "warmup_updates": 2500
+          }
+        },
+        {
+          "arm_id": "E-L1",
+          "attempt_id": "scheduler-e-l1-g1",
+          "conditioner": {
+            "kind": "additive",
+            "post_timestep_mlp_silu": false,
+            "zero_initialized_per_layer_film": false
+          },
+          "resolved_configs": [
+            {
+              "config": {
+                "canonical_sha256": "0307c2e32f83e6d6b623e6496e472392e558900c4f1a2697293fa3835916f1f4",
+                "relative_path": "experiments/udlm/protocols/optimization_screen_configs_gpu1/scheduler_e_l1.json",
+                "root": "repository",
+                "sha256": "c8390799cd3198f61b67de39bdecd5a08f505fac4ec95437c26a483dde78731f",
+                "size_bytes": 2650
+              },
+              "output_directory": "output/udlm/screens/gpu1_scheduler_e_l1",
+              "scheduler_arm_id": null
+            }
+          ],
+          "role": "candidate",
+          "scheduler": {
+            "horizon_updates": 1000,
+            "kind": "cosine_with_minimum",
+            "minimum_learning_rate": 3e-06,
+            "peak_learning_rate": 0.0003,
+            "warmup_updates": 50
+          }
+        }
+      ],
+      "gradient_contract": null,
+      "initialization_fixture": null,
+      "optimizer_updates": 100,
+      "order_index": 0,
+      "selection_rule": {
+        "complete_failure_fallback_arm": "E-L0",
+        "incomplete_evidence_winner": null,
+        "minimum_strictly_better_bins": 2,
+        "per_bin_candidate_max_percent_of_control": 102,
+        "pooled_candidate_max_percent_of_control": 98,
+        "rule_id": "l1_if_pooled_loss_le_98pct_l0_and_two_bins_strictly_better_and_each_bin_le_102pct"
+      },
+      "stage_id": "scheduler",
+      "training_seed": 17
+    },
+    {
+      "arm_order": [
+        "E-A0",
+        "E-A1"
+      ],
+      "arms": [
+        {
+          "arm_id": "E-A0",
+          "attempt_id": "conditioning-e-a0-g1",
+          "conditioner": {
+            "kind": "additive",
+            "post_timestep_mlp_silu": false,
+            "zero_initialized_per_layer_film": false
+          },
+          "resolved_configs": [
+            {
+              "config": {
+                "canonical_sha256": "a4540db544de16ba1596d85d3d8fcc53b251679e66a43a56ae3c336ea52b5970",
+                "relative_path": "experiments/udlm/protocols/optimization_screen_configs_gpu1/conditioning_e_a0__e_l0.json",
+                "root": "repository",
+                "sha256": "551b4ee0d8c61a64abb6d39ba7c15dc5c1628286ebff48135458f41e1ecff108",
+                "size_bytes": 2646
+              },
+              "output_directory": "output/udlm/screens/gpu1_conditioning_e_a0__e_l0",
+              "scheduler_arm_id": "E-L0"
+            },
+            {
+              "config": {
+                "canonical_sha256": "15cded3e63be5c665e100bd4785f8c34fb6d55832d97682ee2330242aafffc4e",
+                "relative_path": "experiments/udlm/protocols/optimization_screen_configs_gpu1/conditioning_e_a0__e_l1.json",
+                "root": "repository",
+                "sha256": "9c4a6a186c1688be4d4bbf5604f80d4043de1e83a0859cd7a1204fba4f5bc872",
+                "size_bytes": 2658
+              },
+              "output_directory": "output/udlm/screens/gpu1_conditioning_e_a0__e_l1",
+              "scheduler_arm_id": "E-L1"
+            }
+          ],
+          "role": "control",
+          "scheduler": "selected_scheduler_arm"
+        },
+        {
+          "arm_id": "E-A1",
+          "attempt_id": "conditioning-e-a1-g1",
+          "conditioner": {
+            "kind": "film_adaln",
+            "post_timestep_mlp_silu": true,
+            "zero_initialized_per_layer_film": true
+          },
+          "resolved_configs": [
+            {
+              "config": {
+                "canonical_sha256": "d077df6d55fdcde7a6b0fdae2fb67b9d5775189fe527db3be9b3b103d170ecbe",
+                "relative_path": "experiments/udlm/protocols/optimization_screen_configs_gpu1/conditioning_e_a1__e_l0.json",
+                "root": "repository",
+                "sha256": "67ca19c69cc5ca4e1ce745f0c712da6afaf783e5c43738b845e8805d460ebafc",
+                "size_bytes": 2649
+              },
+              "output_directory": "output/udlm/screens/gpu1_conditioning_e_a1__e_l0",
+              "scheduler_arm_id": "E-L0"
+            },
+            {
+              "config": {
+                "canonical_sha256": "7640a05fd01e2e1fa5b133f1d38086fabf9f1a406065ab65cee8ed32e4d407e2",
+                "relative_path": "experiments/udlm/protocols/optimization_screen_configs_gpu1/conditioning_e_a1__e_l1.json",
+                "root": "repository",
+                "sha256": "bea7bbc65a68f9e6ef65677c042df63bee2236a7b6f4c9ba6b5063d1f420b53a",
+                "size_bytes": 2661
+              },
+              "output_directory": "output/udlm/screens/gpu1_conditioning_e_a1__e_l1",
+              "scheduler_arm_id": "E-L1"
+            }
+          ],
+          "role": "candidate",
+          "scheduler": "selected_scheduler_arm"
+        }
+      ],
+      "gradient_contract": {
+        "canonical_sha256": "ff45961276df75f445221fd1aa4629262d21fdb852bd9b226ad56fe2559315d5",
+        "relative_path": "experiments/udlm/protocols/film_gradient_contract_v1.json",
+        "root": "repository",
+        "schema_version": 1,
+        "sha256": "b2a666a23351eb0882a179f7ae5d09fafd2188fee924313cdf60ee94888e7ac5",
+        "size_bytes": 3841
+      },
+      "initialization_fixture": {
+        "canonical_sha256": "96ed170d2e3db2c68101dd07d603ff44db7f77a95c3b9578d6c378d1e1f85d1b",
+        "relative_path": "experiments/udlm/protocols/conditioning_init_fixture_v1.json",
+        "root": "repository",
+        "schema_version": 1,
+        "sha256": "a7069082bd9a5a7d76d7d52b324345f4a46ba2dea386b87411b1fcb8112cc989",
+        "size_bytes": 643
+      },
+      "optimizer_updates": 500,
+      "order_index": 1,
+      "selection_rule": {
+        "complete_failure_fallback_arm": "E-A0",
+        "exact_initialization_equality_required": true,
+        "gradient_contract_sha256": "ff45961276df75f445221fd1aa4629262d21fdb852bd9b226ad56fe2559315d5",
+        "incomplete_evidence_winner": null,
+        "per_bin_candidate_max_percent_of_control": 102,
+        "pooled_candidate_max_percent_of_control": 98,
+        "pooled_clean_token_accuracy_nondecreasing": true,
+        "rule_id": "a1_if_exact_init_and_pooled_loss_le_98pct_a0_and_each_bin_le_102pct_and_pooled_accuracy_nondecreasing_and_registered_gradients_pass"
+      },
+      "stage_id": "conditioning",
+      "training_seed": 17
+    }
+  ],
+  "status": "frozen_before_any_screen_training"
+}
