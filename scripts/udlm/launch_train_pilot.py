@@ -16,9 +16,11 @@ import io
 import json
 import os
 import re
+import secrets
 import shlex
 import stat
 import subprocess
+import tempfile
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,8 +31,11 @@ PROJECT_ROOT = REPOSITORY_ROOT.parents[1]
 RUN_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}\Z")
 MAX_SAFE_UTILIZATION_PERCENT = 10
 MIN_SAFE_FREE_MEMORY_MIB = 30_000
-TRAINING_SUMMARY_SCHEMA_VERSION = 2
-PILOT_EXIT_STATUS_SCHEMA_VERSION = 2
+TRAINING_SUMMARY_SCHEMA_VERSION = 3
+PILOT_EXIT_STATUS_SCHEMA_VERSION = 3
+LAUNCH_MANIFEST_SCHEMA_VERSION = 1
+MATCHED_PANEL_SCHEMA_VERSION = 1
+TRAINING_JOB_LOCK_SCHEMA_VERSION = 1
 TRAINING_VARIANTS = {
     "udlm": {
         "config_name": "udlm",
@@ -51,6 +56,7 @@ TRAINING_VARIANTS = {
         "fixed_overrides": (),
     },
 }
+MATCHED_PANEL_VARIANT_ORDER = tuple(TRAINING_VARIANTS)
 PILOT_ENVIRONMENT_PREFIX = "GENMOL_TRAIN_"
 CONTROLLED_PYTHON_ENVIRONMENT = {
     "PYTHONNOUSERSITE": "1",
@@ -505,15 +511,7 @@ def sha256_file(path: Path) -> str:
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode):
             raise RuntimeError(f"checkpoint is not a regular file: {resolved}")
-        state = (
-            before.st_dev,
-            before.st_ino,
-            before.st_mode,
-            before.st_nlink,
-            before.st_size,
-            before.st_mtime_ns,
-            before.st_ctime_ns,
-        )
+        state = _stable_stat_identity(before)
         digest = hashlib.sha256()
         offset = 0
         while True:
@@ -524,23 +522,26 @@ def sha256_file(path: Path) -> str:
             offset += len(chunk)
         after = os.fstat(descriptor)
         path_state = os.stat(resolved, follow_symlinks=False)
-        observed_states = [
-            (
-                observed.st_dev,
-                observed.st_ino,
-                observed.st_mode,
-                observed.st_nlink,
-                observed.st_size,
-                observed.st_mtime_ns,
-                observed.st_ctime_ns,
-            )
-            for observed in (after, path_state)
-        ]
+        observed_states = [_stable_stat_identity(observed) for observed in (after, path_state)]
         if any(observed != state for observed in observed_states):
             raise RuntimeError(f"checkpoint changed while it was hashed: {resolved}")
         return digest.hexdigest()
     finally:
         os.close(descriptor)
+
+
+def _stable_stat_identity(value: os.stat_result) -> tuple[int, ...]:
+    """Return mutation-sensitive identity fields while deliberately ignoring atime."""
+
+    return (
+        int(value.st_dev),
+        int(value.st_ino),
+        int(value.st_mode),
+        int(value.st_nlink),
+        int(value.st_size),
+        int(value.st_mtime_ns),
+        int(value.st_ctime_ns),
+    )
 
 
 def canonical_json_sha256(value: object) -> str:
@@ -552,6 +553,293 @@ def canonical_json_sha256(value: object) -> str:
         allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def matched_panel_config_sha256(resolved_config: dict[str, object]) -> str:
+    """Hash the resolved config after masking only the registered treatment.
+
+    Output-directory differences are also masked because each variant must write
+    to its own run directory. Any other resolved-config difference changes the
+    digest and therefore prevents the runs from claiming one matched panel.
+    """
+
+    try:
+        normalized = json.loads(
+            json.dumps(resolved_config, allow_nan=False, ensure_ascii=False)
+        )
+        prior_variant = normalized["training"]["udlm"]["prior_variant"]
+        callback_dirpath = normalized["callback"]["dirpath"]
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("resolved config lacks the matched-panel fields") from error
+    registered_priors = {
+        variant["prior_variant"] for variant in TRAINING_VARIANTS.values()
+    }
+    if prior_variant not in registered_priors:
+        raise ValueError("resolved config has an unregistered UDLM treatment")
+    if not isinstance(callback_dirpath, str) or not callback_dirpath:
+        raise ValueError("resolved config callback.dirpath must be a nonempty string")
+    normalized["training"]["udlm"]["prior_variant"] = "<REGISTERED_TREATMENT>"
+    normalized["callback"]["dirpath"] = "<VARIANT_RUN_DIR>/checkpoints"
+    return canonical_json_sha256(normalized)
+
+
+def build_matched_panel_spec(
+    *,
+    source_revision: str,
+    checkpoint: Path | None,
+    checkpoint_sha256: str | None,
+    gpu_count: int,
+    max_steps: int,
+    global_batch_size: int,
+    micro_batch_size: int,
+    num_workers: int,
+    seed: int,
+    exclude_special_tokens: bool,
+    max_utilization_percent: int,
+    min_free_memory_mib: int,
+    common_resolved_config_sha256: str,
+) -> tuple[dict[str, object], str]:
+    """Return the canonical common contract for the sequential R/S/E pilot.
+
+    The three variants must be launched one at a time, in the registered order,
+    and the next variant may start only after the prior run has a validated,
+    successful exit receipt. The digest intentionally excludes run names,
+    timestamps, and physical GPU identities, which are per-run provenance.
+    """
+
+    gpu_count = validate_gpu_count(gpu_count)
+    validate_safety_thresholds(max_utilization_percent, min_free_memory_mib)
+    if not re.fullmatch(r"[0-9a-f]{40}", source_revision):
+        raise ValueError("source_revision must be 40 lowercase hexadecimal digits")
+    if not re.fullmatch(r"[0-9a-f]{64}", common_resolved_config_sha256):
+        raise ValueError("common resolved-config digest must be SHA-256")
+    if checkpoint is None:
+        if checkpoint_sha256 is not None:
+            raise ValueError("checkpoint digest requires a checkpoint")
+        checkpoint_path = None
+        initialization_mode = "scratch"
+    else:
+        if not re.fullmatch(r"[0-9a-f]{64}", checkpoint_sha256 or ""):
+            raise ValueError("matched warm start requires a checkpoint SHA-256")
+        checkpoint_path = str(checkpoint)
+        initialization_mode = "verified_mdlm_ema_warm_start"
+    if (
+        type(max_steps) is not int
+        or not 1 <= max_steps <= 1_000
+        or type(global_batch_size) is not int
+        or type(micro_batch_size) is not int
+        or type(num_workers) is not int
+        or num_workers < 0
+        or type(seed) is not int
+        or type(exclude_special_tokens) is not bool
+    ):
+        raise ValueError("matched-panel training controls are invalid")
+    accumulation_steps = exact_accumulation_steps(
+        global_batch_size, micro_batch_size, gpu_count
+    )
+    spec = {
+        "schema_version": MATCHED_PANEL_SCHEMA_VERSION,
+        "purpose": "matched_R_S_E_UDLM_training_pilot",
+        "execution": {
+            "mode": "single_job_lease_with_registered_order_policy",
+            "maximum_concurrent_training_jobs": 1,
+            "concurrency_enforcement": "atomic_global_worktree_training_job_lock",
+            "registered_variant_order": list(MATCHED_PANEL_VARIANT_ORDER),
+            "advance_policy": "operator_validates_successful_predecessor_receipt",
+            "predecessor_receipt_bound_in_each_manifest": False,
+        },
+        "registered_treatments": [
+            {
+                "training_variant": name,
+                "hydra_config_name": definition["config_name"],
+                "udlm_prior_variant": definition["prior_variant"],
+                "comparison_role": definition["comparison_role"],
+            }
+            for name, definition in TRAINING_VARIANTS.items()
+        ],
+        "common_training_contract": {
+            "source_revision": source_revision,
+            "initialization_mode": initialization_mode,
+            "initialization_checkpoint_path": checkpoint_path,
+            "initialization_checkpoint_sha256": checkpoint_sha256,
+            "requested_gpu_count": gpu_count,
+            "max_steps": max_steps,
+            "global_batch_size": global_batch_size,
+            "micro_batch_size_per_process": micro_batch_size,
+            "accumulate_grad_batches": accumulation_steps,
+            "effective_global_batch_size": (
+                micro_batch_size * gpu_count * accumulation_steps
+            ),
+            "num_workers": num_workers,
+            "seed": seed,
+            "exclude_special_tokens": exclude_special_tokens,
+            "common_resolved_config_sha256": common_resolved_config_sha256,
+        },
+        "common_gpu_safety_policy": {
+            "max_utilization_percent": max_utilization_percent,
+            "utilization_comparison": "strictly_less_than",
+            "min_free_memory_mib": min_free_memory_mib,
+            "active_compute_processes_allowed": False,
+            "compute_mode_prohibited_allowed": False,
+            "physical_gpu_identity_is_per_run_provenance": True,
+        },
+    }
+    return spec, canonical_json_sha256(spec)
+
+
+def _atomic_publish_bytes_exclusive(path: Path, payload: bytes, *, label: str) -> str:
+    """Publish complete bytes once using a same-directory hard-link commit."""
+
+    if not isinstance(payload, bytes) or not payload:
+        raise ValueError(f"{label} payload must be nonempty bytes")
+    path = Path(os.path.abspath(os.fspath(path)))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if os.path.lexists(path):
+        raise FileExistsError(f"refusing to replace {label}: {path}")
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            os.fchmod(handle.fileno(), 0o644)
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temporary, path)
+        except FileExistsError as error:
+            raise FileExistsError(f"refusing to replace {label}: {path}") from error
+        temporary.unlink()
+        directory_descriptor = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def training_job_lock_path() -> Path:
+    """Return the one host-worktree lock shared by all reviewed pilot variants."""
+
+    return REPOSITORY_ROOT / "output" / "udlm" / ".single_training_job.lock"
+
+
+def acquire_training_job_lock(
+    *, source_revision: str, run_name: str, training_variant: str
+) -> tuple[Path, dict[str, object], str]:
+    """Atomically claim the sole pilot training slot; never recover stale locks."""
+
+    if not re.fullmatch(r"[0-9a-f]{40}", source_revision):
+        raise ValueError("source_revision must be 40 lowercase hexadecimal digits")
+    if not RUN_NAME_PATTERN.fullmatch(run_name):
+        raise ValueError("run_name is invalid")
+    validate_training_variant(training_variant)
+    lock_path = training_job_lock_path()
+    lock_record = {
+        "schema_version": TRAINING_JOB_LOCK_SCHEMA_VERSION,
+        "status": "held",
+        "purpose": "enforce_one_R_S_E_pilot_training_job_at_a_time",
+        "source_revision": source_revision,
+        "run_name": run_name,
+        "training_variant": training_variant,
+        "owner_token": secrets.token_hex(32),
+        "launcher_pid_at_acquisition": os.getpid(),
+        "acquired_at_utc": datetime.now(timezone.utc).isoformat(),
+        "owner_process_exit_does_not_make_lock_stale": True,
+        "stale_lock_policy": "fail_closed_and_require_manual_review",
+        "release_policy": (
+            "exact_owner_lock_only_after_receipt_or_before_tmux_handoff_failure"
+        ),
+    }
+    payload = (
+        json.dumps(lock_record, indent=2, sort_keys=True, allow_nan=False) + "\n"
+    ).encode("utf-8")
+    try:
+        digest = _atomic_publish_bytes_exclusive(
+            lock_path,
+            payload,
+            label="single pilot training-job lock",
+        )
+    except FileExistsError as error:
+        raise RuntimeError(
+            "another or stale pilot training-job lock exists; fail closed and "
+            f"review it manually before any launch: {lock_path}"
+        ) from error
+    return lock_path, lock_record, digest
+
+
+def release_exact_training_job_lock(path: Path, *, expected_sha256: str) -> None:
+    """Remove only the unchanged regular lock owned by this launch attempt."""
+
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+        raise ValueError("expected lock digest must be 64 lowercase hexadecimal digits")
+    path = Path(os.path.abspath(os.fspath(path)))
+    before_path = path.stat(follow_symlinks=False)
+    if not stat.S_ISREG(before_path.st_mode):
+        raise RuntimeError("training-job lock is not a regular file")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    digest = hashlib.sha256()
+    try:
+        before_descriptor = os.fstat(descriptor)
+        if _stable_stat_identity(before_descriptor) != _stable_stat_identity(
+            before_path
+        ):
+            raise RuntimeError("training-job lock changed before exact release")
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+        after_descriptor = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    after_path = path.stat(follow_symlinks=False)
+    stable_identity = _stable_stat_identity(before_path)
+    if (
+        _stable_stat_identity(after_descriptor) != stable_identity
+        or _stable_stat_identity(after_path) != stable_identity
+    ):
+        raise RuntimeError("training-job lock changed during exact release")
+    if digest.hexdigest() != expected_sha256:
+        raise RuntimeError("refusing to release a training-job lock owned by another run")
+    os.unlink(path)
+    directory_descriptor = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_descriptor)
+    finally:
+        os.close(directory_descriptor)
+
+
+def reserve_log_path(path: Path) -> None:
+    """Reserve a new regular log file without following or replacing a path."""
+
+    path = Path(os.path.abspath(os.fspath(path)))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o644)
+    except FileExistsError as error:
+        raise FileExistsError(f"refusing to replace pilot log: {path}") from error
+    try:
+        state = os.fstat(descriptor)
+        if not stat.S_ISREG(state.st_mode) or state.st_nlink != 1:
+            raise RuntimeError("reserved pilot log is not a single-link regular file")
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    directory_descriptor = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_descriptor)
+    finally:
+        os.close(directory_descriptor)
 
 
 def validate_pilot_exit_receipt_path(path: Path) -> Path:
@@ -629,6 +917,8 @@ def build_child_environment_command(
     runtime_config_path: Path,
     training_summary_path: Path,
     final_checkpoint_path: Path,
+    launch_manifest_path: Path,
+    launch_manifest_sha256: str,
     expected_max_steps: int,
     expected_world_size: int,
     visible_uuids: str,
@@ -642,6 +932,8 @@ def build_child_environment_command(
         raise ValueError(
             "resolved_config_sha256 must be 64 lowercase hexadecimal digits"
         )
+    if not re.fullmatch(r"[0-9a-f]{64}", launch_manifest_sha256):
+        raise ValueError("launch_manifest_sha256 must be 64 lowercase hexadecimal digits")
     if not visible_uuids or any(
         not value.startswith("GPU-") for value in visible_uuids.split(",")
     ):
@@ -650,6 +942,7 @@ def build_child_environment_command(
         "runtime config record": (runtime_config_path.resolve(), ".json"),
         "training summary": (training_summary_path.resolve(), ".json"),
         "final checkpoint": (final_checkpoint_path.resolve(), ".ckpt"),
+        "launch manifest": (launch_manifest_path.resolve(), ".json"),
     }
     for label, (path, suffix) in artifact_paths.items():
         if (
@@ -661,7 +954,15 @@ def build_child_environment_command(
     runtime_config_path = artifact_paths["runtime config record"][0]
     training_summary_path = artifact_paths["training summary"][0]
     final_checkpoint_path = artifact_paths["final checkpoint"][0]
-    if len({runtime_config_path, training_summary_path, final_checkpoint_path}) != 3:
+    launch_manifest_path = artifact_paths["launch manifest"][0]
+    if len(
+        {
+            runtime_config_path,
+            training_summary_path,
+            final_checkpoint_path,
+            launch_manifest_path,
+        }
+    ) != 4:
         raise ValueError("pilot completion artifact paths must be distinct")
     if (
         type(expected_max_steps) is not int
@@ -687,6 +988,11 @@ def build_child_environment_command(
             TRAINING_SUMMARY_SCHEMA_VERSION
         ),
         "GENMOL_TRAIN_EXPECTED_FINAL_CHECKPOINT_PATH": str(final_checkpoint_path),
+        "GENMOL_TRAIN_LAUNCH_MANIFEST_PATH": str(launch_manifest_path),
+        "GENMOL_TRAIN_EXPECTED_LAUNCH_MANIFEST_SHA256": launch_manifest_sha256,
+        "GENMOL_TRAIN_SELECTED_GPU_UUIDS_JSON": json.dumps(
+            visible_uuids.split(","), separators=(",", ":")
+        ),
         "GENMOL_TRAIN_EXPECTED_MAX_STEPS": str(expected_max_steps),
         "GENMOL_TRAIN_EXPECTED_WORLD_SIZE": str(expected_world_size),
     }
@@ -697,14 +1003,18 @@ def build_child_environment_command(
         **pilot_environment,
     }
     inherited_python_keys = {key for key in os.environ if key.startswith("PYTHON")}
-    unset_python_keys = sorted(
+    inherited_pilot_keys = {
+        key for key in os.environ if key.startswith(PILOT_ENVIRONMENT_PREFIX)
+    }
+    unset_environment_keys = sorted(
         KNOWN_PYTHON_ENVIRONMENT_KEYS
         | inherited_python_keys
+        | inherited_pilot_keys
         | set(controlled_python)
         | DISTRIBUTED_ENVIRONMENT_KEYS
     )
     environment_command = ["env"]
-    for key in unset_python_keys:
+    for key in unset_environment_keys:
         environment_command.extend(["-u", key])
     environment_command.extend(
         f"{key}={value}" for key, value in assigned_environment.items()
@@ -781,6 +1091,11 @@ def build_tmux_shell_command(
     expected_max_steps: int,
     expected_world_size: int,
     expected_final_checkpoint_path: Path,
+    expected_launch_manifest_path: Path,
+    expected_launch_manifest_sha256: str,
+    expected_selected_gpu_uuids_json: str,
+    expected_training_job_lock_path: Path,
+    expected_training_job_lock_sha256: str,
     expected_initialization_checkpoint_sha256: str | None = None,
 ) -> str:
     """Capture both pipeline statuses and publish the detached-run exit receipt."""
@@ -791,6 +1106,8 @@ def build_tmux_shell_command(
     for label, digest in (
         ("expected config digest", expected_config_sha256),
         ("expected argv digest", expected_argv_sha256),
+        ("expected launch-manifest digest", expected_launch_manifest_sha256),
+        ("expected training-job lock digest", expected_training_job_lock_sha256),
     ):
         if not re.fullmatch(r"[0-9a-f]{64}", digest):
             raise ValueError(f"{label} must be 64 lowercase hexadecimal digits")
@@ -810,6 +1127,22 @@ def build_tmux_shell_command(
         or expected_world_size not in (1, 2)
     ):
         raise ValueError("pilot expected steps/world size are invalid")
+    try:
+        selected_gpu_uuids = json.loads(expected_selected_gpu_uuids_json)
+    except json.JSONDecodeError as error:
+        raise ValueError("selected GPU UUIDs must be canonical JSON") from error
+    if (
+        not isinstance(selected_gpu_uuids, list)
+        or len(selected_gpu_uuids) != expected_world_size
+        or len(set(selected_gpu_uuids)) != len(selected_gpu_uuids)
+        or any(
+            not isinstance(value, str) or not value.startswith("GPU-")
+            for value in selected_gpu_uuids
+        )
+        or json.dumps(selected_gpu_uuids, separators=(",", ":"))
+        != expected_selected_gpu_uuids_json
+    ):
+        raise ValueError("selected GPU UUIDs must be a unique canonical JSON list")
 
     receipt_python_environment = {
         **CONTROLLED_PYTHON_ENVIRONMENT,
@@ -856,6 +1189,16 @@ def build_tmux_shell_command(
             str(expected_world_size),
             "--expected-final-checkpoint-path",
             str(expected_final_checkpoint_path),
+            "--expected-launch-manifest-path",
+            str(expected_launch_manifest_path),
+            "--expected-launch-manifest-sha256",
+            expected_launch_manifest_sha256,
+            "--expected-selected-gpu-uuids-json",
+            expected_selected_gpu_uuids_json,
+            "--training-job-lock-path",
+            str(expected_training_job_lock_path),
+            "--expected-training-job-lock-sha256",
+            expected_training_job_lock_sha256,
         ]
     )
     if expected_initialization_checkpoint_sha256 is not None:
@@ -884,6 +1227,221 @@ def build_tmux_shell_command(
         + receipt_command
         + '; receipt_writer_status=$?; exit "$receipt_writer_status"'
     )
+
+
+def _launch_locked_pilot(
+    *,
+    args: argparse.Namespace,
+    git_sha: str,
+    checkpoint: Path | None,
+    checkpoint_sha256: str | None,
+    command: list[str],
+    resolved_config: dict[str, object],
+    resolved_config_sha256: str,
+    argv_sha256: str,
+    matched_panel_spec: dict[str, object],
+    matched_panel_spec_sha256: str,
+    accumulation_steps: int,
+    session_name: str,
+    lock_path: Path,
+    lock_record: dict[str, object],
+    lock_sha256: str,
+) -> tuple[bytes, str, Path]:
+    """Probe, publish, and hand one lock-owning pilot to detached tmux."""
+
+    gpu_count = validate_gpu_count(args.gpu_count)
+    training_variant = validate_training_variant(args.training_variant)
+    variant = TRAINING_VARIANTS[training_variant]
+    run_dir = REPOSITORY_ROOT / "output" / "udlm" / args.run_name
+    log_path = REPOSITORY_ROOT / "output" / "logs" / f"{args.run_name}.log"
+    manifest_path = run_dir / "launch_manifest.json"
+
+    # This phase begins only after the global training-job lock is held, so an
+    # overlapping or stale owner fails before either invocation can probe GPUs.
+    gpu_inventory = probe_all_gpus()
+    inventory_snapshot_completed_at_utc = datetime.now(timezone.utc).isoformat()
+    initially_selected = select_idle_gpus(
+        gpu_inventory,
+        gpu_count=gpu_count,
+        max_utilization_percent=args.max_utilization_percent,
+        min_free_memory_mib=args.min_free_memory_mib,
+    )
+    runtime_config_path = run_dir / "runtime_config.json"
+    training_summary_path = run_dir / "training_summary.json"
+    exit_receipt_path = validate_pilot_exit_receipt_path(
+        run_dir / "pilot_exit_status.json"
+    )
+    final_checkpoint_path = run_dir / "checkpoints" / f"{args.max_steps}.ckpt"
+    source_revision_before_final_gpu_probe = require_pushed_commit()
+    if source_revision_before_final_gpu_probe != git_sha:
+        raise RuntimeError("source revision changed before the pilot's final GPU probe")
+    gpu_states = reprobe_selected_gpus(
+        initially_selected,
+        max_utilization_percent=args.max_utilization_percent,
+        min_free_memory_mib=args.min_free_memory_mib,
+    )
+    final_uuid_probes_completed_at_utc = datetime.now(timezone.utc).isoformat()
+    selected_gpu_uuids = [state.uuid for state in gpu_states]
+    selected_gpu_uuids_json = json.dumps(selected_gpu_uuids, separators=(",", ":"))
+    visible_uuids = ",".join(selected_gpu_uuids)
+
+    # Reserve every externally visible destination before publishing the
+    # immutable launch certificate. Retained partial reservations make a failed
+    # launch non-reusable rather than silently overwritable.
+    run_dir.mkdir(parents=True)
+    reserve_log_path(log_path)
+    manifest = {
+        "launch_manifest_schema_version": LAUNCH_MANIFEST_SCHEMA_VERSION,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "purpose": "bounded UDLM training pilot",
+        "gpu_selection_schema_version": 2,
+        "git_sha": git_sha,
+        "source_revision_before_final_gpu_probe": (
+            source_revision_before_final_gpu_probe
+        ),
+        "run_name": args.run_name,
+        "training_variant": training_variant,
+        "hydra_config_name": variant["config_name"],
+        "udlm_prior_variant": variant["prior_variant"],
+        "udlm_comparison_role": variant["comparison_role"],
+        "matched_panel_spec": matched_panel_spec,
+        "matched_panel_spec_sha256": matched_panel_spec_sha256,
+        "matched_panel_variant_position": MATCHED_PANEL_VARIANT_ORDER.index(
+            training_variant
+        ),
+        "single_training_job_lock": {
+            "path": str(lock_path),
+            "sha256": lock_sha256,
+            "record": lock_record,
+            "acquired_before_any_gpu_probe": True,
+            "stale_lock_policy": "fail_closed_and_require_manual_review",
+            "release_owner": "pilot_exit_receipt_writer_after_publication",
+        },
+        "tmux_session": session_name,
+        "user_requested_gpu_count": gpu_count,
+        "gpu_selection_method": "dynamic_idle_discovery",
+        "gpu_inventory_scope": "all_nvidia_gpus",
+        "inventory_snapshot_completed_at_utc": inventory_snapshot_completed_at_utc,
+        "gpu_inventory_at_selection": [asdict(state) for state in gpu_inventory],
+        "initially_selected_gpu_states": [
+            asdict(state) for state in initially_selected
+        ],
+        "logical_cuda_devices": list(range(gpu_count)),
+        "physical_gpu_indices": [state.physical_index for state in gpu_states],
+        "cuda_visible_device_uuids": selected_gpu_uuids,
+        "final_uuid_probes_completed_at_utc": final_uuid_probes_completed_at_utc,
+        "gpu_states_at_final_uuid_probe": [asdict(state) for state in gpu_states],
+        "gpu_safety_policy": {
+            "max_utilization_percent": args.max_utilization_percent,
+            "utilization_comparison": "strictly_less_than",
+            "min_free_memory_mib": args.min_free_memory_mib,
+            "active_compute_processes_allowed": False,
+            "compute_mode_prohibited_allowed": False,
+        },
+        "training_argv": command,
+        "training_argv_sha256": argv_sha256,
+        "resolved_training_config": resolved_config,
+        "resolved_training_config_sha256": resolved_config_sha256,
+        "runtime_config_path": str(runtime_config_path),
+        "training_summary_path": str(training_summary_path),
+        "training_summary_schema_version": TRAINING_SUMMARY_SCHEMA_VERSION,
+        "pilot_exit_status_path": str(exit_receipt_path),
+        "pilot_exit_status_schema_version": PILOT_EXIT_STATUS_SCHEMA_VERSION,
+        "expected_final_checkpoint_path": str(final_checkpoint_path),
+        "launch_manifest_path": str(manifest_path),
+        "launch_manifest_raw_sha256_transport": (
+            "passed_out_of_band_to_training_and_receipt_to_avoid_self_hash"
+        ),
+        "completion_contract": {
+            "status_at_launch": "pending",
+            "complete_only_if_valid_training_summary_exists": True,
+            "complete_only_if_successful_exit_receipt_exists": True,
+            "valid_training_summary_and_successful_exit_receipt_both_required": True,
+            "missing_summary_after_tmux_exit_means": "incomplete",
+            "absent_exit_receipt_means": "incomplete",
+            "successful_exit_receipt_requires": {
+                "training_exit_status": 0,
+                "tee_exit_status": 0,
+                "valid_launch_bound_training_summary": True,
+                "exact_launch_manifest_still_matches": True,
+                "clean_pushed_source_at_receipt": True,
+            },
+            "training_job_lock_release": (
+                "after_exit_receipt_publication_for_completed_or_failed_pipeline"
+            ),
+        },
+        "log_path": str(log_path),
+        "log_reserved_exclusively_before_manifest": True,
+        "checkpoint": None if checkpoint is None else str(checkpoint),
+        "checkpoint_sha256": checkpoint_sha256,
+        "seed": args.seed,
+        "max_steps": args.max_steps,
+        "global_batch_size": args.global_batch_size,
+        "micro_batch_size_per_process": args.micro_batch_size,
+        "accumulate_grad_batches": accumulation_steps,
+        "effective_global_batch_size": (
+            args.micro_batch_size * gpu_count * accumulation_steps
+        ),
+        "exclude_special_tokens": args.exclude_special_tokens,
+        "dry_run": False,
+    }
+    manifest_bytes = (
+        json.dumps(manifest, indent=2, sort_keys=True, allow_nan=False) + "\n"
+    ).encode("utf-8")
+    manifest_sha256 = _atomic_publish_bytes_exclusive(
+        manifest_path,
+        manifest_bytes,
+        label="pilot launch manifest",
+    )
+    environment_command, _child_environment = build_child_environment_command(
+        command=command,
+        source_revision=git_sha,
+        resolved_config_sha256=resolved_config_sha256,
+        runtime_config_path=runtime_config_path,
+        training_summary_path=training_summary_path,
+        final_checkpoint_path=final_checkpoint_path,
+        launch_manifest_path=manifest_path,
+        launch_manifest_sha256=manifest_sha256,
+        expected_max_steps=args.max_steps,
+        expected_world_size=gpu_count,
+        visible_uuids=visible_uuids,
+        seed=args.seed,
+    )
+    shell_command = build_tmux_shell_command(
+        environment_command,
+        log_path=log_path,
+        training_summary_path=training_summary_path,
+        exit_receipt_path=exit_receipt_path,
+        expected_source_revision=git_sha,
+        expected_config_sha256=resolved_config_sha256,
+        expected_argv_sha256=argv_sha256,
+        expected_summary_schema_version=TRAINING_SUMMARY_SCHEMA_VERSION,
+        expected_max_steps=args.max_steps,
+        expected_world_size=gpu_count,
+        expected_final_checkpoint_path=final_checkpoint_path,
+        expected_launch_manifest_path=manifest_path,
+        expected_launch_manifest_sha256=manifest_sha256,
+        expected_selected_gpu_uuids_json=selected_gpu_uuids_json,
+        expected_training_job_lock_path=lock_path,
+        expected_training_job_lock_sha256=lock_sha256,
+        expected_initialization_checkpoint_sha256=checkpoint_sha256,
+    )
+    subprocess.run(
+        [
+            "tmux",
+            "new-session",
+            "-d",
+            "-s",
+            session_name,
+            "-c",
+            str(REPOSITORY_ROOT),
+            "bash",
+            "-lc",
+            shell_command,
+        ],
+        check=True,
+    )
+    return manifest_bytes, manifest_sha256, log_path
 
 
 def _parse_args(argv: list[str] | None = None):
@@ -935,6 +1493,22 @@ def _parse_args(argv: list[str] | None = None):
     return parser.parse_args(argv)
 
 
+def tmux_session_exists(session_name: str) -> bool:
+    """Return exact tmux-session presence; reject an indeterminate query."""
+
+    result = subprocess.run(
+        ["tmux", "has-session", "-t", session_name],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if result.returncode not in (0, 1):
+        raise RuntimeError(
+            f"could not determine whether tmux session exists: {session_name}"
+        )
+    return result.returncode == 0
+
+
 def main():
     args = _parse_args()
     if not RUN_NAME_PATTERN.fullmatch(args.run_name):
@@ -967,7 +1541,7 @@ def main():
     run_dir = REPOSITORY_ROOT / "output" / "udlm" / args.run_name
     log_path = REPOSITORY_ROOT / "output" / "logs" / f"{args.run_name}.log"
     manifest_path = run_dir / "launch_manifest.json"
-    if run_dir.exists() or log_path.exists():
+    if os.path.lexists(run_dir) or os.path.lexists(log_path):
         raise FileExistsError(
             f"refusing to overwrite an existing pilot: {run_dir} or {log_path}"
         )
@@ -990,177 +1564,114 @@ def main():
         overrides=command[5:],
         gpu_count=gpu_count,
     )
+    try:
+        resolved_prior_variant = resolved_config["training"]["udlm"][
+            "prior_variant"
+        ]
+    except (KeyError, TypeError) as error:
+        raise RuntimeError("resolved training config lacks its UDLM treatment") from error
+    if resolved_prior_variant != variant["prior_variant"]:
+        raise RuntimeError(
+            "resolved UDLM treatment disagrees with the registered training variant"
+        )
     argv_sha256 = training_argv_sha256(command)
-
-    session_name = f"genmol_{training_variant}_{args.run_name}"
-    if (
-        subprocess.run(
-            ["tmux", "has-session", "-t", session_name],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        ).returncode
-        == 0
-    ):
-        raise RuntimeError(f"tmux session already exists: {session_name}")
-
-    # Inventory every NVIDIA GPU only after all potentially expensive source and
-    # checkpoint checks. Select from that point-in-time snapshot, then address
-    # each chosen GPU by UUID for the final pre-launch safety probe. A cooperative
-    # nvidia-smi check cannot provide an atomic lease, so any failed re-probe
-    # aborts instead of using or interrupting a newly occupied device.
-    gpu_inventory = probe_all_gpus()
-    inventory_snapshot_completed_at_utc = datetime.now(timezone.utc).isoformat()
-    initially_selected = select_idle_gpus(
-        gpu_inventory,
-        gpu_count=gpu_count,
-        max_utilization_percent=args.max_utilization_percent,
-        min_free_memory_mib=args.min_free_memory_mib,
-    )
-    visible_uuids = ",".join(state.uuid for state in initially_selected)
-    runtime_config_path = run_dir / "runtime_config.json"
-    training_summary_path = run_dir / "training_summary.json"
-    exit_receipt_path = validate_pilot_exit_receipt_path(
-        run_dir / "pilot_exit_status.json"
-    )
-    final_checkpoint_path = run_dir / "checkpoints" / f"{args.max_steps}.ckpt"
-    environment_command, child_environment = build_child_environment_command(
-        command=command,
+    common_resolved_config_sha256 = matched_panel_config_sha256(resolved_config)
+    matched_panel_spec, matched_panel_spec_sha256 = build_matched_panel_spec(
         source_revision=git_sha,
-        resolved_config_sha256=resolved_config_sha256,
-        runtime_config_path=runtime_config_path,
-        training_summary_path=training_summary_path,
-        final_checkpoint_path=final_checkpoint_path,
-        expected_max_steps=args.max_steps,
-        expected_world_size=gpu_count,
-        visible_uuids=visible_uuids,
+        checkpoint=checkpoint,
+        checkpoint_sha256=checkpoint_sha256,
+        gpu_count=gpu_count,
+        max_steps=args.max_steps,
+        global_batch_size=args.global_batch_size,
+        micro_batch_size=args.micro_batch_size,
+        num_workers=args.num_workers,
         seed=args.seed,
-    )
-    manifest = {
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "purpose": "bounded UDLM training pilot",
-        "gpu_selection_schema_version": 2,
-        "git_sha": git_sha,
-        "run_name": args.run_name,
-        "training_variant": training_variant,
-        "hydra_config_name": variant["config_name"],
-        "udlm_prior_variant": variant["prior_variant"],
-        "udlm_comparison_role": variant["comparison_role"],
-        "tmux_session": session_name,
-        "user_requested_gpu_count": gpu_count,
-        "gpu_selection_method": "dynamic_idle_discovery",
-        "gpu_inventory_scope": "all_nvidia_gpus",
-        "inventory_snapshot_completed_at_utc": inventory_snapshot_completed_at_utc,
-        "gpu_inventory_at_selection": [asdict(state) for state in gpu_inventory],
-        "initially_selected_gpu_states": [
-            asdict(state) for state in initially_selected
-        ],
-        "logical_cuda_devices": list(range(gpu_count)),
-        "gpu_safety_policy": {
-            "max_utilization_percent": args.max_utilization_percent,
-            "utilization_comparison": "strictly_less_than",
-            "min_free_memory_mib": args.min_free_memory_mib,
-            "active_compute_processes_allowed": False,
-            "compute_mode_prohibited_allowed": False,
-        },
-        "command": environment_command,
-        "training_argv_sha256": argv_sha256,
-        "resolved_training_config": resolved_config,
-        "resolved_training_config_sha256": resolved_config_sha256,
-        "runtime_config_path": str(runtime_config_path),
-        "training_summary_path": str(training_summary_path),
-        "training_summary_schema_version": TRAINING_SUMMARY_SCHEMA_VERSION,
-        "pilot_exit_status_path": str(exit_receipt_path),
-        "pilot_exit_status_schema_version": PILOT_EXIT_STATUS_SCHEMA_VERSION,
-        "expected_final_checkpoint_path": str(final_checkpoint_path),
-        "completion_contract": {
-            "status_at_launch": "pending",
-            "complete_only_if_valid_training_summary_exists": True,
-            "complete_only_if_successful_exit_receipt_exists": True,
-            "valid_training_summary_and_successful_exit_receipt_both_required": True,
-            "missing_summary_after_tmux_exit_means": "incomplete",
-            "absent_exit_receipt_means": "incomplete",
-            "successful_exit_receipt_requires": {
-                "training_exit_status": 0,
-                "tee_exit_status": 0,
-                "valid_launch_bound_training_summary": True,
-                "clean_pushed_source_at_receipt": True,
-            },
-        },
-        "child_environment": child_environment,
-        "log_path": str(log_path),
-        "checkpoint": None if checkpoint is None else str(checkpoint),
-        "checkpoint_sha256": checkpoint_sha256,
-        "seed": args.seed,
-        "max_steps": args.max_steps,
-        "global_batch_size": args.global_batch_size,
-        "micro_batch_size_per_process": args.micro_batch_size,
-        "accumulate_grad_batches": accumulation_steps,
-        "effective_global_batch_size": (
-            args.micro_batch_size * gpu_count * accumulation_steps
-        ),
-        "exclude_special_tokens": args.exclude_special_tokens,
-        "dry_run": args.dry_run,
-    }
-    source_revision_before_final_gpu_probe = require_pushed_commit()
-    if source_revision_before_final_gpu_probe != git_sha:
-        raise RuntimeError("source revision changed before the pilot's final GPU probe")
-    gpu_states = reprobe_selected_gpus(
-        initially_selected,
+        exclude_special_tokens=args.exclude_special_tokens,
         max_utilization_percent=args.max_utilization_percent,
         min_free_memory_mib=args.min_free_memory_mib,
+        common_resolved_config_sha256=common_resolved_config_sha256,
     )
-    final_uuid_probes_completed_at_utc = datetime.now(timezone.utc).isoformat()
-    manifest.update(
-        {
-            "source_revision_before_final_gpu_probe": (
-                source_revision_before_final_gpu_probe
-            ),
-            "physical_gpu_indices": [state.physical_index for state in gpu_states],
-            "cuda_visible_device_uuids": [state.uuid for state in gpu_states],
-            "final_uuid_probes_completed_at_utc": (final_uuid_probes_completed_at_utc),
-            "gpu_states_at_final_uuid_probe": [asdict(state) for state in gpu_states],
-        }
-    )
-    run_dir.mkdir(parents=True)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    manifest_json = json.dumps(manifest, indent=2, sort_keys=True)
-    manifest_path.write_text(manifest_json + "\n")
+
+    # A dry run is a CPU-only preview. In particular, it neither calls
+    # nvidia-smi nor creates/reserves any output, log, manifest, or tmux object.
     if args.dry_run:
-        print(manifest_json)
+        preview = {
+            "schema_version": 1,
+            "status": "dry_run_preflight_completed_no_launch",
+            "filesystem_mutation_performed": False,
+            "gpu_probe_performed": False,
+            "tmux_operation_performed": False,
+            "source_revision": git_sha,
+            "run_name": args.run_name,
+            "training_variant": training_variant,
+            "predicted_launch_manifest_path": str(manifest_path),
+            "predicted_log_path": str(log_path),
+            "training_argv": command,
+            "training_argv_sha256": argv_sha256,
+            "resolved_training_config": resolved_config,
+            "resolved_training_config_sha256": resolved_config_sha256,
+            "matched_panel_spec": matched_panel_spec,
+            "matched_panel_spec_sha256": matched_panel_spec_sha256,
+        }
+        print(json.dumps(preview, indent=2, sort_keys=True))
         return
 
-    shell_command = build_tmux_shell_command(
-        environment_command,
-        log_path=log_path,
-        training_summary_path=training_summary_path,
-        exit_receipt_path=exit_receipt_path,
-        expected_source_revision=git_sha,
-        expected_config_sha256=resolved_config_sha256,
-        expected_argv_sha256=argv_sha256,
-        expected_summary_schema_version=TRAINING_SUMMARY_SCHEMA_VERSION,
-        expected_max_steps=args.max_steps,
-        expected_world_size=gpu_count,
-        expected_final_checkpoint_path=final_checkpoint_path,
-        expected_initialization_checkpoint_sha256=checkpoint_sha256,
+    session_name = f"genmol_{training_variant}_{args.run_name}"
+    if tmux_session_exists(session_name):
+        raise RuntimeError(f"tmux session already exists: {session_name}")
+
+    lock_path, lock_record, lock_sha256 = acquire_training_job_lock(
+        source_revision=git_sha,
+        run_name=args.run_name,
+        training_variant=training_variant,
     )
-    subprocess.run(
-        [
-            "tmux",
-            "new-session",
-            "-d",
-            "-s",
-            session_name,
-            "-c",
-            str(REPOSITORY_ROOT),
-            "bash",
-            "-lc",
-            shell_command,
-        ],
-        check=True,
-    )
-    print(manifest_json)
-    print(f"launched tmux session {session_name}; log: {log_path}")
+    try:
+        manifest_bytes, manifest_sha256, launched_log_path = _launch_locked_pilot(
+            args=args,
+            git_sha=git_sha,
+            checkpoint=checkpoint,
+            checkpoint_sha256=checkpoint_sha256,
+            command=command,
+            resolved_config=resolved_config,
+            resolved_config_sha256=resolved_config_sha256,
+            argv_sha256=argv_sha256,
+            matched_panel_spec=matched_panel_spec,
+            matched_panel_spec_sha256=matched_panel_spec_sha256,
+            accumulation_steps=accumulation_steps,
+            session_name=session_name,
+            lock_path=lock_path,
+            lock_record=lock_record,
+            lock_sha256=lock_sha256,
+        )
+    except BaseException as launch_error:
+        try:
+            handoff_may_have_succeeded = tmux_session_exists(session_name)
+        except BaseException as verification_error:
+            raise RuntimeError(
+                "pilot launch failed with an indeterminate tmux handoff; the exact "
+                "training-job lock was retained fail-closed for manual review: "
+                f"{type(verification_error).__name__}: {verification_error}"
+            ) from launch_error
+        if handoff_may_have_succeeded:
+            raise RuntimeError(
+                "pilot launch raised after tmux may have accepted the detached job; "
+                "the exact training-job lock was retained fail-closed"
+            ) from launch_error
+        try:
+            release_exact_training_job_lock(
+                lock_path,
+                expected_sha256=lock_sha256,
+            )
+        except Exception as release_error:
+            raise RuntimeError(
+                "pilot launch failed before tmux handoff and its exact training-job "
+                f"lock could not be released: {type(release_error).__name__}: "
+                f"{release_error}"
+            ) from launch_error
+        raise
+    print(manifest_bytes.decode("utf-8"), end="")
+    print(f"launch manifest SHA-256: {manifest_sha256}")
+    print(f"launched tmux session {session_name}; log: {launched_log_path}")
 
 
 if __name__ == "__main__":

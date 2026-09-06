@@ -1122,28 +1122,83 @@ have finite lower last-five-step loss, improved fixed-$t=0.5$ loss, and at least
 one strictly decoded molecule. These are integration gates only. Comparing 5/16
 with 3/16 does not rank the priors because the sample is tiny and stochastic.
 
-**Progressive experiment gate.** Next comes a one-GPU, full-size 10-update
-engineering check. Warm-start pilots then advance through 100, 500, and 1,000
-updates, decoding 32 samples before 256, comparing 32/64 reverse steps, and
-retaining 128 steps as the faithful official-UDLM control. Those smaller runs
-are health and speed evidence, not selector inputs. A candidate is eligible for
-selection only after exactly 256 samples at 128 NFE for each reserved pilot
-generation seed 1000 and 1001. If $q_{c,s}$ and $d_{c,s}$ are released-branch
-quality and diversity for candidate attempt $c$ and pilot seed $s$, the frozen
-scores are
+**Immutable launch evidence.** The user first chooses a count $W\in\{1,2\}$;
+$W$ is a world size, not a physical device ID. Before any GPU query, the
+launcher must exclusively acquire the repository-global single-training-job
+lease. It then scans every NVIDIA device, chooses an ordered UUID tuple
+$U=(u_1,\ldots,u_W)$, and re-probes exactly those UUIDs immediately before
+launch. Each final record $f_i$ must have utilization below 10%, at least
+30,000 MiB free, no compute process, and non-prohibited compute mode. Thus
+$|U|=W$, the UUID order in the final telemetry is exactly $U$, and only one
+reviewed pilot may hold the lease.
+
+The raw bytes of `launch_manifest.json` are frozen by repository-relative path,
+SHA-256, and schema 1. Training receives that digest out of band so the manifest
+need not hash itself. Runtime-config schema 2, training-summary schema 3, and
+successful-exit-receipt schema 3 must each repeat the same stable manifest
+snapshot and exact $U$. The receipt also validates the still-held lease before
+publication; after tmux handoff, only its writer may then unlink that exact
+unchanged lease. Before handoff, the launcher may release only its own exact
+lease if launch fails. Unexplained or stale leases fail closed for manual
+review. A candidate lock that lacks any link in
+`launch -> runtime -> summary -> receipt -> checkpoint` is inadmissible.
+
+**Progressive experiment gate and motivation.** First run the warm-start R/S/E
+panel for only 10 optimizer updates: R is the released schedule with a uniform
+prior, S is the schedule-consistent uniform control, and E is the
+schedule-consistent empirical-frequency prior. Their canonical matched-panel
+specification registers sequential R, S, then E execution, with the operator
+advancing only after a validated successful receipt. The global lease
+machine-enforces one-job concurrency, but each per-run manifest lacks a
+predecessor-receipt chain; order and receipt-gated advancement therefore still
+need post-run audit. The health panel checks memory, throughput, checkpoint
+save/load, finiteness, and evidence plumbing. It cannot rank the variants: the
+current constant schedule has 2,500 linear-warmup
+updates, so at peak learning rate $3\times10^{-4}$ its value by update 10 is
+only approximately $(10/2500)(3\times10^{-4})=1.2\times10^{-6}$.
+
+**Future registered optimization screens.** These names describe a prospective
+plan; no config or result is claimed to exist yet. On E only with training seed
+17, E-L0 keeps the current additive conditioner and 2,500-update constant
+warmup. E-L1 changes only the scheduler to cosine horizon 1,000, warmup 50,
+peak $3\times10^{-4}$, and minimum $3\times10^{-6}$, and both train for 100
+updates. Let $\ell_{a,j}>0$ be fixed-panel denoising loss for alternative $a$
+at noise-time bin $t_j\in\{0.1,0.5,0.9\}$, and let
+$\bar\ell_a=\tfrac13\sum_{j=1}^3\ell_{a,j}$. Select L1 only if
+$1-\bar\ell_{L1}/\bar\ell_{L0}\ge0.02$, at least two of three individual losses
+decrease, and every per-bin ratio
+$\ell_{L1,j}/\ell_{L0,j}-1\le0.02$; otherwise retain L0. For example, L0 losses
+$(10,6,2)$ and L1 losses $(9.7,5.7,2.02)$ improve the mean by about 3.2%,
+improve two bins, and worsen the last by only 1%, so L1 passes.
+
+Next, still on E and seed 17, train 500 updates with the selected scheduler.
+E-A0 uses additive conditioning; E-A1 adds a post-timestep-MLP SiLU and
+zero-initialized per-layer FiLM/AdaLN-style modulation. A1 must preserve the
+warm-start BERT output exactly at initialization. Select A1 only if its mean
+fixed-panel loss improves by at least 2%, no time bin worsens by more than 2%,
+clean-token accuracy is nondecreasing, and every new modulation group receives
+finite, nonzero gradients; a tie or failed condition retains A0. This screen is
+motivated by official UDLM's per-block AdaLN, but the BERT adaptation is our
+planned architecture experiment rather than released code.
+
+With the selected scheduler and architecture, train matched R/S/E controls for
+1,000 updates each. A 32-request generation at seed 1100 is an ineligible
+health diagnostic. A candidate is eligible for selection only after exactly
+256 requests at 128 NFE for each reserved generation seed 1000 and 1001. If
+$q_{c,s}$ and $d_{c,s}$ are released-branch quality and diversity for candidate
+attempt $c$ and generation seed $s$, the frozen scores are
 $\bar q_c=\tfrac12(q_{c,1000}+q_{c,1001})$ and
 $\bar d_c=\tfrac12(d_{c,1000}+d_{c,1001})$. The ledger selects maximum
 $\bar q_c$, then maximum $\bar d_c$, then the lexicographically smallest
 attempt ID. For example, attempts A and B with scores $(0.86,0.82)$ and
-$(0.86,0.825)$ select B; a 32-sample attempt with quality 1.0 is disclosed but
-cannot enter this ordering.
+$(0.86,0.825)$ select B; even a seed-1100 diagnostic with quality 1.0 is
+disclosed but cannot enter this ordering.
 
-The user requests a count of one or two GPUs; physical IDs are selected
-dynamically from freshly verified idle devices. Before final generation, one
-checkpoint and sampling configuration must be frozen in a committed, pushed
-manifest using only training, the fixed validation panel, and those registered
-pilot seeds. The three final seeds are then evaluated once, with 1,000 requests
-each, under the same repaired definitions as the audited MDLM control.
+Before final generation, one checkpoint and sampling configuration must be
+frozen in a committed, pushed candidate lock using only training, the fixed
+validation panel, and registered pilot seeds. The three final seeds are then
+evaluated once, with 1,000 requests each, under the same repaired definitions
+as the audited MDLM control.
 
 **Baseline recomputation evidence.** The immutable rescore attestation does not
 regenerate molecules. Three fresh CPU interpreters re-decode and re-score the
@@ -1181,9 +1236,10 @@ low power are explicit limitations.
 
 Report strict unrepaired diagnostics, checkpoint and source hashes, training
 and generation seeds, initialization, added optimizer updates and requested
-example exposure, parameter counts, checkpoint-selection rule, device mapping,
-128-NFE UDLM inference cost, wall time, and exact denominators. The receipt does
-not claim a content-token exposure count. Passing a small pilot is
+example exposure, parameter counts, checkpoint-selection rule, immutable
+launch-manifest path/hash/schema, exact UUID and final-idle telemetry bindings,
+global-lease evidence, 128-NFE UDLM inference cost, wall time, and exact
+denominators. The receipt does not claim a content-token exposure count. Passing a small pilot is
 only permission to continue. If the locked candidate is an MDLM-EMA warm start
 with extra UDLM training, passing the gate supports only an operational
 continuation-system claim on molecular metrics, not a from-scratch causal claim
@@ -1192,9 +1248,12 @@ from-scratch UDLM comparison or an equal-extra-update MDLM continuation control.
 
 **Difference from released code.** The full-vocabulary artifact is the faithful
 UDLM prior control. Excluding UNK/CLS/SEP/PAD/MASK is a GenMol-specific ablation;
-the committed semantic pilot ledger, immutable MDLM rescore, and intersection-
-union publication gate are reproducibility controls added here, not features of
-the released GenMol or UDLM repositories. Neither smoke result is paper-scale.
+the committed semantic pilot ledger, immutable MDLM rescore, launch-evidence
+chain, global lease, sequential R/S/E operator protocol, and intersection-union
+publication gate are local reproducibility controls, not features of released
+GenMol or UDLM. Per-layer FiLM/AdaLN is also only a future BERT experiment:
+official UDLM uses per-block modulation in a DiT. Neither smoke result is
+paper-scale.
 
 **Comprehension checkpoint.** Why does falling toy loss not show that UDLM beats
 GenMol? Expected reasoning: it checks optimization mechanics on 16 memorized
@@ -1206,7 +1265,19 @@ variance and operating point differ from the frozen selector, so allowing it
 would reintroduce post-hoc selection. What does 63,000 matching row fields show?
 Expected reasoning: current decoding/scoring exactly reproduces the frozen raw
 MDLM evidence within the declared numeric tolerance; it does not repair the
-historical training or GPU-provenance limitations.
+historical training or GPU-provenance limitations. Why must the same manifest
+hash and UUID tuple appear through runtime, summary, and receipt? Expected
+reasoning: a launch-time idle snapshot is useful only if the process and
+completed artifacts are cryptographically joined to exactly that launch. Why
+is the 10-update R/S/E panel health-only? Expected reasoning: at roughly
+$1.2\times10^{-6}$ by update 10 under the 2,500-step warmup, meaningful learning
+has barely started. Why does the global lease not prove R-to-S-to-E order?
+Expected reasoning: it prevents concurrent jobs, but no per-run artifact binds
+its predecessor receipt, so order still needs operator discipline and post-run
+audit. Why is A1 retained only after its fixed-panel, clean-accuracy, and
+gradient gates all pass? Expected reasoning: stronger conditioning is useful
+only if it learns across noise levels without damaging clean predictions, and
+finite nonzero gradients prove the new path is active.
 """,
             f"{STAGE_TAG_PREFIX}-evidence",
         ),
@@ -1227,15 +1298,109 @@ stage20_superiority_protocol_path = (
 )
 stage20_superiority_protocol_bytes = stage20_superiority_protocol_path.read_bytes()
 assert stage20_hashlib.sha256(stage20_superiority_protocol_bytes).hexdigest() == (
-    "7fea3b51b492adab194ac715a1b1dce7efc6105722a6913feba5055fd2f72410"
+    "a44263d56a42593ca9f1b9c00c7ad8177229f0f4fa9ff941ab07481054b84848"
 )
 stage20_superiority_protocol = stage20_json.loads(stage20_superiority_protocol_bytes)
 assert stage20_superiority_protocol["status"] == "frozen_before_gpu_pilots"
+stage20_candidate_lock_requirements = stage20_superiority_protocol[
+    "candidate_lock_requirements"
+]
+assert stage20_candidate_lock_requirements[
+    "accepted_training_artifact_schema_versions"
+] == {{
+    "launch_manifest": 1,
+    "runtime_config": 2,
+    "training_summary": 3,
+    "successful_exit_receipt": 3,
+}}
+for stage20_required_launch_binding in (
+    "immutable_launch_manifest_relative_path_raw_hash_and_schema_required",
+    "exact_selected_gpu_uuids_and_final_idle_telemetry_bound_through_launch_runtime_summary_and_receipt_required",
+    "global_single_training_job_lease_acquired_before_gpu_probe_and_validated_before_receipt_publication_required",
+    "matched_r_s_e_registered_order_and_receipt_gated_advancement_operator_policy_required",
+    "predecessor_receipt_chain_is_not_machine_enforced_by_each_per_run_launch_manifest",
+):
+    assert stage20_candidate_lock_requirements[stage20_required_launch_binding] is True
 stage20_selection_firewall = stage20_superiority_protocol["selection_firewall"]
 assert stage20_selection_firewall["eligible_pilot_generation_seeds"] == [1000, 1001]
 assert stage20_selection_firewall["eligible_requested_samples_per_seed"] == 256
 assert stage20_selection_firewall["eligible_nfe"] == 128
 assert stage20_selection_firewall["eligible_metric_branch"] == "released_comparable"
+
+stage20_future_pilot_plan = {{
+    "status": "future_registered_plan_not_executed",
+    "health_panel": {{
+        "variant_order": ["R_release_uniform", "S_schedule_uniform", "E_empirical_frequency"],
+        "optimizer_updates_each": 10,
+        "purpose": "health_and_provenance_only",
+        "single_job_concurrency_machine_enforced": True,
+        "order_and_predecessor_receipt_gate_require_operator_and_post_run_audit": True,
+    }},
+    "scheduler_screen": {{
+        "variant": "E_only",
+        "training_seed": 17,
+        "optimizer_updates": 100,
+        "fixed_noise_times": [0.1, 0.5, 0.9],
+        "E_L0": "current_additive_constant_with_2500_step_warmup",
+        "E_L1": {{
+            "schedule": "cosine",
+            "horizon_updates": 1000,
+            "warmup_updates": 50,
+            "peak_learning_rate": 3e-4,
+            "minimum_learning_rate": 3e-6,
+        }},
+        "select_E_L1_only_if": {{
+            "mean_fixed_panel_loss_relative_improvement_min": 0.02,
+            "improved_time_bins_min": 2,
+            "per_time_bin_relative_regression_max": 0.02,
+        }},
+        "fallback": "E_L0",
+    }},
+    "conditioning_screen": {{
+        "variant": "E_only",
+        "training_seed": 17,
+        "optimizer_updates": 500,
+        "scheduler": "winner_of_scheduler_screen",
+        "E_A0": "additive_time_conditioner",
+        "E_A1": "post_mlp_silu_plus_zero_init_per_layer_film_adaln_style",
+        "select_E_A1_only_if": {{
+            "exact_warm_start_output_preserved_at_initialization": True,
+            "mean_fixed_panel_loss_relative_improvement_min": 0.02,
+            "per_time_bin_relative_regression_max": 0.02,
+            "clean_token_accuracy_nondecreasing": True,
+            "new_parameter_gradients_finite_and_nonzero": True,
+        }},
+        "ties_and_failures": "E_A0",
+    }},
+    "matched_scale_up": {{
+        "variant_order": ["R_release_uniform", "S_schedule_uniform", "E_empirical_frequency"],
+        "optimizer_updates_each": 1000,
+        "health_generation": {{"seed": 1100, "requested": 32, "eligible": False}},
+        "registered_selection_generation": {{
+            "seeds": [1000, 1001],
+            "requested_per_seed": 256,
+            "nfe": 128,
+            "eligible": True,
+        }},
+    }},
+}}
+stage20_lr_at_health_update_10 = 3e-4 * 10 / 2500
+assert stage20_math.isclose(stage20_lr_at_health_update_10, 1.2e-6)
+stage20_scheduler_example_l0 = [10.0, 6.0, 2.0]
+stage20_scheduler_example_l1 = [9.7, 5.7, 2.02]
+stage20_scheduler_example_mean_improvement = 1.0 - (
+    stage20_math.fsum(stage20_scheduler_example_l1)
+    / stage20_math.fsum(stage20_scheduler_example_l0)
+)
+stage20_scheduler_example_bin_changes = [
+    candidate / reference - 1.0
+    for reference, candidate in zip(
+        stage20_scheduler_example_l0, stage20_scheduler_example_l1, strict=True
+    )
+]
+assert stage20_scheduler_example_mean_improvement >= 0.02
+assert sum(change < 0 for change in stage20_scheduler_example_bin_changes) >= 2
+assert max(stage20_scheduler_example_bin_changes) <= 0.02
 
 stage20_rescore_path = (
     PROJECT_ROOT
@@ -1451,6 +1616,15 @@ stage20_success_criteria = {{
         "eligible_pilot_metric_branch": "released_comparable",
         "selection_rule": stage20_selection_firewall["selection_rule"],
         "faithful_udlm_sampling_nfe": 128,
+        "training_artifact_schemas": stage20_candidate_lock_requirements[
+            "accepted_training_artifact_schema_versions"
+        ],
+        "launch_evidence_requirements": [
+            "immutable launch_manifest.json repository-relative path, raw SHA-256, and schema",
+            "exact ordered selected UUIDs and final idle telemetry cross-bound through runtime, summary, and receipt",
+            "global single-job lease acquired before GPU probing and validated before receipt publication",
+            "registered operator policy for R/S/E order and receipt-gated advancement; no predecessor chain is bound",
+        ],
         "required_matching": [
             "training data and tokenizer",
             "BERT width and depth",
@@ -1467,7 +1641,8 @@ stage20_success_criteria = {{
             "base and adapter parameter counts",
             "checkpoint-selection rule",
             "sampling temperature, NFE, seeds, source and checkpoint hashes",
-            "device UUID mapping and wall time",
+            "launch-manifest path/hash/schema and exact selected UUID/final-idle telemetry chain",
+            "global lease evidence, declared R/S/E operator-order policy, and wall time",
         ],
     }},
     "local_mdlm_baseline_exact_fractions": stage20_exact_mdlm_means,
@@ -1562,14 +1737,18 @@ stage20_decision_gate_report_rows = [
     ],
     (
         "Final-candidate lock",
-        "Commit and push the candidate manifest before seeds 0,1,2; evaluate each "
+        "Commit and push the candidate manifest before seeds 0,1,2; bind launch "
+        "manifest schema 1, runtime schema 2, summary/receipt schema 3, exact UUIDs, "
+        "final-idle telemetry, global-lease evidence, and checkpoint; evaluate each "
         "final seed once; do not select or tune from final-seed results.",
     ),
     (
         "Registered pilot selector",
-        "Seeds 1000,1001; 256 requests per seed; 128 NFE; released-compatible "
-        "quality then diversity then lexical attempt ID. Smaller diagnostics are "
-        "disclosed but ineligible.",
+        "Future plan: 10-update R/S/E health; E scheduler screen at 100 updates, "
+        "seed 17; E conditioning screen at 500 updates, seed 17; selected matched "
+        "R/S/E at 1000 updates. Seed 1100 x 32 is ineligible. Selection uses seeds "
+        "1000,1001 x 256 requests at 128 NFE; released-compatible quality then "
+        "diversity then lexical attempt ID.",
     ),
     (
         "Final evaluation protocol",
@@ -1623,6 +1802,14 @@ stage20_summary = {{
     "superiority_protocol_sha256": stage20_hashlib.sha256(
         stage20_superiority_protocol_bytes
     ).hexdigest(),
+    "future_pilot_plan": stage20_future_pilot_plan,
+    "training_artifact_schemas": stage20_candidate_lock_requirements[
+        "accepted_training_artifact_schema_versions"
+    ],
+    "r_s_e_order_evidence_limitation": (
+        "single-job concurrency is machine-enforced; predecessor receipt chaining "
+        "still requires operator discipline and post-run audit"
+    ),
     "registered_selection_operating_point": {{
         "seeds": [1000, 1001],
         "samples_per_seed": 256,
@@ -2357,6 +2544,39 @@ released-code, and local bounded results remain separate fields.
         '            "; ".join(udlm_local["evidence"][:2]),',
         '            "; ".join((udlm_local["evidence"][0], udlm_local["evidence"][4])),',
     )
+    # Bring an already-generated report cell forward before checking for the
+    # complete target fragment below. A pristine notebook skips these because
+    # the target fragments are inserted by the larger migration.
+    if '    gate_rows = payload["udlm_decision_gate"]' in source:
+        source = _replace_required(
+            source,
+            '''        "Comparator implementation provenance",
+        *[f"Comparator caveat {index}" for index in range(1, 6)],''',
+            '''        "Comparator implementation provenance",
+        "Comparator current-code rescore",
+        *[f"Comparator caveat {index}" for index in range(1, 6)],''',
+            label="current-code comparator rescore report row",
+        )
+        source = _replace_required(
+            source,
+            '''        "Final-candidate lock",
+        "Final evaluation protocol",''',
+            '''        "Final-candidate lock",
+        "Registered pilot selector",
+        "Final evaluation protocol",''',
+            label="registered pilot selector report row",
+        )
+        source = _replace_required(
+            source,
+            '''        "device UUID mapping and wall time",
+        "MDLM-matched content-only framing control",''',
+            '''        "launch-manifest path/hash/schema",
+        "global lease",
+        "Future plan: 10-update R/S/E health",
+        "MDLM-matched content-only framing control",''',
+            label="launch-evidence report assertions",
+        )
+
     source = _replace_required(
         source, stage18_tail, stage20_tail, label="Stage 20 report specification"
     )
@@ -2529,6 +2749,7 @@ released-code, and local bounded results remain separate fields.
         "Comparator status",
         "Comparator exact means",
         "Comparator implementation provenance",
+        "Comparator current-code rescore",
         *[f"Comparator caveat {index}" for index in range(1, 6)],
         "Point-estimate gate",
         "Validity uncertainty gate",
@@ -2536,6 +2757,7 @@ released-code, and local bounded results remain separate fields.
         "Quality uncertainty gate",
         "Diversity uncertainty gate",
         "Final-candidate lock",
+        "Registered pilot selector",
         "Final evaluation protocol",
         "Matching constraints",
         "Required candidate provenance",
@@ -2558,7 +2780,9 @@ released-code, and local bounded results remain separate fields.
         "3 seeds x 1000 requests",
         "128 NFE",
         "initialization checkpoint and raw-or-EMA choice",
-        "device UUID mapping and wall time",
+        "launch-manifest path/hash/schema",
+        "global lease",
+        "Future plan: 10-update R/S/E health",
         "MDLM-matched content-only framing control",
         "continuation-system",
     ):
@@ -2743,11 +2967,24 @@ released-code, and local bounded results remain separate fields.
                 "128 NFE",
                 "raw-or-EMA",
                 "device UUID",
+                "launch-manifest",
+                "global lease",
                 "MDLM-matched",
             )
         ),''',
         1,
     )
+    if '        "udlm_claim_language_present": all(' in source:
+        source = _replace_required(
+            source,
+            '''                "device UUID",
+                "MDLM-matched",''',
+            '''                "device UUID",
+                "launch-manifest",
+                "global lease",
+                "MDLM-matched",''',
+            label="launch-evidence PDF audit",
+        )
     source = _replace_required(
         source,
         '''        "all_required_headings_present": all(heading in extracted for heading in required_headings),
@@ -2763,6 +3000,8 @@ released-code, and local bounded results remain separate fields.
                 "128 NFE",
                 "raw-or-EMA",
                 "device UUID",
+                "launch-manifest",
+                "global lease",
                 "MDLM-matched",
             )
         ),
@@ -2819,6 +3058,15 @@ def _update_completion_gate(notebook: dict) -> None:
 - Two pinned seed-1 CPU toy artifacts at implementation base
   `{UDLM_BASE_COMMIT}` are linked, hashed, and schema-validated. They are bounded
   integration evidence, not evidence that UDLM beats GenMol.
+- Candidate training must bind launch-manifest schema 1, runtime schema 2, and
+  summary/receipt schema 3, including the exact selected UUIDs, final-idle
+  telemetry, and repository-global single-job lease. The lease machine-enforces
+  one-job concurrency; R/S/E order remains an operator/post-run audit until a
+  predecessor-receipt chain is implemented.
+- The prospective small-first ladder is a 10-update R/S/E health panel, an
+  E-only 100-update scheduler screen, an E-only 500-update conditioning screen,
+  then selected matched R/S/E runs at 1,000 updates. Seed 1100 x 32 requests is
+  ineligible; only seeds 1000/1001 x 256 requests at 128 NFE may select.
 - The final success gate is three matched 1,000-request seeds with repaired and
   strict metrics, checkpoint/seeds/device/runtime provenance, and thresholds
   recorded in `stage20_success_criteria`.

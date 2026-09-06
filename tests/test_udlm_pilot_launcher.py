@@ -1,4 +1,5 @@
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -341,6 +342,7 @@ def test_child_command_sanitizes_python_and_binds_source_argv_config(
     monkeypatch.setenv("LOCAL_RANK", "7")
     monkeypatch.setenv("WORLD_SIZE", "8")
     monkeypatch.setenv("MASTER_ADDR", "untrusted.example")
+    monkeypatch.setenv("GENMOL_TRAIN_UNEXPECTED", "stale")
     command = [
         "/venv/python",
         "-u",
@@ -352,6 +354,7 @@ def test_child_command_sanitizes_python_and_binds_source_argv_config(
     runtime_path = launcher.REPOSITORY_ROOT / "output/udlm/test/runtime_config.json"
     summary_path = launcher.REPOSITORY_ROOT / "output/udlm/test/training_summary.json"
     checkpoint_path = launcher.REPOSITORY_ROOT / "output/udlm/test/checkpoints/10.ckpt"
+    manifest_path = launcher.REPOSITORY_ROOT / "output/udlm/test/launch_manifest.json"
 
     child_command, environment = launcher.build_child_environment_command(
         command=command,
@@ -360,6 +363,8 @@ def test_child_command_sanitizes_python_and_binds_source_argv_config(
         runtime_config_path=runtime_path,
         training_summary_path=summary_path,
         final_checkpoint_path=checkpoint_path,
+        launch_manifest_path=manifest_path,
+        launch_manifest_sha256="c" * 64,
         expected_max_steps=10,
         expected_world_size=2,
         visible_uuids="GPU-one,GPU-two",
@@ -374,12 +379,17 @@ def test_child_command_sanitizes_python_and_binds_source_argv_config(
     )
     assert environment["PYTHONHASHSEED"] == "7"
     assert environment["GENMOL_TRAIN_SUMMARY_PATH"] == str(summary_path)
-    assert environment["GENMOL_TRAIN_EXPECTED_SUMMARY_SCHEMA_VERSION"] == "2"
+    assert environment["GENMOL_TRAIN_EXPECTED_SUMMARY_SCHEMA_VERSION"] == "3"
     assert environment["GENMOL_TRAIN_EXPECTED_FINAL_CHECKPOINT_PATH"] == str(
         checkpoint_path
     )
     assert environment["GENMOL_TRAIN_EXPECTED_MAX_STEPS"] == "10"
     assert environment["GENMOL_TRAIN_EXPECTED_WORLD_SIZE"] == "2"
+    assert environment["GENMOL_TRAIN_LAUNCH_MANIFEST_PATH"] == str(manifest_path)
+    assert environment["GENMOL_TRAIN_EXPECTED_LAUNCH_MANIFEST_SHA256"] == "c" * 64
+    assert environment["GENMOL_TRAIN_SELECTED_GPU_UUIDS_JSON"] == (
+        '["GPU-one","GPU-two"]'
+    )
     assert environment["PYTHONPATH"] == launcher.os.pathsep.join(
         [
             str(launcher.REPOSITORY_ROOT / "src"),
@@ -390,6 +400,9 @@ def test_child_command_sanitizes_python_and_binds_source_argv_config(
         assert ["-u", hostile_key] in [
             child_command[index : index + 2] for index in range(len(child_command) - 1)
         ]
+    assert ["-u", "GENMOL_TRAIN_UNEXPECTED"] in [
+        child_command[index : index + 2] for index in range(len(child_command) - 1)
+    ]
     for distributed_key in launcher.DISTRIBUTED_ENVIRONMENT_KEYS:
         assert ["-u", distributed_key] in [
             child_command[index : index + 2] for index in range(len(child_command) - 1)
@@ -418,6 +431,15 @@ def test_tmux_command_captures_both_pipeline_statuses_for_receipt(
         expected_final_checkpoint_path=(
             tmp_path / "output/udlm/pilot/checkpoints/10.ckpt"
         ),
+        expected_launch_manifest_path=(
+            tmp_path / "output/udlm/pilot/launch_manifest.json"
+        ),
+        expected_launch_manifest_sha256="d" * 64,
+        expected_selected_gpu_uuids_json='["GPU-one","GPU-two"]',
+        expected_training_job_lock_path=(
+            tmp_path / "output/udlm/.single_training_job.lock"
+        ),
+        expected_training_job_lock_sha256="e" * 64,
     )
 
     assert 'pipeline_status=("${PIPESTATUS[@]}")' in shell_command
@@ -425,6 +447,8 @@ def test_tmux_command_captures_both_pipeline_statuses_for_receipt(
     assert 'tee_status="${pipeline_status[1]}"' in shell_command
     assert "write_pilot_exit_status.py" in shell_command
     assert str(receipt_path) in shell_command
+    assert "--expected-launch-manifest-sha256" in shell_command
+    assert "--expected-selected-gpu-uuids-json" in shell_command
 
 
 def test_tmux_command_rejects_legacy_training_summary_schema(monkeypatch, tmp_path):
@@ -448,6 +472,15 @@ def test_tmux_command_rejects_legacy_training_summary_schema(monkeypatch, tmp_pa
             expected_final_checkpoint_path=(
                 tmp_path / "output/udlm/pilot/checkpoints/10.ckpt"
             ),
+            expected_launch_manifest_path=(
+                tmp_path / "output/udlm/pilot/launch_manifest.json"
+            ),
+            expected_launch_manifest_sha256="d" * 64,
+            expected_selected_gpu_uuids_json='["GPU-one"]',
+            expected_training_job_lock_path=(
+                tmp_path / "output/udlm/.single_training_job.lock"
+            ),
+            expected_training_job_lock_sha256="e" * 64,
         )
 
 
@@ -543,6 +576,373 @@ def test_pushed_commit_check_rejects_untracked_source_but_allows_output(monkeypa
         launcher.require_pushed_commit()
 
 
+def test_matched_panel_digest_masks_only_registered_treatment_and_run_path(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(launcher, "_python_executable", lambda: Path("/venv/python"))
+    common_digests = []
+    panel_digests = []
+    for training_variant in launcher.MATCHED_PANEL_VARIANT_ORDER:
+        run_dir = tmp_path / training_variant
+        command = launcher.build_training_command(
+            gpu_count=1,
+            run_dir=run_dir,
+            max_steps=10,
+            global_batch_size=16,
+            micro_batch_size=2,
+            num_workers=1,
+            seed=1,
+            checkpoint=None,
+            exclude_special_tokens=False,
+            training_variant=training_variant,
+        )
+        definition = launcher.TRAINING_VARIANTS[training_variant]
+        resolved, _digest = launcher.compose_resolved_training_config(
+            config_name=str(definition["config_name"]),
+            overrides=command[5:],
+            gpu_count=1,
+        )
+        common_digest = launcher.matched_panel_config_sha256(resolved)
+        common_digests.append(common_digest)
+        spec, panel_digest = launcher.build_matched_panel_spec(
+            source_revision="a" * 40,
+            checkpoint=None,
+            checkpoint_sha256=None,
+            gpu_count=1,
+            max_steps=10,
+            global_batch_size=16,
+            micro_batch_size=2,
+            num_workers=1,
+            seed=1,
+            exclude_special_tokens=False,
+            max_utilization_percent=10,
+            min_free_memory_mib=30_000,
+            common_resolved_config_sha256=common_digest,
+        )
+        assert spec["execution"] == {
+            "mode": "single_job_lease_with_registered_order_policy",
+            "maximum_concurrent_training_jobs": 1,
+            "concurrency_enforcement": "atomic_global_worktree_training_job_lock",
+            "registered_variant_order": list(launcher.MATCHED_PANEL_VARIANT_ORDER),
+            "advance_policy": "operator_validates_successful_predecessor_receipt",
+            "predecessor_receipt_bound_in_each_manifest": False,
+        }
+        panel_digests.append(panel_digest)
+
+    assert len(set(common_digests)) == 1
+    assert len(set(panel_digests)) == 1
+
+    altered_resolved = launcher.json.loads(launcher.json.dumps(resolved))
+    altered_resolved["trainer"]["max_steps"] = 11
+    assert launcher.matched_panel_config_sha256(altered_resolved) != common_digests[0]
+
+    changed_spec, changed_digest = launcher.build_matched_panel_spec(
+        source_revision="a" * 40,
+        checkpoint=None,
+        checkpoint_sha256=None,
+        gpu_count=1,
+        max_steps=10,
+        global_batch_size=16,
+        micro_batch_size=2,
+        num_workers=1,
+        seed=2,
+        exclude_special_tokens=False,
+        max_utilization_percent=10,
+        min_free_memory_mib=30_000,
+        common_resolved_config_sha256=common_digests[0],
+    )
+    assert changed_spec["common_training_contract"]["seed"] == 2
+    assert changed_digest != panel_digests[0]
+
+
+def test_dry_run_is_nonmutating_and_never_probes_gpus_or_tmux(
+    monkeypatch, tmp_path, capsys
+):
+    repository_root = tmp_path / "worktree"
+    repository_root.mkdir()
+    monkeypatch.setattr(launcher, "REPOSITORY_ROOT", repository_root)
+    monkeypatch.setattr(launcher, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(
+        launcher,
+        "_parse_args",
+        lambda: launcher.argparse.Namespace(
+            run_name="dry_preview",
+            training_variant="udlm",
+            gpu_count=1,
+            max_steps=10,
+            global_batch_size=16,
+            micro_batch_size=2,
+            num_workers=1,
+            seed=1,
+            checkpoint=tmp_path / "unused.ckpt",
+            scratch=True,
+            exclude_special_tokens=False,
+            max_utilization_percent=10,
+            min_free_memory_mib=30_000,
+            dry_run=True,
+        ),
+    )
+    monkeypatch.setattr(launcher, "_python_executable", lambda: Path("/venv/python"))
+    monkeypatch.setattr(launcher, "require_pushed_commit", lambda: "a" * 40)
+    monkeypatch.setattr(
+        launcher,
+        "compose_resolved_training_config",
+        lambda **_kwargs: (
+            {
+                "seed": 1,
+                "training": {"udlm": {"prior_variant": "release_uniform"}},
+                "callback": {
+                    "dirpath": str(
+                        repository_root / "output/udlm/dry_preview/checkpoints"
+                    )
+                },
+            },
+            "b" * 64,
+        ),
+    )
+    monkeypatch.setattr(
+        launcher,
+        "probe_all_gpus",
+        lambda: pytest.fail("dry run must not probe GPU inventory"),
+    )
+    monkeypatch.setattr(
+        launcher.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("dry run must not invoke tmux"),
+    )
+
+    launcher.main()
+
+    preview = launcher.json.loads(capsys.readouterr().out)
+    assert preview["status"] == "dry_run_preflight_completed_no_launch"
+    assert preview["filesystem_mutation_performed"] is False
+    assert preview["gpu_probe_performed"] is False
+    assert not (repository_root / "output").exists()
+
+
+def test_manifest_publication_and_log_reservation_are_exclusive(tmp_path):
+    manifest_path = tmp_path / "run/launch_manifest.json"
+    payload = b'{"complete":true}\n'
+    digest = launcher._atomic_publish_bytes_exclusive(
+        manifest_path, payload, label="pilot launch manifest"
+    )
+    assert manifest_path.read_bytes() == payload
+    assert digest == launcher.hashlib.sha256(payload).hexdigest()
+    with pytest.raises(FileExistsError, match="refusing to replace"):
+        launcher._atomic_publish_bytes_exclusive(
+            manifest_path, b"other", label="pilot launch manifest"
+        )
+
+    log_path = tmp_path / "logs/pilot.log"
+    launcher.reserve_log_path(log_path)
+    assert log_path.is_file()
+    assert log_path.read_bytes() == b""
+    with pytest.raises(FileExistsError, match="refusing to replace"):
+        launcher.reserve_log_path(log_path)
+
+    dangling = tmp_path / "logs/dangling.log"
+    dangling.symlink_to(tmp_path / "missing-target.log")
+    assert launcher.os.path.lexists(dangling)
+    with pytest.raises(FileExistsError, match="refusing to replace"):
+        launcher.reserve_log_path(dangling)
+
+
+def test_training_job_lock_race_has_one_owner_and_exact_release(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(launcher, "REPOSITORY_ROOT", tmp_path)
+    barrier = threading.Barrier(2)
+    successes = []
+    failures = []
+
+    def acquire(run_name):
+        barrier.wait()
+        try:
+            successes.append(
+                launcher.acquire_training_job_lock(
+                    source_revision="a" * 40,
+                    run_name=run_name,
+                    training_variant="udlm",
+                )
+            )
+        except RuntimeError as error:
+            failures.append(str(error))
+
+    threads = [
+        threading.Thread(target=acquire, args=(f"racer_{index}",))
+        for index in range(2)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len(successes) == 1
+    assert len(failures) == 1
+    assert "fail closed" in failures[0]
+    lock_path, _record, digest = successes[0]
+    with pytest.raises(RuntimeError, match="owned by another run"):
+        launcher.release_exact_training_job_lock(
+            lock_path, expected_sha256="0" * 64
+        )
+    assert lock_path.is_file()
+    launcher.release_exact_training_job_lock(lock_path, expected_sha256=digest)
+    assert not launcher.os.path.lexists(lock_path)
+
+
+def test_exact_lock_release_ignores_read_updated_atime(monkeypatch, tmp_path):
+    monkeypatch.setattr(launcher, "REPOSITORY_ROOT", tmp_path)
+    lock_path, _record, digest = launcher.acquire_training_job_lock(
+        source_revision="a" * 40,
+        run_name="old_atime",
+        training_variant="udlm",
+    )
+    state = lock_path.stat()
+    launcher.os.utime(
+        lock_path,
+        ns=(state.st_mtime_ns - 86_400_000_000_000, state.st_mtime_ns),
+    )
+
+    launcher.release_exact_training_job_lock(lock_path, expected_sha256=digest)
+
+    assert not launcher.os.path.lexists(lock_path)
+
+
+def _mock_main_cpu_preflight(monkeypatch, tmp_path, *, run_name):
+    repository_root = tmp_path / "worktree"
+    repository_root.mkdir(exist_ok=True)
+    monkeypatch.setattr(launcher, "REPOSITORY_ROOT", repository_root)
+    monkeypatch.setattr(launcher, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(
+        launcher,
+        "_parse_args",
+        lambda: launcher.argparse.Namespace(
+            run_name=run_name,
+            training_variant="udlm",
+            gpu_count=1,
+            max_steps=10,
+            global_batch_size=16,
+            micro_batch_size=2,
+            num_workers=1,
+            seed=1,
+            checkpoint=tmp_path / "unused.ckpt",
+            scratch=True,
+            exclude_special_tokens=False,
+            max_utilization_percent=10,
+            min_free_memory_mib=30_000,
+            dry_run=False,
+        ),
+    )
+    monkeypatch.setattr(launcher, "_python_executable", lambda: Path("/venv/python"))
+    monkeypatch.setattr(launcher, "require_pushed_commit", lambda: "a" * 40)
+    monkeypatch.setattr(
+        launcher,
+        "compose_resolved_training_config",
+        lambda **_kwargs: (
+            {
+                "seed": 1,
+                "training": {"udlm": {"prior_variant": "release_uniform"}},
+                "callback": {
+                    "dirpath": str(
+                        repository_root / f"output/udlm/{run_name}/checkpoints"
+                    )
+                },
+            },
+            "b" * 64,
+        ),
+    )
+    monkeypatch.setattr(
+        launcher.subprocess,
+        "run",
+        lambda command, **_kwargs: (
+            subprocess.CompletedProcess(command, 1)
+            if command[:2] == ["tmux", "has-session"]
+            else pytest.fail(f"unexpected subprocess: {command}")
+        ),
+    )
+    return repository_root
+
+
+def test_existing_or_stale_training_lock_fails_before_gpu_probe(
+    monkeypatch, tmp_path
+):
+    repository_root = _mock_main_cpu_preflight(
+        monkeypatch, tmp_path, run_name="blocked"
+    )
+    lock_path, _record, _digest = launcher.acquire_training_job_lock(
+        source_revision="a" * 40,
+        run_name="existing",
+        training_variant="schedule_uniform",
+    )
+    monkeypatch.setattr(
+        launcher,
+        "probe_all_gpus",
+        lambda: pytest.fail("overlap must fail before any GPU probe"),
+    )
+
+    with pytest.raises(RuntimeError, match="another or stale.*fail closed"):
+        launcher.main()
+
+    assert lock_path == repository_root / "output/udlm/.single_training_job.lock"
+    assert lock_path.is_file()
+
+
+def test_pre_tmux_launch_failure_releases_only_acquired_lock(monkeypatch, tmp_path):
+    repository_root = _mock_main_cpu_preflight(
+        monkeypatch, tmp_path, run_name="pre_handoff_failure"
+    )
+
+    def fail_before_handoff(**kwargs):
+        lock_path = kwargs["lock_path"]
+        assert lock_path.is_file()
+        assert launcher.hashlib.sha256(lock_path.read_bytes()).hexdigest() == kwargs[
+            "lock_sha256"
+        ]
+        raise RuntimeError("synthetic pre-tmux failure")
+
+    monkeypatch.setattr(launcher, "_launch_locked_pilot", fail_before_handoff)
+
+    with pytest.raises(RuntimeError, match="synthetic pre-tmux failure"):
+        launcher.main()
+
+    assert not launcher.os.path.lexists(
+        repository_root / "output/udlm/.single_training_job.lock"
+    )
+
+
+def test_ambiguous_tmux_handoff_retains_lock_fail_closed(monkeypatch, tmp_path):
+    repository_root = _mock_main_cpu_preflight(
+        monkeypatch, tmp_path, run_name="ambiguous_handoff"
+    )
+    has_session_calls = 0
+
+    def tmux_state(command, **_kwargs):
+        nonlocal has_session_calls
+        assert command[:2] == ["tmux", "has-session"]
+        has_session_calls += 1
+        return subprocess.CompletedProcess(
+            command,
+            1 if has_session_calls == 1 else 0,
+        )
+
+    monkeypatch.setattr(launcher.subprocess, "run", tmux_state)
+    monkeypatch.setattr(
+        launcher,
+        "_launch_locked_pilot",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("synthetic post-handoff ambiguity")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="lock was retained fail-closed"):
+        launcher.main()
+
+    assert has_session_calls == 2
+    assert (
+        repository_root / "output/udlm/.single_training_job.lock"
+    ).is_file()
+
+
 def test_main_keeps_final_uuid_probe_adjacent_to_tmux_spawn(monkeypatch, tmp_path):
     repository_root = tmp_path / "worktree"
     repository_root.mkdir()
@@ -592,7 +992,14 @@ def test_main_keeps_final_uuid_probe_adjacent_to_tmux_spawn(monkeypatch, tmp_pat
     monkeypatch.setattr(
         launcher,
         "compose_resolved_training_config",
-        lambda **_kwargs: ({"seed": 1}, "b" * 64),
+        lambda **_kwargs: (
+            {
+                "seed": 1,
+                "training": {"udlm": {"prior_variant": "release_uniform"}},
+                "callback": {"dirpath": str(repository_root / "checkpoints")},
+            },
+            "b" * 64,
+        ),
     )
 
     def subprocess_run(command, **_kwargs):
@@ -617,12 +1024,12 @@ def test_main_keeps_final_uuid_probe_adjacent_to_tmux_spawn(monkeypatch, tmp_pat
                 repository_root / "output/udlm/ordering/checkpoints/1.ckpt"
             )
             assert manifest["training_summary_path"] == str(summary_path)
-            assert manifest["training_summary_schema_version"] == 2
+            assert manifest["training_summary_schema_version"] == 3
             receipt_path = (
                 repository_root / "output/udlm/ordering/pilot_exit_status.json"
             )
             assert manifest["pilot_exit_status_path"] == str(receipt_path)
-            assert manifest["pilot_exit_status_schema_version"] == 2
+            assert manifest["pilot_exit_status_schema_version"] == 3
             assert manifest["expected_final_checkpoint_path"] == str(checkpoint_path)
             assert manifest["completion_contract"] == {
                 "status_at_launch": "pending",
@@ -637,21 +1044,28 @@ def test_main_keeps_final_uuid_probe_adjacent_to_tmux_spawn(monkeypatch, tmp_pat
                     "training_exit_status": 0,
                     "tee_exit_status": 0,
                     "valid_launch_bound_training_summary": True,
+                    "exact_launch_manifest_still_matches": True,
                     "clean_pushed_source_at_receipt": True,
                 },
+                "training_job_lock_release": (
+                    "after_exit_receipt_publication_for_completed_or_failed_pipeline"
+                ),
             }
-            assert manifest["child_environment"]["GENMOL_TRAIN_SUMMARY_PATH"] == str(
-                summary_path
+            assert manifest["launch_manifest_schema_version"] == 1
+            assert manifest["cuda_visible_device_uuids"] == ["GPU-idle"]
+            assert manifest["matched_panel_spec"]["execution"]["mode"] == (
+                "single_job_lease_with_registered_order_policy"
             )
-            assert manifest["child_environment"][
-                "GENMOL_TRAIN_EXPECTED_FINAL_CHECKPOINT_PATH"
-            ] == str(checkpoint_path)
-            assert (
-                manifest["child_environment"][
-                    "GENMOL_TRAIN_EXPECTED_SUMMARY_SCHEMA_VERSION"
-                ]
-                == "2"
-            )
+            manifest_sha256 = launcher.hashlib.sha256(
+                manifest_path.read_bytes()
+            ).hexdigest()
+            assert manifest_sha256 in command[-1]
+            assert str(manifest_path) in command[-1]
+            assert '["GPU-idle"]' in command[-1]
+            lock = manifest["single_training_job_lock"]
+            assert lock["acquired_before_any_gpu_probe"] is True
+            assert lock["sha256"] in command[-1]
+            assert lock["path"] in command[-1]
             return subprocess.CompletedProcess(command, 0)
         raise AssertionError(f"unexpected subprocess: {command}")
 

@@ -10,6 +10,41 @@ from scripts import train as train_entrypoint
 from scripts.train import checkpoint_startup_mode
 
 
+def _launch_manifest_fixture(tmp_path, selected_gpu_uuids):
+    path = tmp_path / "launch_manifest.json"
+    manifest = {
+        "launch_manifest_schema_version": 1,
+        "user_requested_gpu_count": len(selected_gpu_uuids),
+        "cuda_visible_device_uuids": list(selected_gpu_uuids),
+    }
+    payload = (
+        json.dumps(manifest, indent=2, sort_keys=True, allow_nan=False) + "\n"
+    ).encode("utf-8")
+    path.write_bytes(payload)
+    digest = train_entrypoint.hashlib.sha256(payload).hexdigest()
+    snapshot, parsed = train_entrypoint._validate_launch_manifest(
+        path,
+        expected_sha256=digest,
+        expected_selected_gpu_uuids=list(selected_gpu_uuids),
+    )
+    assert parsed == manifest
+    return path, digest, snapshot
+
+
+def _bind_launch_manifest(contract, path, digest, snapshot, selected_gpu_uuids):
+    selected_json = json.dumps(list(selected_gpu_uuids), separators=(",", ":"))
+    contract.update(
+        {
+            "GENMOL_TRAIN_LAUNCH_MANIFEST_PATH": str(path),
+            "GENMOL_TRAIN_EXPECTED_LAUNCH_MANIFEST_SHA256": digest,
+            "GENMOL_TRAIN_SELECTED_GPU_UUIDS_JSON": selected_json,
+            "launch_manifest_path": path,
+            "launch_manifest_snapshot": snapshot,
+            "selected_gpu_uuids": list(selected_gpu_uuids),
+        }
+    )
+
+
 def test_existing_training_checkpoint_takes_precedence_over_warm_start():
     assert checkpoint_startup_mode("step-100.ckpt", "mdlm.ckpt") == "resume"
 
@@ -33,6 +68,51 @@ def test_partial_pilot_environment_is_rejected(monkeypatch):
 
     with pytest.raises(RuntimeError, match="partial or unexpected"):
         train_entrypoint._pilot_environment_contract()
+
+
+def test_pilot_launch_manifest_requires_exact_raw_hash_and_selected_uuids(tmp_path):
+    selected_gpu_uuids = ["GPU-test-a", "GPU-test-b"]
+    path, digest, snapshot = _launch_manifest_fixture(tmp_path, selected_gpu_uuids)
+
+    assert snapshot["sha256"] == digest
+    with pytest.raises(RuntimeError, match="raw SHA-256"):
+        train_entrypoint._validate_launch_manifest(
+            path,
+            expected_sha256="0" * 64,
+            expected_selected_gpu_uuids=selected_gpu_uuids,
+        )
+
+    mutated = {
+        "launch_manifest_schema_version": 1,
+        "user_requested_gpu_count": 2,
+        "cuda_visible_device_uuids": ["GPU-test-a", "GPU-other"],
+    }
+    path.write_text(
+        json.dumps(mutated, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    mutated_digest = train_entrypoint.hashlib.sha256(path.read_bytes()).hexdigest()
+    with pytest.raises(RuntimeError, match="selected GPU UUIDs disagree"):
+        train_entrypoint._validate_launch_manifest(
+            path,
+            expected_sha256=mutated_digest,
+            expected_selected_gpu_uuids=selected_gpu_uuids,
+        )
+
+
+def test_pilot_selected_uuid_contract_must_equal_actual_cuda_exposure(monkeypatch):
+    selected_gpu_uuids = ["GPU-test-a", "GPU-test-b"]
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-test-a,GPU-test-b")
+    monkeypatch.setenv("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+
+    train_entrypoint._validate_selected_gpu_exposure(selected_gpu_uuids)
+
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-test-b,GPU-test-a")
+    with pytest.raises(RuntimeError, match="CUDA_VISIBLE_DEVICES"):
+        train_entrypoint._validate_selected_gpu_exposure(selected_gpu_uuids)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-test-a,GPU-test-b")
+    monkeypatch.setenv("CUDA_DEVICE_ORDER", "FASTEST_FIRST")
+    with pytest.raises(RuntimeError, match="CUDA_DEVICE_ORDER"):
+        train_entrypoint._validate_selected_gpu_exposure(selected_gpu_uuids)
 
 
 def test_pilot_streaming_partition_accepts_parent_and_lightning_child(
@@ -194,6 +274,10 @@ def test_pilot_config_digest_is_checked_and_recorded_once(tmp_path, monkeypatch)
     summary_path = tmp_path / "training_summary.json"
     final_checkpoint_path = checkpoint_dir / "10.ckpt"
     argv = ["/repo/scripts/train.py", "seed=7"]
+    selected_gpu_uuids = ["GPU-test-a", "GPU-test-b"]
+    manifest_path, manifest_sha256, manifest_snapshot = _launch_manifest_fixture(
+        tmp_path, selected_gpu_uuids
+    )
     contract = {
         "GENMOL_TRAIN_EXPECTED_SOURCE_REVISION": "a" * 40,
         "GENMOL_TRAIN_EXPECTED_CONFIG_SHA256": (
@@ -205,11 +289,18 @@ def test_pilot_config_digest_is_checked_and_recorded_once(tmp_path, monkeypatch)
         "GENMOL_TRAIN_RUNTIME_CONFIG_PATH": str(runtime_path),
         "expected_max_steps": 10,
         "expected_world_size": 2,
-        "summary_schema_version": 2,
+        "summary_schema_version": train_entrypoint._TRAINING_SUMMARY_SCHEMA_VERSION,
         "runtime_path": runtime_path,
         "summary_path": summary_path,
         "final_checkpoint_path": final_checkpoint_path,
     }
+    _bind_launch_manifest(
+        contract,
+        manifest_path,
+        manifest_sha256,
+        manifest_snapshot,
+        selected_gpu_uuids,
+    )
     monkeypatch.setattr(train_entrypoint, "_PILOT_CONTRACT", contract)
     monkeypatch.setattr(
         train_entrypoint,
@@ -218,6 +309,8 @@ def test_pilot_config_digest_is_checked_and_recorded_once(tmp_path, monkeypatch)
     )
     monkeypatch.setattr(sys, "argv", argv)
     monkeypatch.setenv("PYTHONHASHSEED", "7")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", ",".join(selected_gpu_uuids))
+    monkeypatch.setenv("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
     monkeypatch.delenv("LOCAL_RANK", raising=False)
 
     first = train_entrypoint._validate_and_record_pilot_config(config)
@@ -229,6 +322,9 @@ def test_pilot_config_digest_is_checked_and_recorded_once(tmp_path, monkeypatch)
         first["resolved_training_config_sha256"]
         == contract["GENMOL_TRAIN_EXPECTED_CONFIG_SHA256"]
     )
+    assert first["schema_version"] == train_entrypoint._RUNTIME_CONFIG_SCHEMA_VERSION
+    assert first["launch_manifest"]["sha256"] == manifest_sha256
+    assert first["launch_manifest"]["selected_gpu_uuids"] == selected_gpu_uuids
 
     contract["GENMOL_TRAIN_EXPECTED_CONFIG_SHA256"] = "b" * 64
     with pytest.raises(RuntimeError, match="launch-pinned config digest"):
@@ -294,6 +390,10 @@ def _completion_fixture(tmp_path, monkeypatch):
         }
     )
     resolved = OmegaConf.to_container(config, resolve=True, enum_to_str=True)
+    selected_gpu_uuids = ["GPU-test-a", "GPU-test-b"]
+    manifest_path, manifest_sha256, manifest_snapshot = _launch_manifest_fixture(
+        tmp_path, selected_gpu_uuids
+    )
     contract = {
         "GENMOL_TRAIN_EXPECTED_SOURCE_REVISION": "a" * 40,
         "GENMOL_TRAIN_EXPECTED_CONFIG_SHA256": (
@@ -309,6 +409,13 @@ def _completion_fixture(tmp_path, monkeypatch):
         "summary_path": summary_path,
         "final_checkpoint_path": checkpoint_path,
     }
+    _bind_launch_manifest(
+        contract,
+        manifest_path,
+        manifest_sha256,
+        manifest_snapshot,
+        selected_gpu_uuids,
+    )
     monkeypatch.setattr(train_entrypoint, "_PILOT_CONTRACT", contract)
     monkeypatch.setattr(
         train_entrypoint,
@@ -317,6 +424,8 @@ def _completion_fixture(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(sys, "argv", argv)
     monkeypatch.setenv("PYTHONHASHSEED", "7")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", ",".join(selected_gpu_uuids))
+    monkeypatch.setenv("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
     monkeypatch.delenv("LOCAL_RANK", raising=False)
     preflight = train_entrypoint._validate_and_record_pilot_config(config)
     health_callback = train_entrypoint._PilotFiniteLossCallback()
@@ -426,6 +535,13 @@ def test_pilot_completion_summary_binds_and_verifies_every_artifact(
     assert (
         summary["training_argv_sha256"] == contract["GENMOL_TRAIN_EXPECTED_ARGV_SHA256"]
     )
+    assert summary["launch_manifest"]["sha256"] == contract[
+        "GENMOL_TRAIN_EXPECTED_LAUNCH_MANIFEST_SHA256"
+    ]
+    assert summary["launch_manifest"]["selected_gpu_uuids"] == [
+        "GPU-test-a",
+        "GPU-test-b",
+    ]
     assert summary["runtime_config"]["sha256"]
     assert summary["final_checkpoint"]["sha256"]
     checkpoint_audit = summary["final_checkpoint"]["semantic_audit"]
@@ -556,6 +672,36 @@ def test_pilot_completion_rejects_nonfinite_model_or_ema_state(
         model.ema.shadow_params = [torch.tensor([float("inf")])]
 
     with pytest.raises(FloatingPointError, match="non-finite"):
+        train_entrypoint._write_pilot_training_summary(
+            config=config,
+            trainer=trainer,
+            model=model,
+            preflight_record=preflight,
+            startup_mode="warm_start",
+            warm_start_report=warm_start,
+        )
+
+
+def test_pilot_completion_rejects_launch_manifest_changed_after_preflight(
+    tmp_path, monkeypatch
+):
+    config, contract, preflight, trainer, model, warm_start = _completion_fixture(
+        tmp_path, monkeypatch
+    )
+    contract["launch_manifest_path"].write_text(
+        json.dumps(
+            {
+                "launch_manifest_schema_version": 1,
+                "user_requested_gpu_count": 2,
+                "cuda_visible_device_uuids": ["GPU-test-a", "GPU-replacement"],
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="launch manifest raw SHA-256"):
         train_entrypoint._write_pilot_training_summary(
             config=config,
             trainer=trainer,

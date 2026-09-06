@@ -75,12 +75,17 @@ def _candidate_lock(*, startup_mode: str = "warm_start") -> dict:
             "runtime_config": {
                 "relative_path": "output/udlm/candidate/runtime_config.json",
                 "sha256": "6" * 64,
-                "schema_version": 1,
+                "schema_version": gate.RUNTIME_CONFIG_SCHEMA_VERSION,
+            },
+            "launch_manifest": {
+                "relative_path": "output/udlm/candidate/launch_manifest.json",
+                "sha256": "9" * 64,
+                "schema_version": gate.LAUNCH_MANIFEST_SCHEMA_VERSION,
             },
             "resolved_training_config_sha256": "7" * 64,
             "training_argv_sha256": "8" * 64,
             "checkpoint": {
-                "relative_path": "output/udlm/candidate/final.ckpt",
+                "relative_path": "output/udlm/candidate/checkpoints/500.ckpt",
                 "sha256": "4" * 64,
                 "size_bytes": 1234,
                 "global_step": 500,
@@ -147,6 +152,469 @@ def _candidate_lock(*, startup_mode: str = "warm_start") -> dict:
 
 def _json_bytes(value: dict) -> bytes:
     return (json.dumps(value, sort_keys=True) + "\n").encode()
+
+
+def _stable_snapshot(path: Path) -> dict:
+    observed = path.stat()
+    return {
+        "path": str(path),
+        "device": observed.st_dev,
+        "inode": observed.st_ino,
+        "mode": observed.st_mode,
+        "link_count": observed.st_nlink,
+        "size_bytes": observed.st_size,
+        "mtime_ns": observed.st_mtime_ns,
+        "ctime_ns": observed.st_ctime_ns,
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "stable_regular_file_verified": True,
+    }
+
+
+def _write_valid_training_evidence(
+    tmp_path: Path,
+    candidate_lock: dict,
+    *,
+    mutate_manifest=None,
+    mutate_runtime=None,
+    mutate_summary=None,
+    mutate_receipt=None,
+) -> dict:
+    training = candidate_lock["training"]
+    manifest_path = tmp_path / training["launch_manifest"]["relative_path"]
+    runtime_path = tmp_path / training["runtime_config"]["relative_path"]
+    summary_path = tmp_path / training["training_summary"]["relative_path"]
+    receipt_path = tmp_path / training["exit_receipt"]["relative_path"]
+    checkpoint_path = tmp_path / training["checkpoint"]["relative_path"]
+    manifest_path.parent.mkdir(parents=True)
+
+    resolved_config = {
+        "data": "safe",
+        "seed": 7,
+        "training": {
+            "ema": 0.9999,
+            "udlm": {
+                "prior_variant": "schedule_uniform",
+                "exclude_special_tokens": True,
+            },
+        },
+        "loader": {
+            "batch_size": 2046,
+            "global_batch_size": 2046,
+            "num_workers": 1,
+        },
+        "trainer": {
+            "devices": 1,
+            "num_nodes": 1,
+            "max_steps": 500,
+            "accumulate_grad_batches": 1,
+        },
+        "callback": {"dirpath": str(manifest_path.parent / "checkpoints")},
+    }
+    training_argv = ["/repo/scripts/train.py", "seed=7"]
+    resolved_config_sha = gate.canonical_json_sha256(resolved_config)
+    training_argv_sha = gate.canonical_json_sha256(training_argv)
+    training["resolved_training_config_sha256"] = resolved_config_sha
+    training["training_argv_sha256"] = training_argv_sha
+
+    gpu_state = {
+        "physical_index": 7,
+        "uuid": "GPU-synthetic-0001",
+        "name": "Synthetic Accelerator",
+        "memory_used_mib": 1000,
+        "memory_total_mib": 81920,
+        "utilization_percent": 0,
+        "compute_mode": "Default",
+        "compute_processes": [],
+    }
+    panel = {
+        "schema_version": 1,
+        "purpose": "matched_R_S_E_UDLM_training_pilot",
+        "execution": {
+            "mode": "single_job_lease_with_registered_order_policy",
+            "maximum_concurrent_training_jobs": 1,
+            "concurrency_enforcement": "atomic_global_worktree_training_job_lock",
+            "registered_variant_order": [
+                "udlm",
+                "schedule_uniform",
+                "udlm_categorical",
+            ],
+            "advance_policy": "operator_validates_successful_predecessor_receipt",
+            "predecessor_receipt_bound_in_each_manifest": False,
+        },
+        "registered_treatments": [
+            {
+                "training_variant": "udlm",
+                "hydra_config_name": "udlm",
+                "udlm_prior_variant": "release_uniform",
+                "comparison_role": "faithful_release_control",
+            },
+            {
+                "training_variant": "schedule_uniform",
+                "hydra_config_name": "udlm",
+                "udlm_prior_variant": "schedule_uniform",
+                "comparison_role": "schedule_repair_uniform_control",
+            },
+            {
+                "training_variant": "udlm_categorical",
+                "hydra_config_name": "udlm_categorical",
+                "udlm_prior_variant": "empirical_frequency",
+                "comparison_role": "empirical_prior_treatment",
+            },
+        ],
+        "common_training_contract": {
+            "source_revision": "a" * 40,
+            "initialization_mode": "verified_mdlm_ema_warm_start",
+            "initialization_checkpoint_path": "/synthetic/mdlm.ckpt",
+            "initialization_checkpoint_sha256": (
+                gate.EXPECTED_BASELINE_CHECKPOINT_SHA256
+            ),
+            "requested_gpu_count": 1,
+            "max_steps": 500,
+            "global_batch_size": 2046,
+            "micro_batch_size_per_process": 2046,
+            "accumulate_grad_batches": 1,
+            "effective_global_batch_size": 2046,
+            "num_workers": 1,
+            "seed": 7,
+            "exclude_special_tokens": True,
+            "common_resolved_config_sha256": gate.matched_panel_config_sha256(
+                resolved_config
+            ),
+        },
+        "common_gpu_safety_policy": {
+            "max_utilization_percent": 10,
+            "utilization_comparison": "strictly_less_than",
+            "min_free_memory_mib": 30000,
+            "active_compute_processes_allowed": False,
+            "compute_mode_prohibited_allowed": False,
+            "physical_gpu_identity_is_per_run_provenance": True,
+        },
+    }
+    lock_path = tmp_path / "output/udlm/.single_training_job.lock"
+    lock_record = {
+        "schema_version": 1,
+        "status": "held",
+        "purpose": "enforce_one_R_S_E_pilot_training_job_at_a_time",
+        "source_revision": "a" * 40,
+        "run_name": "synthetic-candidate",
+        "training_variant": "schedule_uniform",
+        "owner_token": "b" * 64,
+        "launcher_pid_at_acquisition": 1234,
+        "acquired_at_utc": "2026-09-06T00:00:00+00:00",
+        "owner_process_exit_does_not_make_lock_stale": True,
+        "stale_lock_policy": "fail_closed_and_require_manual_review",
+        "release_policy": (
+            "exact_owner_lock_only_after_receipt_or_before_tmux_handoff_failure"
+        ),
+    }
+    lock_bytes = (
+        json.dumps(lock_record, indent=2, sort_keys=True, allow_nan=False) + "\n"
+    ).encode()
+    lock_path.write_bytes(lock_bytes)
+    lock_snapshot = _stable_snapshot(lock_path)
+    manifest = {
+        "launch_manifest_schema_version": gate.LAUNCH_MANIFEST_SCHEMA_VERSION,
+        "created_at": "2026-09-06T00:00:00+00:00",
+        "purpose": "bounded UDLM training pilot",
+        "gpu_selection_schema_version": 2,
+        "git_sha": "a" * 40,
+        "source_revision_before_final_gpu_probe": "a" * 40,
+        "run_name": "synthetic-candidate",
+        "training_variant": "schedule_uniform",
+        "hydra_config_name": "udlm",
+        "udlm_prior_variant": "schedule_uniform",
+        "udlm_comparison_role": "schedule_repair_uniform_control",
+        "matched_panel_spec": panel,
+        "matched_panel_spec_sha256": gate.canonical_json_sha256(panel),
+        "matched_panel_variant_position": 1,
+        "single_training_job_lock": {
+            "path": str(lock_path),
+            "sha256": lock_snapshot["sha256"],
+            "record": lock_record,
+            "acquired_before_any_gpu_probe": True,
+            "stale_lock_policy": "fail_closed_and_require_manual_review",
+            "release_owner": "pilot_exit_receipt_writer_after_publication",
+        },
+        "tmux_session": "genmol-udlm-synthetic-candidate",
+        "user_requested_gpu_count": 1,
+        "gpu_selection_method": "dynamic_idle_discovery",
+        "gpu_inventory_scope": "all_nvidia_gpus",
+        "inventory_snapshot_completed_at_utc": "2026-09-06T00:00:00+00:00",
+        "gpu_inventory_at_selection": [gpu_state],
+        "initially_selected_gpu_states": [gpu_state],
+        "logical_cuda_devices": [0],
+        "physical_gpu_indices": [7],
+        "cuda_visible_device_uuids": ["GPU-synthetic-0001"],
+        "final_uuid_probes_completed_at_utc": "2026-09-06T00:00:01+00:00",
+        "gpu_states_at_final_uuid_probe": [gpu_state],
+        "gpu_safety_policy": {
+            "max_utilization_percent": 10,
+            "utilization_comparison": "strictly_less_than",
+            "min_free_memory_mib": 30000,
+            "active_compute_processes_allowed": False,
+            "compute_mode_prohibited_allowed": False,
+        },
+        "training_argv": training_argv,
+        "training_argv_sha256": training_argv_sha,
+        "resolved_training_config": resolved_config,
+        "resolved_training_config_sha256": resolved_config_sha,
+        "runtime_config_path": str(runtime_path),
+        "training_summary_path": str(summary_path),
+        "training_summary_schema_version": gate.TRAINING_SUMMARY_SCHEMA_VERSION,
+        "pilot_exit_status_path": str(receipt_path),
+        "pilot_exit_status_schema_version": gate.PILOT_EXIT_STATUS_SCHEMA_VERSION,
+        "expected_final_checkpoint_path": str(checkpoint_path),
+        "launch_manifest_path": str(manifest_path),
+        "launch_manifest_raw_sha256_transport": (
+            "passed_out_of_band_to_training_and_receipt_to_avoid_self_hash"
+        ),
+        "completion_contract": {
+            "status_at_launch": "pending",
+            "complete_only_if_valid_training_summary_exists": True,
+            "complete_only_if_successful_exit_receipt_exists": True,
+            "valid_training_summary_and_successful_exit_receipt_both_required": True,
+            "missing_summary_after_tmux_exit_means": "incomplete",
+            "absent_exit_receipt_means": "incomplete",
+            "successful_exit_receipt_requires": {
+                "training_exit_status": 0,
+                "tee_exit_status": 0,
+                "valid_launch_bound_training_summary": True,
+                "exact_launch_manifest_still_matches": True,
+                "clean_pushed_source_at_receipt": True,
+            },
+        },
+        "log_path": str(tmp_path / "output/logs/synthetic.log"),
+        "log_reserved_exclusively_before_manifest": True,
+        "checkpoint": "/synthetic/mdlm.ckpt",
+        "checkpoint_sha256": gate.EXPECTED_BASELINE_CHECKPOINT_SHA256,
+        "seed": 7,
+        "max_steps": 500,
+        "global_batch_size": 2046,
+        "micro_batch_size_per_process": 2046,
+        "accumulate_grad_batches": 1,
+        "effective_global_batch_size": 2046,
+        "exclude_special_tokens": True,
+        "dry_run": False,
+    }
+    if mutate_manifest is not None:
+        mutate_manifest(manifest)
+    manifest_path.write_bytes(_json_bytes(manifest))
+    manifest_snapshot = _stable_snapshot(manifest_path)
+    training["launch_manifest"]["sha256"] = manifest_snapshot["sha256"]
+    manifest_claim = {
+        **manifest_snapshot,
+        "selected_gpu_uuids": ["GPU-synthetic-0001"],
+    }
+
+    completion_contract = {
+        "summary_schema_version": gate.TRAINING_SUMMARY_SCHEMA_VERSION,
+        "summary_path": str(summary_path),
+        "final_checkpoint_path": str(checkpoint_path),
+        "expected_max_steps": 500,
+        "expected_world_size": 1,
+        "fail_on_nonfinite_loss": True,
+        "backward_anomaly_detection": True,
+    }
+    runtime = {
+        "schema_version": gate.RUNTIME_CONFIG_SCHEMA_VERSION,
+        "status": "preflight_completed",
+        "source_revision": "a" * 40,
+        "source": {"head": "a" * 40, "upstream": "a" * 40},
+        "resolved_training_config": resolved_config,
+        "resolved_training_config_sha256": resolved_config_sha,
+        "training_argv": training_argv,
+        "observed_training_argv": training_argv,
+        "training_argv_sha256": training_argv_sha,
+        "launch_manifest": manifest_claim,
+        "completion_contract": completion_contract,
+        "python_environment": {"PYTHONHASHSEED": "7"},
+    }
+    if mutate_runtime is not None:
+        mutate_runtime(runtime)
+    runtime_path.write_bytes(_json_bytes(runtime))
+    runtime_snapshot = _stable_snapshot(runtime_path)
+    training["runtime_config"]["sha256"] = runtime_snapshot["sha256"]
+
+    training_accounting = {
+        "training_seed": 7,
+        "optimizer_updates": 500,
+        "world_size": 1,
+        "micro_batch_size_per_rank": 2046,
+        "accumulate_grad_batches": 1,
+        "effective_global_examples_per_optimizer_step": 2046,
+        "total_requested_example_exposures": 1_023_000,
+        "hosted_stream_rank_partition_policy": (
+            "huggingface_split_dataset_by_node_disjoint_rank_streams"
+        ),
+        "trainable_parameter_counts": {
+            "base_backbone": 86_000_000,
+            "time_conditioner": 787_968,
+            "total": 86_787_968,
+        },
+    }
+    summary = {
+        "schema_version": gate.TRAINING_SUMMARY_SCHEMA_VERSION,
+        "status": "completed",
+        "completed_at_utc": "2026-09-06T00:10:00+00:00",
+        "source_revision": "a" * 40,
+        "source": {"head": "a" * 40, "upstream": "a" * 40},
+        "resolved_training_config_sha256": resolved_config_sha,
+        "training_argv_sha256": training_argv_sha,
+        "launch_manifest": manifest_claim,
+        "runtime_config": {
+            **runtime_snapshot,
+            "schema_version": gate.RUNTIME_CONFIG_SCHEMA_VERSION,
+            "record_sha256": gate.canonical_json_sha256(runtime),
+        },
+        "completion_contract": completion_contract,
+        "observed_training_state": {
+            "global_rank": 0,
+            "global_step": 500,
+            "world_size": 1,
+        },
+        "training_accounting": training_accounting,
+        "final_checkpoint": {
+            "path": str(checkpoint_path),
+            "sha256": "4" * 64,
+            "size_bytes": 1234,
+            "semantic_audit": {
+                "global_step": 500,
+                "ema": {"all_finite": True, "floating_tensor_count": 202},
+                "ema_metadata": _inference_weights()["ema"],
+                "live_ema_match": {
+                    "exact_tensor_values": True,
+                    "tensor_count": 202,
+                },
+                "live_model_match": {"exact_tensor_values": True},
+            },
+        },
+        "startup": {
+            "mode": "warm_start",
+            "verified_mdlm_warm_start_report": {
+                "source_sha256": gate.EXPECTED_BASELINE_CHECKPOINT_SHA256,
+                "weights": "ema",
+            },
+        },
+    }
+    if mutate_summary is not None:
+        mutate_summary(summary)
+    summary_path.write_bytes(_json_bytes(summary))
+    summary_snapshot = _stable_snapshot(summary_path)
+    training["training_summary"]["sha256"] = summary_snapshot["sha256"]
+
+    validated_bindings = {
+        "schema_version": gate.TRAINING_SUMMARY_SCHEMA_VERSION,
+        "source_revision": "a" * 40,
+        "resolved_training_config_sha256": resolved_config_sha,
+        "training_argv_sha256": training_argv_sha,
+        "launch_manifest_path": str(manifest_path),
+        "launch_manifest_sha256": manifest_snapshot["sha256"],
+        "selected_gpu_uuids": ["GPU-synthetic-0001"],
+        "observed_global_step": 500,
+        "observed_world_size": 1,
+        "training_accounting": training_accounting,
+        "ema_metadata": _inference_weights()["ema"],
+        "final_checkpoint_path": str(checkpoint_path),
+        "final_checkpoint_sha256": "4" * 64,
+        "startup_mode": "warm_start",
+    }
+    receipt = {
+        "schema_version": gate.PILOT_EXIT_STATUS_SCHEMA_VERSION,
+        "status": "completed",
+        "overall_status": "completed",
+        "recorded_at_utc": "2026-09-06T00:10:01+00:00",
+        "process_exit_status": 0,
+        "expected_contract": {
+            "training_summary_schema_version": gate.TRAINING_SUMMARY_SCHEMA_VERSION,
+            "source_revision": "a" * 40,
+            "resolved_training_config_sha256": resolved_config_sha,
+            "training_argv_sha256": training_argv_sha,
+            "launch_manifest_path": str(manifest_path),
+            "launch_manifest_sha256": manifest_snapshot["sha256"],
+            "selected_gpu_uuids": ["GPU-synthetic-0001"],
+            "training_job_lock_path": str(lock_path),
+            "training_job_lock_sha256": lock_snapshot["sha256"],
+            "max_steps": 500,
+            "world_size": 1,
+            "training_summary_path": str(summary_path),
+            "final_checkpoint_path": str(checkpoint_path),
+            "initialization_checkpoint_sha256": (
+                gate.EXPECTED_BASELINE_CHECKPOINT_SHA256
+            ),
+        },
+        "pipeline": {
+            "training": {"shell_exit_status": 0},
+            "tee": {"shell_exit_status": 0},
+            "pipefail_shell_exit_status": 0,
+        },
+        "source_at_receipt": {"verified": True},
+        "launch_manifest": {
+            "path": str(manifest_path),
+            "present": True,
+            "matches_expected_raw_sha256": True,
+            "selected_gpu_uuids_match_expected": True,
+            "matches_training_summary_snapshot": True,
+            "matches_runtime_config_snapshot": True,
+            "valid_and_launch_bound": True,
+            "expected_selected_gpu_uuids": ["GPU-synthetic-0001"],
+            "observed_selected_gpu_uuids": ["GPU-synthetic-0001"],
+            "artifact": manifest_snapshot,
+            "validation_error": None,
+        },
+        "training_job_lock": {
+            "path": str(lock_path),
+            "present": True,
+            "expected_sha256": lock_snapshot["sha256"],
+            "matches_expected_raw_sha256": True,
+            "matches_launch_manifest_binding": True,
+            "valid_and_launch_bound_before_receipt_publication": True,
+            "artifact": lock_snapshot,
+            "record": lock_record,
+            "release_policy": (
+                "publish_receipt_then_unlink_only_same_stat_identity_and_sha256"
+            ),
+            "release_result_not_claimed_inside_pre_release_receipt": True,
+            "validation_error": None,
+        },
+        "training_summary": {
+            "valid_and_launch_bound": True,
+            "artifact": summary_snapshot,
+            "validated_bindings": validated_bindings,
+        },
+        "final_checkpoint": {
+            "matches_training_summary_snapshot": True,
+            "artifact": {"sha256": "4" * 64, "size_bytes": 1234},
+        },
+        "runtime_config": {
+            "matches_training_summary_snapshot": True,
+            "semantic_validation_passed": True,
+            "artifact": runtime_snapshot,
+        },
+        "completion_requirements": {
+            "training_exit_zero": True,
+            "tee_exit_zero": True,
+            "training_summary_valid_and_launch_bound": True,
+            "launch_manifest_matches_summary_runtime_and_launch": True,
+            "training_job_lock_valid_before_receipt_publication": True,
+            "runtime_config_matches_summary_and_launch": True,
+            "final_checkpoint_matches_training_summary": True,
+            "clean_pushed_source_still_matches_launch": True,
+            "all_must_hold": True,
+        },
+    }
+    if mutate_receipt is not None:
+        mutate_receipt(receipt)
+    receipt_path.write_bytes(_json_bytes(receipt))
+    training["exit_receipt"]["sha256"] = hashlib.sha256(
+        receipt_path.read_bytes()
+    ).hexdigest()
+    return {
+        "manifest": manifest,
+        "runtime": runtime,
+        "summary": summary,
+        "receipt": receipt,
+        "training_accounting": training_accounting,
+    }
 
 
 def _completed_pilot_attempt(
@@ -684,6 +1152,23 @@ def test_lock_rejects_final_seed_leak_and_non_ema_weights(protocol):
     with pytest.raises(gate.GateValidationError, match="receipt schema version"):
         gate.validate_candidate_lock(candidate_lock, protocol)
 
+    candidate_lock = _candidate_lock()
+    candidate_lock["training"]["runtime_config"]["schema_version"] = 1
+    with pytest.raises(gate.GateValidationError, match="runtime-config schema version"):
+        gate.validate_candidate_lock(candidate_lock, protocol)
+
+    candidate_lock = _candidate_lock()
+    candidate_lock["training"]["launch_manifest"]["schema_version"] = 2
+    with pytest.raises(gate.GateValidationError, match="launch-manifest schema version"):
+        gate.validate_candidate_lock(candidate_lock, protocol)
+
+    candidate_lock = _candidate_lock()
+    candidate_lock["training"]["launch_manifest"]["relative_path"] = (
+        "output/udlm/candidate/not_the_launch.json"
+    )
+    with pytest.raises(gate.GateValidationError, match="launch_manifest.json"):
+        gate.validate_candidate_lock(candidate_lock, protocol)
+
 
 def test_scratch_lock_has_narrow_single_trajectory_scope(protocol):
     candidate_lock = _candidate_lock(startup_mode="scratch")
@@ -1121,147 +1606,18 @@ def test_training_summary_and_exit_receipt_are_joined_to_lock(
 ):
     monkeypatch.setattr(gate, "REPOSITORY_ROOT", tmp_path)
     candidate_lock = _candidate_lock()
-    summary_path = (
-        tmp_path / candidate_lock["training"]["training_summary"]["relative_path"]
-    )
-    receipt_path = (
-        tmp_path / candidate_lock["training"]["exit_receipt"]["relative_path"]
-    )
-    runtime_path = (
-        tmp_path / candidate_lock["training"]["runtime_config"]["relative_path"]
-    )
-    summary_path.parent.mkdir(parents=True)
-    resolved_config = {
-        "data": "safe",
-        "seed": 7,
-        "training": {"ema": 0.9999},
-        "loader": {"batch_size": 2046, "global_batch_size": 2046},
-        "trainer": {
-            "devices": 1,
-            "num_nodes": 1,
-            "max_steps": 500,
-            "accumulate_grad_batches": 1,
-        },
-    }
-    training_argv = ["/repo/scripts/train.py", "seed=7"]
-    resolved_config_sha = gate.canonical_json_sha256(resolved_config)
-    training_argv_sha = gate.canonical_json_sha256(training_argv)
-    runtime = {
-        "schema_version": 1,
-        "status": "preflight_completed",
-        "source_revision": "a" * 40,
-        "resolved_training_config": resolved_config,
-        "resolved_training_config_sha256": resolved_config_sha,
-        "training_argv": training_argv,
-        "training_argv_sha256": training_argv_sha,
-    }
-    runtime_bytes = (json.dumps(runtime, sort_keys=True) + "\n").encode()
-    runtime_path.write_bytes(runtime_bytes)
-    runtime_sha = hashlib.sha256(runtime_bytes).hexdigest()
-    candidate_lock["training"]["runtime_config"]["sha256"] = runtime_sha
-    candidate_lock["training"]["resolved_training_config_sha256"] = resolved_config_sha
-    candidate_lock["training"]["training_argv_sha256"] = training_argv_sha
-    training_accounting = {
-        "training_seed": 7,
-        "optimizer_updates": 500,
-        "world_size": 1,
-        "micro_batch_size_per_rank": 2046,
-        "accumulate_grad_batches": 1,
-        "effective_global_examples_per_optimizer_step": 2046,
-        "total_requested_example_exposures": 1_023_000,
-        "hosted_stream_rank_partition_policy": (
-            "huggingface_split_dataset_by_node_disjoint_rank_streams"
-        ),
-        "trainable_parameter_counts": {
-            "base_backbone": 86_000_000,
-            "time_conditioner": 787_968,
-            "total": 86_787_968,
-        },
-    }
-    summary = {
-        "schema_version": gate.TRAINING_SUMMARY_SCHEMA_VERSION,
-        "status": "completed",
-        "source_revision": "a" * 40,
-        "resolved_training_config_sha256": resolved_config_sha,
-        "training_argv_sha256": training_argv_sha,
-        "runtime_config": {"sha256": runtime_sha},
-        "observed_training_state": {"global_step": 500, "world_size": 1},
-        "training_accounting": training_accounting,
-        "final_checkpoint": {
-            "sha256": "4" * 64,
-            "size_bytes": 1234,
-            "semantic_audit": {
-                "global_step": 500,
-                "ema": {
-                    "all_finite": True,
-                    "floating_tensor_count": 202,
-                },
-                "ema_metadata": _inference_weights()["ema"],
-                "live_ema_match": {
-                    "exact_tensor_values": True,
-                    "tensor_count": 202,
-                },
-                "live_model_match": {"exact_tensor_values": True},
-            },
-        },
-        "startup": {
-            "mode": "warm_start",
-            "verified_mdlm_warm_start_report": {
-                "source_sha256": gate.EXPECTED_BASELINE_CHECKPOINT_SHA256,
-                "weights": "ema",
-            },
-        },
-    }
-    summary_bytes = (json.dumps(summary, sort_keys=True) + "\n").encode()
-    summary_path.write_bytes(summary_bytes)
-    summary_sha = hashlib.sha256(summary_bytes).hexdigest()
-    candidate_lock["training"]["training_summary"]["sha256"] = summary_sha
-    receipt = {
-        "schema_version": gate.PILOT_EXIT_STATUS_SCHEMA_VERSION,
-        "status": "completed",
-        "overall_status": "completed",
-        "process_exit_status": 0,
-        "expected_contract": {
-            "source_revision": "a" * 40,
-            "resolved_training_config_sha256": resolved_config_sha,
-            "training_argv_sha256": training_argv_sha,
-            "max_steps": 500,
-            "world_size": 1,
-            "initialization_checkpoint_sha256": (
-                gate.EXPECTED_BASELINE_CHECKPOINT_SHA256
-            ),
-        },
-        "source_at_receipt": {"verified": True},
-        "training_summary": {
-            "valid_and_launch_bound": True,
-            "artifact": {"sha256": summary_sha},
-            "validated_bindings": {
-                "training_accounting": training_accounting,
-                "ema_metadata": _inference_weights()["ema"],
-            },
-        },
-        "final_checkpoint": {
-            "matches_training_summary_snapshot": True,
-            "artifact": {"sha256": "4" * 64, "size_bytes": 1234},
-        },
-        "runtime_config": {
-            "matches_training_summary_snapshot": True,
-            "semantic_validation_passed": True,
-            "artifact": {"sha256": runtime_sha},
-        },
-    }
-    receipt_bytes = (json.dumps(receipt, sort_keys=True) + "\n").encode()
-    receipt_path.write_bytes(receipt_bytes)
-    candidate_lock["training"]["exit_receipt"]["sha256"] = hashlib.sha256(
-        receipt_bytes
-    ).hexdigest()
+    documents = _write_valid_training_evidence(tmp_path, candidate_lock)
     normalized = gate.validate_candidate_lock(candidate_lock, protocol)
 
     evidence = gate.validate_training_evidence(normalized)
 
     assert evidence["ema_finite_and_checkpoint_bound"] is True
     assert evidence["successful_exit_receipt"] is True
-    assert evidence["training_accounting"] == training_accounting
+    assert evidence["training_accounting"] == documents["training_accounting"]
+    assert evidence["launch_manifest_sha256"] == candidate_lock["training"][
+        "launch_manifest"
+    ]["sha256"]
+    assert evidence["selected_gpu_uuids"] == ["GPU-synthetic-0001"]
     wrong_lock = copy.deepcopy(normalized)
     wrong_lock["parameter_counts"]["total_trainable"] += 1
     with pytest.raises(
@@ -1274,11 +1630,135 @@ def test_training_summary_and_exit_receipt_are_joined_to_lock(
         gate.GateValidationError, match="EMA metadata disagrees with lock"
     ):
         gate.validate_training_evidence(wrong_lock)
+    receipt = documents["receipt"]
     receipt["overall_status"] = "failed"
-    receipt_bytes = (json.dumps(receipt, sort_keys=True) + "\n").encode()
+    receipt_bytes = _json_bytes(receipt)
+    receipt_path = tmp_path / candidate_lock["training"]["exit_receipt"][
+        "relative_path"
+    ]
     receipt_path.write_bytes(receipt_bytes)
     normalized["receipt"]["sha256"] = hashlib.sha256(receipt_bytes).hexdigest()
     with pytest.raises(gate.GateValidationError, match="not completed"):
+        gate.validate_training_evidence(normalized)
+
+
+@pytest.mark.parametrize(
+    ("mutation_layer", "mutator", "error_match"),
+    [
+        (
+            "manifest_panel",
+            lambda document: document["matched_panel_spec"].__setitem__(
+                "purpose", "tampered"
+            ),
+            "matched-panel specification is unbound",
+        ),
+        (
+            "manifest_gpu_count",
+            lambda document: document["cuda_visible_device_uuids"].append(
+                "GPU-synthetic-0002"
+            ),
+            "count 2 disagrees with world size 1",
+        ),
+        (
+            "manifest_unsafe_gpu_threshold",
+            lambda document: document["gpu_safety_policy"].__setitem__(
+                "max_utilization_percent", 99
+            ),
+            "GPU safety policy is unexpected",
+        ),
+        (
+            "manifest_treatment_registry",
+            lambda document: (
+                document["matched_panel_spec"]["registered_treatments"][0].__setitem__(
+                    "comparison_role", "forged_control"
+                ),
+                document.__setitem__(
+                    "matched_panel_spec_sha256",
+                    gate.canonical_json_sha256(document["matched_panel_spec"]),
+                ),
+            ),
+            "matched-panel treatments are not canonical",
+        ),
+        (
+            "manifest_lock_record",
+            lambda document: document["single_training_job_lock"]["record"].__setitem__(
+                "owner_token", "c" * 64
+            ),
+            "training-job lock record digest is unbound",
+        ),
+        (
+            "runtime_gpu_claim",
+            lambda document: document["launch_manifest"].__setitem__(
+                "selected_gpu_uuids", ["GPU-synthetic-other"]
+            ),
+            "selected GPU UUIDs disagree with launch manifest",
+        ),
+        (
+            "summary_digest_claim",
+            lambda document: document["launch_manifest"].__setitem__(
+                "sha256", "0" * 64
+            ),
+            "summary launch-manifest evidence digest disagrees",
+        ),
+        (
+            "receipt_expected_gpu_claim",
+            lambda document: document["expected_contract"].__setitem__(
+                "selected_gpu_uuids", ["GPU-synthetic-other"]
+            ),
+            "exit receipt selected_gpu_uuids disagrees",
+        ),
+        (
+            "receipt_observed_gpu_claim",
+            lambda document: document["launch_manifest"].__setitem__(
+                "observed_selected_gpu_uuids", ["GPU-synthetic-other"]
+            ),
+            "observed_selected_gpu_uuids disagrees with manifest",
+        ),
+        (
+            "receipt_lock_claim",
+            lambda document: document["training_job_lock"].__setitem__(
+                "matches_launch_manifest_binding", False
+            ),
+            "receipt training-job lock matches_launch_manifest_binding must be true",
+        ),
+    ],
+)
+def test_launch_manifest_semantic_and_cross_artifact_tampering_fails_closed(
+    tmp_path,
+    monkeypatch,
+    protocol,
+    mutation_layer,
+    mutator,
+    error_match,
+):
+    repository = tmp_path / mutation_layer
+    monkeypatch.setattr(gate, "REPOSITORY_ROOT", repository)
+    candidate_lock = _candidate_lock()
+    keyword = mutation_layer.split("_", maxsplit=1)[0]
+    _write_valid_training_evidence(
+        repository,
+        candidate_lock,
+        **{f"mutate_{keyword}": mutator},
+    )
+    normalized = gate.validate_candidate_lock(candidate_lock, protocol)
+
+    with pytest.raises(gate.GateValidationError, match=error_match):
+        gate.validate_training_evidence(normalized)
+
+
+def test_launch_manifest_raw_digest_must_match_candidate_lock(
+    tmp_path, monkeypatch, protocol
+):
+    monkeypatch.setattr(gate, "REPOSITORY_ROOT", tmp_path)
+    candidate_lock = _candidate_lock()
+    _write_valid_training_evidence(tmp_path, candidate_lock)
+    normalized = gate.validate_candidate_lock(candidate_lock, protocol)
+    normalized["launch_manifest"]["sha256"] = "0" * 64
+
+    with pytest.raises(
+        gate.GateValidationError,
+        match="launch manifest digest disagrees with candidate lock",
+    ):
         gate.validate_training_evidence(normalized)
 
 

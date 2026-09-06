@@ -39,8 +39,12 @@ _PILOT_ENVIRONMENT_KEYS = {
     "GENMOL_TRAIN_EXPECTED_FINAL_CHECKPOINT_PATH",
     "GENMOL_TRAIN_EXPECTED_MAX_STEPS",
     "GENMOL_TRAIN_EXPECTED_WORLD_SIZE",
+    "GENMOL_TRAIN_LAUNCH_MANIFEST_PATH",
+    "GENMOL_TRAIN_EXPECTED_LAUNCH_MANIFEST_SHA256",
+    "GENMOL_TRAIN_SELECTED_GPU_UUIDS_JSON",
 }
-_TRAINING_SUMMARY_SCHEMA_VERSION = 2
+_RUNTIME_CONFIG_SCHEMA_VERSION = 2
+_TRAINING_SUMMARY_SCHEMA_VERSION = 3
 _HOSTED_STREAM_RANK_PARTITION_POLICY = (
     "huggingface_split_dataset_by_node_disjoint_rank_streams"
 )
@@ -65,6 +69,79 @@ def _canonical_json_sha256(value):
         allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def _strict_json_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise RuntimeError(f"duplicate JSON object key: {key!r}")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value):
+    raise RuntimeError(f"non-finite JSON constant: {value}")
+
+
+def _finite_json_float(value):
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise RuntimeError(f"non-finite JSON number: {value}")
+    return parsed
+
+
+def _strict_json_loads(payload, *, label):
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise RuntimeError(f"pilot {label} is not valid UTF-8") from error
+    try:
+        return json.loads(
+            text,
+            object_pairs_hook=_strict_json_pairs,
+            parse_constant=_reject_json_constant,
+            parse_float=_finite_json_float,
+        )
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"pilot {label} is not valid JSON") from error
+
+
+def _parse_selected_gpu_uuids(value):
+    try:
+        parsed = _strict_json_loads(
+            value.encode("utf-8"), label="selected GPU UUID contract"
+        )
+    except UnicodeEncodeError as error:
+        raise RuntimeError(
+            "GENMOL_TRAIN_SELECTED_GPU_UUIDS_JSON must be UTF-8 JSON"
+        ) from error
+    if (
+        not isinstance(parsed, list)
+        or not parsed
+        or any(
+            not isinstance(uuid, str)
+            or not uuid.startswith("GPU-")
+            or len(uuid) <= len("GPU-")
+            or "," in uuid
+            for uuid in parsed
+        )
+        or len(set(parsed)) != len(parsed)
+    ):
+        raise RuntimeError(
+            "GENMOL_TRAIN_SELECTED_GPU_UUIDS_JSON must be a nonempty array of "
+            "unique NVIDIA GPU UUID strings"
+        )
+    return parsed
+
+
+def _validate_selected_gpu_exposure(selected_gpu_uuids):
+    if os.environ.get("CUDA_VISIBLE_DEVICES") != ",".join(selected_gpu_uuids):
+        raise RuntimeError(
+            "CUDA_VISIBLE_DEVICES disagrees with the selected GPU UUID contract"
+        )
+    if os.environ.get("CUDA_DEVICE_ORDER") != "PCI_BUS_ID":
+        raise RuntimeError("CUDA_DEVICE_ORDER must be PCI_BUS_ID for the pilot")
 
 
 def _in_repository_artifact_path(value, *, suffix, label):
@@ -119,6 +196,7 @@ def _pilot_environment_contract():
     for key in (
         "GENMOL_TRAIN_EXPECTED_CONFIG_SHA256",
         "GENMOL_TRAIN_EXPECTED_ARGV_SHA256",
+        "GENMOL_TRAIN_EXPECTED_LAUNCH_MANIFEST_SHA256",
     ):
         if not re.fullmatch(r"[0-9a-f]{64}", present[key]):
             raise RuntimeError(f"{key} must be 64 lowercase hexadecimal digits")
@@ -143,7 +221,18 @@ def _pilot_environment_contract():
         suffix=".ckpt",
         label="final checkpoint path",
     )
-    if len({runtime_path, summary_path, final_checkpoint_path}) != 3:
+    launch_manifest_path = _in_repository_artifact_path(
+        present["GENMOL_TRAIN_LAUNCH_MANIFEST_PATH"],
+        suffix=".json",
+        label="launch manifest path",
+    )
+    if launch_manifest_path != summary_path.with_name("launch_manifest.json"):
+        raise RuntimeError(
+            "pilot launch manifest must be launch_manifest.json beside the summary"
+        )
+    if len(
+        {runtime_path, summary_path, final_checkpoint_path, launch_manifest_path}
+    ) != 4:
         raise RuntimeError("pilot completion artifact paths must be distinct")
     integer_fields = {
         "summary_schema_version": (
@@ -164,6 +253,14 @@ def _pilot_environment_contract():
         parsed_integers[output_name] = value
     if parsed_integers["expected_world_size"] not in (1, 2):
         raise RuntimeError("GENMOL_TRAIN_EXPECTED_WORLD_SIZE must be 1 or 2")
+    selected_gpu_uuids = _parse_selected_gpu_uuids(
+        present["GENMOL_TRAIN_SELECTED_GPU_UUIDS_JSON"]
+    )
+    if len(selected_gpu_uuids) != parsed_integers["expected_world_size"]:
+        raise RuntimeError(
+            "selected GPU UUID count disagrees with the expected world size"
+        )
+    _validate_selected_gpu_exposure(selected_gpu_uuids)
     python_environment = {
         key: value for key, value in os.environ.items() if key.startswith("PYTHON")
     }
@@ -188,12 +285,23 @@ def _pilot_environment_contract():
         "GENMOL_TRAIN_EXPECTED_ARGV_SHA256"
     ]:
         raise RuntimeError("pilot child argv disagrees with the launch manifest")
+    launch_manifest_snapshot, launch_manifest = _validate_launch_manifest(
+        launch_manifest_path,
+        expected_sha256=present[
+            "GENMOL_TRAIN_EXPECTED_LAUNCH_MANIFEST_SHA256"
+        ],
+        expected_selected_gpu_uuids=selected_gpu_uuids,
+    )
     return {
         **present,
         **parsed_integers,
         "runtime_path": runtime_path,
         "summary_path": summary_path,
         "final_checkpoint_path": final_checkpoint_path,
+        "launch_manifest_path": launch_manifest_path,
+        "launch_manifest_snapshot": launch_manifest_snapshot,
+        "launch_manifest": launch_manifest,
+        "selected_gpu_uuids": selected_gpu_uuids,
     }
 
 
@@ -294,6 +402,48 @@ def _stable_file_snapshot(path, *, capture_bytes=False):
         "stable_regular_file_verified": True,
     }
     return snapshot, None if payload is None else bytes(payload)
+
+
+def _validate_launch_manifest(path, *, expected_sha256, expected_selected_gpu_uuids):
+    snapshot, payload = _stable_file_snapshot(path, capture_bytes=True)
+    if snapshot["sha256"] != expected_sha256:
+        raise RuntimeError(
+            "pilot launch manifest raw SHA-256 disagrees with the launch contract"
+        )
+    manifest = _strict_json_loads(payload, label="launch manifest")
+    if not isinstance(manifest, dict):
+        raise RuntimeError("pilot launch manifest root must be a JSON object")
+    if manifest.get("cuda_visible_device_uuids") != expected_selected_gpu_uuids:
+        raise RuntimeError(
+            "pilot launch manifest selected GPU UUIDs disagree with the launch contract"
+        )
+    requested_gpu_count = manifest.get("user_requested_gpu_count")
+    if (
+        isinstance(requested_gpu_count, bool)
+        or not isinstance(requested_gpu_count, int)
+        or requested_gpu_count != len(expected_selected_gpu_uuids)
+    ):
+        raise RuntimeError(
+            "pilot launch manifest GPU count disagrees with its selected UUIDs"
+        )
+    return snapshot, manifest
+
+
+def _launch_manifest_evidence():
+    _validate_selected_gpu_exposure(_PILOT_CONTRACT["selected_gpu_uuids"])
+    snapshot, _manifest = _validate_launch_manifest(
+        _PILOT_CONTRACT["launch_manifest_path"],
+        expected_sha256=_PILOT_CONTRACT[
+            "GENMOL_TRAIN_EXPECTED_LAUNCH_MANIFEST_SHA256"
+        ],
+        expected_selected_gpu_uuids=_PILOT_CONTRACT["selected_gpu_uuids"],
+    )
+    if snapshot != _PILOT_CONTRACT["launch_manifest_snapshot"]:
+        raise RuntimeError("pilot launch manifest changed after process startup")
+    return {
+        **snapshot,
+        "selected_gpu_uuids": list(_PILOT_CONTRACT["selected_gpu_uuids"]),
+    }
 
 
 def _atomic_write_json_exclusive(path, value):
@@ -744,8 +894,9 @@ def _validate_and_record_pilot_config(config):
         )
     if os.environ["PYTHONHASHSEED"] != str(config.get('seed', 1)):
         raise RuntimeError("PYTHONHASHSEED disagrees with the resolved training seed")
+    launch_manifest_evidence = _launch_manifest_evidence()
     record = {
-        "schema_version": 1,
+        "schema_version": _RUNTIME_CONFIG_SCHEMA_VERSION,
         "status": "preflight_completed",
         "source_revision": expected_revision,
         "source": source,
@@ -756,6 +907,7 @@ def _validate_and_record_pilot_config(config):
         ],
         "resolved_training_config": resolved,
         "resolved_training_config_sha256": digest,
+        "launch_manifest": launch_manifest_evidence,
         "completion_contract": completion_contract,
         "python_environment": {
             key: value
@@ -1119,11 +1271,16 @@ def _write_pilot_training_summary(
         _PILOT_CONTRACT["runtime_path"], capture_bytes=True
     )
     try:
-        recorded_runtime = json.loads(runtime_bytes)
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise RuntimeError("pilot runtime config is not valid UTF-8 JSON") from error
+        recorded_runtime = _strict_json_loads(
+            runtime_bytes, label="runtime config"
+        )
+    except RuntimeError as error:
+        raise RuntimeError("pilot runtime config is not valid strict JSON") from error
     if recorded_runtime != dict(preflight_record):
         raise RuntimeError("pilot runtime config bytes disagree with runtime preflight")
+    launch_manifest_evidence = _launch_manifest_evidence()
+    if preflight_record.get("launch_manifest") != launch_manifest_evidence:
+        raise RuntimeError("pilot launch manifest changed after runtime preflight")
 
     raw_tensors = _floating_tensor_finiteness(
         model.state_dict().items(), label="raw model state"
@@ -1160,6 +1317,7 @@ def _write_pilot_training_summary(
         "training_argv_sha256": _PILOT_CONTRACT[
             "GENMOL_TRAIN_EXPECTED_ARGV_SHA256"
         ],
+        "launch_manifest": launch_manifest_evidence,
         "runtime_config": {
             **runtime_snapshot,
             "schema_version": preflight_record.get("schema_version"),
@@ -1188,6 +1346,8 @@ def _write_pilot_training_summary(
     }
     if summary["schema_version"] != _PILOT_CONTRACT["summary_schema_version"]:
         raise RuntimeError("pilot training summary schema disagrees with launch")
+    if _launch_manifest_evidence() != summary["launch_manifest"]:
+        raise RuntimeError("pilot launch manifest changed before summary publication")
     _atomic_write_json_exclusive(_PILOT_CONTRACT["summary_path"], summary)
     written_snapshot, written_bytes = _stable_file_snapshot(
         _PILOT_CONTRACT["summary_path"], capture_bytes=True

@@ -3,7 +3,9 @@
 This helper runs after the ``train.py | tee`` pipeline.  It deliberately uses
 only the Python standard library so that a partially broken training import
 stack cannot prevent post-pipeline accounting.  A receipt is published once,
-with a stable hash and strict validation of ``training_summary.json``.
+with strict validation of ``training_summary.json`` and its launch evidence.
+Only after publication does the helper release the exact unchanged global
+training-job lock owned by the launch.
 """
 
 from __future__ import annotations
@@ -22,8 +24,9 @@ from pathlib import Path
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-TRAINING_SUMMARY_SCHEMA_VERSION = 2
-EXIT_STATUS_SCHEMA_VERSION = 2
+RUNTIME_CONFIG_SCHEMA_VERSION = 2
+TRAINING_SUMMARY_SCHEMA_VERSION = 3
+EXIT_STATUS_SCHEMA_VERSION = 3
 INCOMPLETE_EXIT_STATUS = 97
 HOSTED_STREAM_RANK_PARTITION_POLICY = (
     "huggingface_split_dataset_by_node_disjoint_rank_streams"
@@ -79,13 +82,13 @@ def _finite_json_float(value: str) -> float:
     return parsed
 
 
-def strict_json_loads(payload: bytes) -> object:
+def strict_json_loads(payload: bytes, *, label: str = "training summary") -> object:
     """Decode UTF-8 JSON while rejecting duplicate keys and all non-finite values."""
 
     try:
         text = payload.decode("utf-8")
     except UnicodeDecodeError as error:
-        raise ValueError("training summary is not valid UTF-8") from error
+        raise ValueError(f"{label} is not valid UTF-8") from error
     try:
         return json.loads(
             text,
@@ -94,7 +97,33 @@ def strict_json_loads(payload: bytes) -> object:
             parse_float=_finite_json_float,
         )
     except json.JSONDecodeError as error:
-        raise ValueError("training summary is not valid JSON") from error
+        raise ValueError(f"{label} is not valid JSON") from error
+
+
+def _selected_gpu_uuids_json(value: str) -> list[str]:
+    try:
+        parsed = strict_json_loads(
+            value.encode("utf-8"), label="selected GPU UUID contract"
+        )
+    except (UnicodeEncodeError, ValueError) as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+    if (
+        not isinstance(parsed, list)
+        or not parsed
+        or any(
+            not isinstance(uuid, str)
+            or not uuid.startswith("GPU-")
+            or len(uuid) <= len("GPU-")
+            or "," in uuid
+            for uuid in parsed
+        )
+        or len(set(parsed)) != len(parsed)
+    ):
+        raise argparse.ArgumentTypeError(
+            "selected GPU UUIDs must be a nonempty JSON array of unique NVIDIA "
+            "GPU UUID strings"
+        )
+    return parsed
 
 
 def canonical_json_sha256(value: object) -> str:
@@ -114,6 +143,18 @@ def _artifact_path(value: Path, *, suffix: str, label: str) -> Path:
     path = absolute.parent.resolve(strict=False) / absolute.name
     if path == root or root not in path.parents or path.suffix != suffix:
         raise ValueError(f"{label} must be an in-repository {suffix} file")
+    return path
+
+
+def _training_job_lock_path(value: Path) -> Path:
+    path = Path(os.path.abspath(os.fspath(value)))
+    expected = REPOSITORY_ROOT.resolve(strict=True) / "output" / "udlm" / (
+        ".single_training_job.lock"
+    )
+    if path != expected:
+        raise ValueError(
+            "training-job lock path must be the repository-wide reviewed pilot lock"
+        )
     return path
 
 
@@ -184,6 +225,53 @@ def stable_file_snapshot(
         },
         None if payload is None else bytes(payload),
     )
+
+
+def release_exact_training_job_lock(
+    path: Path,
+    *,
+    expected_sha256: str,
+    expected_snapshot: object,
+) -> None:
+    """Unlink only the unchanged lock certified before receipt publication."""
+
+    path = _training_job_lock_path(path)
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+        raise ValueError(
+            "expected training-job lock digest must be 64 lowercase hexadecimal digits"
+        )
+    current, _payload = stable_file_snapshot(path, capture_bytes=False)
+    _require_snapshot_matches_claim(
+        current,
+        path,
+        expected_snapshot,
+        label="training-job lock evidence",
+    )
+    _exact_string(
+        current.get("sha256"),
+        expected_sha256,
+        label="training-job lock raw SHA-256",
+    )
+    immediately_before_unlink = path.stat(follow_symlinks=False)
+    if _stat_identity(immediately_before_unlink) != tuple(
+        current[key]
+        for key in (
+            "device",
+            "inode",
+            "mode",
+            "link_count",
+            "size_bytes",
+            "mtime_ns",
+            "ctime_ns",
+        )
+    ):
+        raise RuntimeError("training-job lock changed before exact release")
+    os.unlink(path)
+    directory_descriptor = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_descriptor)
+    finally:
+        os.close(directory_descriptor)
 
 
 def _git_output(*arguments: str) -> str:
@@ -352,6 +440,32 @@ def _require_snapshot_matches_claim(
     return current
 
 
+def _validate_launch_manifest_content(
+    payload: bytes,
+    *,
+    expected_sha256: str,
+    expected_selected_gpu_uuids: list[str],
+) -> dict[str, object]:
+    observed_sha256 = hashlib.sha256(payload).hexdigest()
+    _exact_string(
+        observed_sha256,
+        expected_sha256,
+        label="launch manifest raw SHA-256",
+    )
+    manifest = strict_json_loads(payload, label="launch manifest")
+    manifest = _required_mapping(manifest, label="launch manifest")
+    if manifest.get("cuda_visible_device_uuids") != expected_selected_gpu_uuids:
+        raise ValueError(
+            "launch manifest selected GPU UUIDs do not equal the launch-pinned value"
+        )
+    _exact_integer(
+        manifest.get("user_requested_gpu_count"),
+        len(expected_selected_gpu_uuids),
+        label="launch manifest selected GPU count",
+    )
+    return manifest
+
+
 def _validate_finiteness_record(value: object, *, label: str) -> None:
     record = _required_mapping(value, label=label)
     _required_true(record, "all_finite", label=f"{label} all-finite flag")
@@ -375,10 +489,17 @@ def validate_runtime_config(
     expected_source_revision: str,
     expected_config_sha256: str,
     expected_argv_sha256: str,
+    expected_launch_manifest_path: Path,
+    expected_launch_manifest_sha256: str,
+    expected_selected_gpu_uuids: list[str],
     expected_completion_contract: dict[str, object],
 ) -> None:
     record = _required_mapping(runtime, label="runtime config record")
-    _exact_integer(record.get("schema_version"), 1, label="runtime config schema")
+    _exact_integer(
+        record.get("schema_version"),
+        RUNTIME_CONFIG_SCHEMA_VERSION,
+        label="runtime config schema",
+    )
     _exact_string(
         record.get("status"),
         "preflight_completed",
@@ -428,6 +549,21 @@ def validate_runtime_config(
     )
     if record.get("observed_training_argv") != training_argv:
         raise ValueError("runtime observed argv disagrees with its base training argv")
+    launch_manifest = _validate_snapshot_claim(
+        record.get("launch_manifest"),
+        expected_path=expected_launch_manifest_path,
+        label="runtime launch manifest evidence",
+    )
+    _exact_string(
+        launch_manifest.get("sha256"),
+        expected_launch_manifest_sha256,
+        label="runtime launch manifest raw SHA-256",
+    )
+    if launch_manifest.get("selected_gpu_uuids") != expected_selected_gpu_uuids:
+        raise ValueError(
+            "runtime launch manifest selected GPU UUIDs do not equal the "
+            "launch-pinned value"
+        )
     if record.get("completion_contract") != expected_completion_contract:
         raise ValueError("runtime completion contract disagrees with training summary")
     python_environment = record.get("python_environment")
@@ -446,6 +582,9 @@ def validate_training_summary(
     expected_source_revision: str,
     expected_config_sha256: str,
     expected_argv_sha256: str,
+    expected_launch_manifest_path: Path,
+    expected_launch_manifest_sha256: str,
+    expected_selected_gpu_uuids: list[str],
     expected_max_steps: int,
     expected_world_size: int,
     expected_final_checkpoint_path: Path,
@@ -506,6 +645,21 @@ def validate_training_summary(
         label="training summary source upstream",
     )
 
+    launch_manifest = _validate_snapshot_claim(
+        summary.get("launch_manifest"),
+        expected_path=expected_launch_manifest_path,
+        label="training summary launch manifest evidence",
+    )
+    _exact_string(
+        launch_manifest.get("sha256"),
+        expected_launch_manifest_sha256,
+        label="training summary launch manifest raw SHA-256",
+    )
+    if launch_manifest.get("selected_gpu_uuids") != expected_selected_gpu_uuids:
+        raise ValueError(
+            "training summary selected GPU UUIDs do not equal the launch-pinned value"
+        )
+
     completion = summary.get("completion_contract")
     if not isinstance(completion, dict):
         raise ValueError("training summary completion contract must be an object")
@@ -553,7 +707,7 @@ def validate_training_summary(
     )
     _exact_integer(
         runtime_config.get("schema_version"),
-        1,
+        RUNTIME_CONFIG_SCHEMA_VERSION,
         label="runtime config schema version",
     )
     _sha256_field(
@@ -933,6 +1087,9 @@ def validate_training_summary(
         "source_revision": expected_source_revision,
         "resolved_training_config_sha256": expected_config_sha256,
         "training_argv_sha256": expected_argv_sha256,
+        "launch_manifest_path": str(expected_launch_manifest_path),
+        "launch_manifest_sha256": expected_launch_manifest_sha256,
+        "selected_gpu_uuids": list(expected_selected_gpu_uuids),
         "observed_global_step": expected_max_steps,
         "observed_world_size": expected_world_size,
         "training_accounting": dict(accounting),
@@ -1008,9 +1165,21 @@ def build_exit_receipt(args: argparse.Namespace) -> tuple[dict[str, object], int
         suffix=".ckpt",
         label="expected final checkpoint path",
     )
-    if len({summary_path, receipt_path, final_checkpoint_path}) != 3:
+    launch_manifest_path = _artifact_path(
+        args.expected_launch_manifest_path,
+        suffix=".json",
+        label="expected launch manifest path",
+    )
+    training_job_lock_path = _training_job_lock_path(args.training_job_lock_path)
+    if launch_manifest_path != summary_path.with_name("launch_manifest.json"):
         raise ValueError(
-            "pilot summary, receipt, and checkpoint paths must be distinct"
+            "launch manifest must be launch_manifest.json beside the training summary"
+        )
+    if len(
+        {summary_path, receipt_path, final_checkpoint_path, launch_manifest_path}
+    ) != 4:
+        raise ValueError(
+            "pilot manifest, summary, receipt, and checkpoint paths must be distinct"
         )
     if os.path.lexists(receipt_path):
         raise FileExistsError(f"refusing to replace pilot exit receipt: {receipt_path}")
@@ -1037,7 +1206,108 @@ def build_exit_receipt(args: argparse.Namespace) -> tuple[dict[str, object], int
         "matches_training_summary_snapshot": False,
         "artifact": None,
     }
+    manifest_evidence: dict[str, object] = {
+        "path": str(launch_manifest_path),
+        "present": os.path.lexists(launch_manifest_path),
+        "matches_expected_raw_sha256": False,
+        "selected_gpu_uuids_match_expected": False,
+        "matches_training_summary_snapshot": False,
+        "matches_runtime_config_snapshot": False,
+        "valid_and_launch_bound": False,
+        "expected_selected_gpu_uuids": list(args.expected_selected_gpu_uuids),
+        "observed_selected_gpu_uuids": None,
+        "artifact": None,
+        "validation_error": None,
+    }
+    lock_evidence: dict[str, object] = {
+        "path": str(training_job_lock_path),
+        "present": os.path.lexists(training_job_lock_path),
+        "expected_sha256": args.expected_training_job_lock_sha256,
+        "matches_expected_raw_sha256": False,
+        "matches_launch_manifest_binding": False,
+        "valid_and_launch_bound_before_receipt_publication": False,
+        "artifact": None,
+        "record": None,
+        "release_policy": (
+            "publish_receipt_then_unlink_only_same_stat_identity_and_sha256"
+        ),
+        "release_result_not_claimed_inside_pre_release_receipt": True,
+        "validation_error": None,
+    }
+    current_manifest = None
+    parsed_manifest = None
     try:
+        current_manifest, manifest_payload = stable_file_snapshot(
+            launch_manifest_path, capture_bytes=True
+        )
+        manifest_evidence["artifact"] = current_manifest
+        if not manifest_payload:
+            raise ValueError("launch manifest is empty")
+        parsed_manifest = _validate_launch_manifest_content(
+            manifest_payload,
+            expected_sha256=args.expected_launch_manifest_sha256,
+            expected_selected_gpu_uuids=args.expected_selected_gpu_uuids,
+        )
+        manifest_evidence["observed_selected_gpu_uuids"] = list(
+            parsed_manifest["cuda_visible_device_uuids"]
+        )
+        manifest_evidence["matches_expected_raw_sha256"] = True
+        manifest_evidence["selected_gpu_uuids_match_expected"] = True
+    except (OSError, ValueError) as error:
+        manifest_evidence["validation_error"] = f"{type(error).__name__}: {error}"
+    try:
+        lock_snapshot, lock_payload = stable_file_snapshot(
+            training_job_lock_path, capture_bytes=True
+        )
+        lock_evidence["artifact"] = lock_snapshot
+        if not lock_payload:
+            raise ValueError("training-job lock is empty")
+        _exact_string(
+            lock_snapshot.get("sha256"),
+            args.expected_training_job_lock_sha256,
+            label="training-job lock raw SHA-256",
+        )
+        lock_evidence["matches_expected_raw_sha256"] = True
+        lock_record = _required_mapping(
+            strict_json_loads(lock_payload, label="training-job lock"),
+            label="training-job lock record",
+        )
+        _exact_string(
+            lock_record.get("status"), "held", label="training-job lock status"
+        )
+        if parsed_manifest is None:
+            raise ValueError(
+                "training-job lock cannot be bound because the launch manifest is invalid"
+            )
+        manifest_lock = _required_mapping(
+            parsed_manifest.get("single_training_job_lock"),
+            label="launch manifest training-job lock binding",
+        )
+        _exact_string(
+            manifest_lock.get("path"),
+            str(training_job_lock_path),
+            label="launch manifest training-job lock path",
+        )
+        _exact_string(
+            manifest_lock.get("sha256"),
+            args.expected_training_job_lock_sha256,
+            label="launch manifest training-job lock raw SHA-256",
+        )
+        if manifest_lock.get("record") != lock_record:
+            raise ValueError(
+                "launch manifest training-job lock record disagrees with lock bytes"
+            )
+        lock_evidence["record"] = lock_record
+        lock_evidence["matches_launch_manifest_binding"] = True
+        lock_evidence["valid_and_launch_bound_before_receipt_publication"] = True
+    except (OSError, ValueError) as error:
+        lock_evidence["validation_error"] = f"{type(error).__name__}: {error}"
+    try:
+        if current_manifest is None or manifest_evidence["validation_error"] is not None:
+            raise ValueError(
+                "launch manifest validation failed: "
+                f"{manifest_evidence['validation_error']}"
+            )
         snapshot, payload = stable_file_snapshot(summary_path, capture_bytes=True)
         summary_evidence["artifact"] = snapshot
         if not payload:
@@ -1045,6 +1315,13 @@ def build_exit_receipt(args: argparse.Namespace) -> tuple[dict[str, object], int
         parsed = strict_json_loads(payload)
         if not isinstance(parsed, dict):
             raise ValueError("training summary root must be a JSON object")
+        _require_snapshot_matches_claim(
+            current_manifest,
+            launch_manifest_path,
+            parsed.get("launch_manifest"),
+            label="training summary launch manifest evidence",
+        )
+        manifest_evidence["matches_training_summary_snapshot"] = True
         current_runtime, runtime_payload = stable_file_snapshot(
             runtime_config_path, capture_bytes=True
         )
@@ -1058,10 +1335,17 @@ def build_exit_receipt(args: argparse.Namespace) -> tuple[dict[str, object], int
         runtime_evidence["matches_training_summary_snapshot"] = True
         if not runtime_payload:
             raise ValueError("runtime config is empty")
-        parsed_runtime = strict_json_loads(runtime_payload)
+        parsed_runtime = strict_json_loads(runtime_payload, label="runtime config")
         runtime_mapping = _required_mapping(
             parsed_runtime, label="runtime config record"
         )
+        _require_snapshot_matches_claim(
+            current_manifest,
+            launch_manifest_path,
+            runtime_mapping.get("launch_manifest"),
+            label="runtime launch manifest evidence",
+        )
+        manifest_evidence["matches_runtime_config_snapshot"] = True
         bindings = validate_training_summary(
             parsed,
             summary_path=summary_path,
@@ -1069,6 +1353,11 @@ def build_exit_receipt(args: argparse.Namespace) -> tuple[dict[str, object], int
             expected_source_revision=args.expected_source_revision,
             expected_config_sha256=args.expected_config_sha256,
             expected_argv_sha256=args.expected_argv_sha256,
+            expected_launch_manifest_path=launch_manifest_path,
+            expected_launch_manifest_sha256=(
+                args.expected_launch_manifest_sha256
+            ),
+            expected_selected_gpu_uuids=args.expected_selected_gpu_uuids,
             expected_max_steps=args.expected_max_steps,
             expected_world_size=args.expected_world_size,
             expected_final_checkpoint_path=final_checkpoint_path,
@@ -1090,6 +1379,11 @@ def build_exit_receipt(args: argparse.Namespace) -> tuple[dict[str, object], int
             expected_source_revision=args.expected_source_revision,
             expected_config_sha256=args.expected_config_sha256,
             expected_argv_sha256=args.expected_argv_sha256,
+            expected_launch_manifest_path=launch_manifest_path,
+            expected_launch_manifest_sha256=(
+                args.expected_launch_manifest_sha256
+            ),
+            expected_selected_gpu_uuids=args.expected_selected_gpu_uuids,
             expected_completion_contract=parsed["completion_contract"],
         )
         runtime_evidence["semantic_validation_passed"] = True
@@ -1104,10 +1398,28 @@ def build_exit_receipt(args: argparse.Namespace) -> tuple[dict[str, object], int
             label="final checkpoint evidence",
         )
         checkpoint_evidence["matches_training_summary_snapshot"] = True
+        final_manifest, final_manifest_payload = stable_file_snapshot(
+            launch_manifest_path, capture_bytes=True
+        )
+        if final_manifest != current_manifest:
+            raise ValueError("launch manifest changed during receipt validation")
+        _validate_launch_manifest_content(
+            final_manifest_payload,
+            expected_sha256=args.expected_launch_manifest_sha256,
+            expected_selected_gpu_uuids=args.expected_selected_gpu_uuids,
+        )
+        manifest_evidence["valid_and_launch_bound"] = True
         summary_evidence["validated_bindings"] = bindings
         summary_evidence["valid_and_launch_bound"] = True
     except (OSError, ValueError) as error:
-        summary_evidence["validation_error"] = f"{type(error).__name__}: {error}"
+        validation_error = f"{type(error).__name__}: {error}"
+        summary_evidence["validation_error"] = validation_error
+        if (
+            manifest_evidence["valid_and_launch_bound"] is not True
+            and manifest_evidence["validation_error"] is None
+            and "launch manifest" in str(error)
+        ):
+            manifest_evidence["validation_error"] = validation_error
 
     try:
         source = verify_clean_pushed_source(args.expected_source_revision)
@@ -1125,16 +1437,22 @@ def build_exit_receipt(args: argparse.Namespace) -> tuple[dict[str, object], int
         args.tee_exit_status if args.tee_exit_status != 0 else args.training_exit_status
     )
     summary_valid = summary_evidence["valid_and_launch_bound"] is True
+    manifest_valid = manifest_evidence["valid_and_launch_bound"] is True
+    lock_valid = (
+        lock_evidence["valid_and_launch_bound_before_receipt_publication"] is True
+    )
     source_valid = source["verified"] is True
     completed = (
         args.training_exit_status == 0
         and args.tee_exit_status == 0
         and summary_valid
+        and manifest_valid
+        and lock_valid
         and source_valid
     )
     if completed:
         process_exit_status = 0
-    elif not summary_valid or not source_valid:
+    elif not summary_valid or not manifest_valid or not lock_valid or not source_valid:
         process_exit_status = INCOMPLETE_EXIT_STATUS
     else:
         process_exit_status = pipeline_status
@@ -1150,6 +1468,11 @@ def build_exit_receipt(args: argparse.Namespace) -> tuple[dict[str, object], int
             "source_revision": args.expected_source_revision,
             "resolved_training_config_sha256": args.expected_config_sha256,
             "training_argv_sha256": args.expected_argv_sha256,
+            "launch_manifest_path": str(launch_manifest_path),
+            "launch_manifest_sha256": args.expected_launch_manifest_sha256,
+            "selected_gpu_uuids": list(args.expected_selected_gpu_uuids),
+            "training_job_lock_path": str(training_job_lock_path),
+            "training_job_lock_sha256": args.expected_training_job_lock_sha256,
             "max_steps": args.expected_max_steps,
             "world_size": args.expected_world_size,
             "training_summary_path": str(summary_path),
@@ -1164,6 +1487,8 @@ def build_exit_receipt(args: argparse.Namespace) -> tuple[dict[str, object], int
             "pipefail_shell_exit_status": pipeline_status,
         },
         "source_at_receipt": source,
+        "launch_manifest": manifest_evidence,
+        "training_job_lock": lock_evidence,
         "training_summary": summary_evidence,
         "runtime_config": runtime_evidence,
         "final_checkpoint": checkpoint_evidence,
@@ -1171,6 +1496,8 @@ def build_exit_receipt(args: argparse.Namespace) -> tuple[dict[str, object], int
             "training_exit_zero": args.training_exit_status == 0,
             "tee_exit_zero": args.tee_exit_status == 0,
             "training_summary_valid_and_launch_bound": summary_valid,
+            "launch_manifest_matches_summary_runtime_and_launch": manifest_valid,
+            "training_job_lock_valid_before_receipt_publication": lock_valid,
             "runtime_config_matches_summary_and_launch": (
                 runtime_evidence["matches_training_summary_snapshot"] is True
                 and runtime_evidence["semantic_validation_passed"] is True
@@ -1197,6 +1524,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--expected-source-revision", required=True)
     parser.add_argument("--expected-config-sha256", required=True)
     parser.add_argument("--expected-argv-sha256", required=True)
+    parser.add_argument("--expected-launch-manifest-path", type=Path, required=True)
+    parser.add_argument("--expected-launch-manifest-sha256", required=True)
+    parser.add_argument(
+        "--expected-selected-gpu-uuids-json",
+        dest="expected_selected_gpu_uuids",
+        type=_selected_gpu_uuids_json,
+        required=True,
+    )
+    parser.add_argument("--training-job-lock-path", type=Path, required=True)
+    parser.add_argument("--expected-training-job-lock-sha256", required=True)
     parser.add_argument("--expected-max-steps", type=_positive_integer, required=True)
     parser.add_argument("--expected-world-size", type=_positive_integer, required=True)
     parser.add_argument("--expected-final-checkpoint-path", type=Path, required=True)
@@ -1214,9 +1551,18 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.expected_world_size not in (1, 2):
         raise ValueError("expected world size must be 1 or 2")
+    if len(args.expected_selected_gpu_uuids) != args.expected_world_size:
+        raise ValueError(
+            "expected selected GPU UUID count must equal expected world size"
+        )
     for label, digest in (
         ("expected config digest", args.expected_config_sha256),
         ("expected argv digest", args.expected_argv_sha256),
+        ("expected launch manifest digest", args.expected_launch_manifest_sha256),
+        (
+            "expected training-job lock digest",
+            args.expected_training_job_lock_sha256,
+        ),
     ):
         if not re.fullmatch(r"[0-9a-f]{64}", digest):
             raise ValueError(f"{label} must be 64 lowercase hexadecimal digits")
@@ -1234,6 +1580,11 @@ def main(argv: list[str] | None = None) -> int:
         label="exit receipt path",
     )
     _atomic_write_json_exclusive(receipt_path, receipt)
+    release_exact_training_job_lock(
+        args.training_job_lock_path,
+        expected_sha256=args.expected_training_job_lock_sha256,
+        expected_snapshot=receipt["training_job_lock"]["artifact"],
+    )
     return process_exit_status
 
 

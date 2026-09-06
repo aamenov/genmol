@@ -38,6 +38,20 @@ TRAINING_ARGV = ["/repo/scripts/train.py", "seed=7"]
 EXPECTED_CONFIG_SHA256 = _canonical_sha256(RESOLVED_TRAINING_CONFIG)
 EXPECTED_ARGV_SHA256 = _canonical_sha256(TRAINING_ARGV)
 EXPECTED_WARM_START_SHA256 = "e" * 64
+EXPECTED_SELECTED_GPU_UUIDS = ["GPU-test-a"]
+EXPECTED_SELECTED_GPU_UUIDS_JSON = json.dumps(
+    EXPECTED_SELECTED_GPU_UUIDS, separators=(",", ":")
+)
+EXPECTED_LOCK_RECORD = {
+    "schema_version": 1,
+    "status": "held",
+    "purpose": "receipt test fixture",
+    "owner_token": "fixture-owner-token",
+}
+EXPECTED_LOCK_BYTES = (
+    json.dumps(EXPECTED_LOCK_RECORD, indent=2, sort_keys=True, allow_nan=False) + "\n"
+).encode("utf-8")
+EXPECTED_LOCK_SHA256 = hashlib.sha256(EXPECTED_LOCK_BYTES).hexdigest()
 
 
 def _run(command, *, cwd):
@@ -82,6 +96,8 @@ def _paths(repository, run_name="test_run"):
         "summary": run_dir / "training_summary.json",
         "receipt": run_dir / "pilot_exit_status.json",
         "checkpoint": run_dir / "checkpoints/10.ckpt",
+        "manifest": run_dir / "launch_manifest.json",
+        "lock": repository / "output/udlm/.single_training_job.lock",
         "log": repository / "output/logs" / f"{run_name}.log",
     }
 
@@ -110,8 +126,41 @@ def _finite_record(*, tensors=2, elements=4):
     }
 
 
+def _write_training_job_lock(paths):
+    paths["lock"].parent.mkdir(parents=True, exist_ok=True)
+    if not paths["lock"].exists():
+        paths["lock"].write_bytes(EXPECTED_LOCK_BYTES)
+    return EXPECTED_LOCK_RECORD, EXPECTED_LOCK_SHA256
+
+
+def _write_launch_manifest(paths):
+    paths["run_dir"].mkdir(parents=True, exist_ok=True)
+    lock_record, lock_sha256 = _write_training_job_lock(paths)
+    manifest = {
+        "launch_manifest_schema_version": 1,
+        "user_requested_gpu_count": 1,
+        "cuda_visible_device_uuids": EXPECTED_SELECTED_GPU_UUIDS,
+        "single_training_job_lock": {
+            "path": str(paths["lock"]),
+            "sha256": lock_sha256,
+            "record": lock_record,
+        },
+    }
+    payload = (
+        json.dumps(manifest, indent=2, sort_keys=True, allow_nan=False) + "\n"
+    ).encode("utf-8")
+    if not paths["manifest"].exists():
+        paths["manifest"].write_bytes(payload)
+    return hashlib.sha256(payload).hexdigest()
+
+
 def _valid_summary(paths, revision):
     paths["run_dir"].mkdir(parents=True, exist_ok=True)
+    _write_launch_manifest(paths)
+    manifest_evidence = {
+        **_snapshot(paths["manifest"]),
+        "selected_gpu_uuids": EXPECTED_SELECTED_GPU_UUIDS,
+    }
     runtime_path = paths["run_dir"] / "runtime_config.json"
     paths["checkpoint"].parent.mkdir(parents=True, exist_ok=True)
     if not paths["checkpoint"].exists():
@@ -126,7 +175,7 @@ def _valid_summary(paths, revision):
         "backward_anomaly_detection": True,
     }
     runtime_record = {
-        "schema_version": 1,
+        "schema_version": receipt_writer.RUNTIME_CONFIG_SCHEMA_VERSION,
         "status": "preflight_completed",
         "source_revision": revision,
         "source": {"head": revision, "upstream": revision},
@@ -135,6 +184,7 @@ def _valid_summary(paths, revision):
         "training_argv_sha256": EXPECTED_ARGV_SHA256,
         "resolved_training_config": RESOLVED_TRAINING_CONFIG,
         "resolved_training_config_sha256": EXPECTED_CONFIG_SHA256,
+        "launch_manifest": manifest_evidence,
         "completion_contract": completion_contract,
         "python_environment": {"PYTHONHASHSEED": "7"},
     }
@@ -150,10 +200,11 @@ def _valid_summary(paths, revision):
         "source": {"head": revision, "upstream": revision},
         "resolved_training_config_sha256": EXPECTED_CONFIG_SHA256,
         "training_argv_sha256": EXPECTED_ARGV_SHA256,
+        "launch_manifest": manifest_evidence,
         "completion_contract": completion_contract,
         "runtime_config": {
             **_snapshot(runtime_path),
-            "schema_version": 1,
+            "schema_version": receipt_writer.RUNTIME_CONFIG_SCHEMA_VERSION,
             "record_sha256": _canonical_sha256(runtime_record),
         },
         "observed_training_state": {
@@ -248,7 +299,10 @@ def _shell_command(
     *,
     training_command,
     log_path=None,
+    expected_selected_gpu_uuids_json=EXPECTED_SELECTED_GPU_UUIDS_JSON,
 ):
+    expected_manifest_sha256 = _write_launch_manifest(paths)
+    _lock_record, expected_lock_sha256 = _write_training_job_lock(paths)
     return launcher.build_tmux_shell_command(
         training_command,
         log_path=paths["log"] if log_path is None else log_path,
@@ -261,6 +315,11 @@ def _shell_command(
         expected_max_steps=10,
         expected_world_size=1,
         expected_final_checkpoint_path=paths["checkpoint"],
+        expected_launch_manifest_path=paths["manifest"],
+        expected_launch_manifest_sha256=expected_manifest_sha256,
+        expected_selected_gpu_uuids_json=expected_selected_gpu_uuids_json,
+        expected_training_job_lock_path=paths["lock"],
+        expected_training_job_lock_sha256=expected_lock_sha256,
         expected_initialization_checkpoint_sha256=EXPECTED_WARM_START_SHA256,
     )
 
@@ -292,7 +351,7 @@ def test_successful_pipeline_writes_launch_bound_receipt(receipt_repository):
 
     assert result.returncode == 0, result.stderr
     receipt = json.loads(paths["receipt"].read_text(encoding="utf-8"))
-    assert receipt["schema_version"] == receipt_writer.EXIT_STATUS_SCHEMA_VERSION == 2
+    assert receipt["schema_version"] == receipt_writer.EXIT_STATUS_SCHEMA_VERSION == 3
     assert receipt["status"] == "completed"
     assert receipt["process_exit_status"] == 0
     assert receipt["pipeline"]["training"]["shell_exit_status"] == 0
@@ -303,13 +362,27 @@ def test_successful_pipeline_writes_launch_bound_receipt(receipt_repository):
         "training_accounting"
     ] == expected_accounting
     assert receipt["runtime_config"]["matches_training_summary_snapshot"] is True
+    assert receipt["launch_manifest"]["valid_and_launch_bound"] is True
+    assert receipt["launch_manifest"]["matches_runtime_config_snapshot"] is True
+    assert receipt["training_job_lock"][
+        "valid_and_launch_bound_before_receipt_publication"
+    ] is True
+    assert receipt["training_job_lock"]["artifact"]["sha256"] == EXPECTED_LOCK_SHA256
     assert receipt["final_checkpoint"]["matches_training_summary_snapshot"] is True
     assert receipt["source_at_receipt"]["verified"] is True
+    assert not paths["lock"].exists()
     assert receipt["expected_contract"] == {
         "training_summary_schema_version": launcher.TRAINING_SUMMARY_SCHEMA_VERSION,
         "source_revision": revision,
         "resolved_training_config_sha256": EXPECTED_CONFIG_SHA256,
         "training_argv_sha256": EXPECTED_ARGV_SHA256,
+        "launch_manifest_path": str(paths["manifest"]),
+        "launch_manifest_sha256": hashlib.sha256(
+            paths["manifest"].read_bytes()
+        ).hexdigest(),
+        "selected_gpu_uuids": EXPECTED_SELECTED_GPU_UUIDS,
+        "training_job_lock_path": str(paths["lock"]),
+        "training_job_lock_sha256": EXPECTED_LOCK_SHA256,
         "max_steps": 10,
         "world_size": 1,
         "training_summary_path": str(paths["summary"]),
@@ -335,6 +408,103 @@ def test_training_failure_is_recorded_even_when_summary_is_valid(receipt_reposit
     assert receipt["pipeline"]["training"]["shell_exit_status"] == 23
     assert receipt["pipeline"]["tee"]["shell_exit_status"] == 0
     assert receipt["training_summary"]["valid_and_launch_bound"] is True
+    assert not paths["lock"].exists()
+
+
+@pytest.mark.parametrize("replacement_mode", ["wrong_bytes", "replaced_file"])
+def test_wrong_or_replaced_training_job_lock_is_never_unlinked(
+    receipt_repository, replacement_mode
+):
+    repository, revision = receipt_repository
+    paths = _paths(repository, f"wrong_lock_{replacement_mode}")
+    _write_summary(paths, revision)
+    paths["log"].parent.mkdir(parents=True)
+    shell_command = _shell_command(
+        paths,
+        revision,
+        training_command=["bash", "-c", "exit 0"],
+    )
+    wrong_bytes = b'{"status":"held","owner_token":"another-run"}\n'
+    if replacement_mode == "replaced_file":
+        paths["lock"].rename(paths["lock"].with_suffix(".original"))
+    paths["lock"].write_bytes(wrong_bytes)
+
+    result = _execute_shell(repository, shell_command)
+
+    assert result.returncode != 0
+    assert paths["lock"].read_bytes() == wrong_bytes
+    receipt = json.loads(paths["receipt"].read_text(encoding="utf-8"))
+    assert receipt["status"] == "failed"
+    assert receipt["training_job_lock"][
+        "valid_and_launch_bound_before_receipt_publication"
+    ] is False
+    assert "training-job lock raw SHA-256" in receipt["training_job_lock"][
+        "validation_error"
+    ]
+
+
+def test_training_job_lock_replaced_after_receipt_publication_is_not_unlinked(
+    receipt_repository, monkeypatch
+):
+    repository, revision = receipt_repository
+    paths = _paths(repository, "lock_release_race")
+    _write_summary(paths, revision)
+    monkeypatch.setattr(receipt_writer, "REPOSITORY_ROOT", repository)
+    original_publish = receipt_writer._atomic_write_json_exclusive
+    replacement_bytes = b'{"status":"held","owner_token":"replacement"}\n'
+
+    def publish_then_replace_lock(path, value):
+        original_publish(path, value)
+        paths["lock"].rename(paths["lock"].with_suffix(".original"))
+        paths["lock"].write_bytes(replacement_bytes)
+
+    monkeypatch.setattr(
+        receipt_writer,
+        "_atomic_write_json_exclusive",
+        publish_then_replace_lock,
+    )
+    argv = [
+        "--training-exit-status",
+        "0",
+        "--tee-exit-status",
+        "0",
+        "--training-summary-path",
+        str(paths["summary"]),
+        "--receipt-path",
+        str(paths["receipt"]),
+        "--expected-summary-schema-version",
+        str(receipt_writer.TRAINING_SUMMARY_SCHEMA_VERSION),
+        "--expected-source-revision",
+        revision,
+        "--expected-config-sha256",
+        EXPECTED_CONFIG_SHA256,
+        "--expected-argv-sha256",
+        EXPECTED_ARGV_SHA256,
+        "--expected-launch-manifest-path",
+        str(paths["manifest"]),
+        "--expected-launch-manifest-sha256",
+        hashlib.sha256(paths["manifest"].read_bytes()).hexdigest(),
+        "--expected-selected-gpu-uuids-json",
+        EXPECTED_SELECTED_GPU_UUIDS_JSON,
+        "--training-job-lock-path",
+        str(paths["lock"]),
+        "--expected-training-job-lock-sha256",
+        EXPECTED_LOCK_SHA256,
+        "--expected-max-steps",
+        "10",
+        "--expected-world-size",
+        "1",
+        "--expected-final-checkpoint-path",
+        str(paths["checkpoint"]),
+        "--expected-initialization-checkpoint-sha256",
+        EXPECTED_WARM_START_SHA256,
+    ]
+
+    with pytest.raises(ValueError, match="no longer matches"):
+        receipt_writer.main(argv)
+
+    assert paths["receipt"].is_file()
+    assert paths["lock"].read_bytes() == replacement_bytes
 
 
 @pytest.mark.parametrize(
@@ -594,6 +764,142 @@ def test_checkpoint_must_still_match_the_summary_snapshot(
         )
 
 
+def test_launch_manifest_must_still_match_the_launch_and_summary(
+    receipt_repository,
+):
+    repository, revision = receipt_repository
+    paths = _paths(repository)
+    _write_summary(paths, revision)
+    paths["log"].parent.mkdir(parents=True)
+    shell_command = _shell_command(
+        paths,
+        revision,
+        training_command=["bash", "-c", "exit 0"],
+    )
+    paths["manifest"].write_text(
+        json.dumps(
+            {
+                "launch_manifest_schema_version": 1,
+                "user_requested_gpu_count": 1,
+                "cuda_visible_device_uuids": ["GPU-replacement"],
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = _execute_shell(repository, shell_command)
+
+    assert result.returncode == 97
+    receipt = json.loads(paths["receipt"].read_text(encoding="utf-8"))
+    assert receipt["launch_manifest"]["valid_and_launch_bound"] is False
+    assert receipt["training_summary"]["valid_and_launch_bound"] is False
+    assert "raw SHA-256" in receipt["launch_manifest"]["validation_error"]
+
+
+def test_launch_manifest_selected_uuids_must_match_receipt_contract(
+    receipt_repository,
+):
+    repository, revision = receipt_repository
+    paths = _paths(repository)
+    _write_summary(paths, revision)
+    paths["log"].parent.mkdir(parents=True)
+
+    result = _execute_shell(
+        repository,
+        _shell_command(
+            paths,
+            revision,
+            training_command=["bash", "-c", "exit 0"],
+            expected_selected_gpu_uuids_json='["GPU-other"]',
+        ),
+    )
+
+    assert result.returncode == 97
+    receipt = json.loads(paths["receipt"].read_text(encoding="utf-8"))
+    assert receipt["launch_manifest"]["valid_and_launch_bound"] is False
+    assert "selected GPU UUIDs" in receipt["launch_manifest"]["validation_error"]
+
+
+def test_launch_manifest_change_during_final_receipt_reread_fails_closed(
+    receipt_repository, monkeypatch
+):
+    repository, revision = receipt_repository
+    paths = _paths(repository)
+    _write_summary(paths, revision)
+    expected_manifest_sha256 = hashlib.sha256(
+        paths["manifest"].read_bytes()
+    ).hexdigest()
+    args = receipt_writer._parse_args(
+        [
+            "--training-exit-status",
+            "0",
+            "--tee-exit-status",
+            "0",
+            "--training-summary-path",
+            str(paths["summary"]),
+            "--receipt-path",
+            str(paths["receipt"]),
+            "--expected-summary-schema-version",
+            str(receipt_writer.TRAINING_SUMMARY_SCHEMA_VERSION),
+            "--expected-source-revision",
+            revision,
+            "--expected-config-sha256",
+            EXPECTED_CONFIG_SHA256,
+            "--expected-argv-sha256",
+            EXPECTED_ARGV_SHA256,
+            "--expected-launch-manifest-path",
+            str(paths["manifest"]),
+            "--expected-launch-manifest-sha256",
+            expected_manifest_sha256,
+            "--expected-selected-gpu-uuids-json",
+            EXPECTED_SELECTED_GPU_UUIDS_JSON,
+            "--training-job-lock-path",
+            str(paths["lock"]),
+            "--expected-training-job-lock-sha256",
+            EXPECTED_LOCK_SHA256,
+            "--expected-max-steps",
+            "10",
+            "--expected-world-size",
+            "1",
+            "--expected-final-checkpoint-path",
+            str(paths["checkpoint"]),
+            "--expected-initialization-checkpoint-sha256",
+            EXPECTED_WARM_START_SHA256,
+        ]
+    )
+    monkeypatch.setattr(receipt_writer, "REPOSITORY_ROOT", repository)
+    original_snapshot = receipt_writer.stable_file_snapshot
+    manifest_reads = 0
+
+    def mutate_before_final_manifest_read(path, *, capture_bytes=False):
+        nonlocal manifest_reads
+        if Path(path) == paths["manifest"]:
+            manifest_reads += 1
+            if manifest_reads == 2:
+                paths["manifest"].write_bytes(paths["manifest"].read_bytes() + b" ")
+        return original_snapshot(path, capture_bytes=capture_bytes)
+
+    monkeypatch.setattr(
+        receipt_writer,
+        "stable_file_snapshot",
+        mutate_before_final_manifest_read,
+    )
+
+    receipt, status = receipt_writer.build_exit_receipt(args)
+
+    assert status == receipt_writer.INCOMPLETE_EXIT_STATUS
+    assert manifest_reads == 2
+    assert receipt["launch_manifest"]["valid_and_launch_bound"] is False
+    assert "changed during receipt validation" in receipt["launch_manifest"][
+        "validation_error"
+    ]
+    assert "changed during receipt validation" in receipt["training_summary"][
+        "validation_error"
+    ]
+
+
 def test_runtime_record_must_semantically_match_the_launch(receipt_repository):
     repository, revision = receipt_repository
     paths = _paths(repository)
@@ -604,7 +910,7 @@ def test_runtime_record_must_semantically_match_the_launch(receipt_repository):
     runtime_path.write_text(json.dumps(runtime) + "\n", encoding="utf-8")
     summary["runtime_config"] = {
         **_snapshot(runtime_path),
-        "schema_version": 1,
+        "schema_version": receipt_writer.RUNTIME_CONFIG_SCHEMA_VERSION,
         "record_sha256": _canonical_sha256(runtime),
     }
     paths["summary"].write_text(json.dumps(summary) + "\n", encoding="utf-8")
@@ -644,6 +950,11 @@ def test_training_accounting_must_match_resolved_runtime_config(
             expected_source_revision=revision,
             expected_config_sha256=EXPECTED_CONFIG_SHA256,
             expected_argv_sha256=EXPECTED_ARGV_SHA256,
+            expected_launch_manifest_path=paths["manifest"],
+            expected_launch_manifest_sha256=hashlib.sha256(
+                paths["manifest"].read_bytes()
+            ).hexdigest(),
+            expected_selected_gpu_uuids=EXPECTED_SELECTED_GPU_UUIDS,
             expected_max_steps=10,
             expected_world_size=1,
             expected_final_checkpoint_path=paths["checkpoint"],
@@ -661,7 +972,7 @@ def test_receipt_writer_rejects_legacy_training_summary_schema(receipt_repositor
     summary["schema_version"] = 1
 
     with pytest.raises(
-        ValueError, match="unsupported training summary schema version 1; expected 2"
+        ValueError, match="unsupported training summary schema version 1; expected 3"
     ):
         receipt_writer.validate_training_summary(
             summary,
@@ -670,6 +981,11 @@ def test_receipt_writer_rejects_legacy_training_summary_schema(receipt_repositor
             expected_source_revision=revision,
             expected_config_sha256=EXPECTED_CONFIG_SHA256,
             expected_argv_sha256=EXPECTED_ARGV_SHA256,
+            expected_launch_manifest_path=paths["manifest"],
+            expected_launch_manifest_sha256=hashlib.sha256(
+                paths["manifest"].read_bytes()
+            ).hexdigest(),
+            expected_selected_gpu_uuids=EXPECTED_SELECTED_GPU_UUIDS,
             expected_max_steps=10,
             expected_world_size=1,
             expected_final_checkpoint_path=paths["checkpoint"],

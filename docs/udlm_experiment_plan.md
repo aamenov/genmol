@@ -34,21 +34,43 @@ The frozen machine-readable protocol is
 intersection-union gate: all four point requirements and all four interval
 requirements must pass for one candidate that was locked before final seeds
 0, 1, and 2. The lock binds the completed training summary and exit receipt,
-EMA checkpoint, exact EMA shadow-tensor count/decay/update metadata,
-source/config/sampler/runner hashes, all disclosed pilot evidence, exact
-128-NFE sampling configuration, and one predeclared output directory per final
-seed. Training accounting records requested example exposure; it does not
-claim a content-token exposure count. Pilot selection may use only seeds at
-least 1000. The registered comparison that can make a candidate eligible uses
-generation seeds 1000 and 1001, 256 requested samples per seed, 128 NFE, and
-the released-compatible quality and diversity metrics. Smaller 32-sample or
+EMA checkpoint, exact EMA shadow-tensor count/decay/update metadata, and an
+immutable `launch_manifest.json` by repository-relative path, raw-byte SHA-256,
+and schema. The manifest records the exact ordered GPU UUIDs plus the complete
+inventory, initial selection, and final just-before-launch telemetry. The final
+UUID probes must still satisfy the registered idle-device policy. Runtime
+config, training summary, and successful exit receipt must all bind the same
+manifest snapshot and exact UUID list. The lock also binds source/config/
+sampler/runner hashes, all disclosed pilot evidence, exact 128-NFE sampling
+configuration, and one predeclared output directory per final seed.
+
+A repository-global single-training-job lease is acquired before any GPU probe.
+Its immutable record is bound into the launch manifest and validated again
+before the exit receipt is published; for a handed-off training job, only then
+may the receipt writer release that exact lease. The launcher may release its
+exact owner lease on failure before tmux handoff. Unexplained or stale leases
+fail closed for manual review. The matched R/S/E specification registers
+sequential order
+`release_uniform` (R), `schedule_uniform` (S), then `empirical_frequency` (E),
+at most one training job at a time, and a validated successful receipt before
+advancing. The global lease machine-enforces the one-job ceiling. Until a
+predecessor-chain artifact is implemented, however, R-to-S-to-E ordering and
+receipt-gated advancement remain an operator protocol that needs post-run
+audit; an individual run manifest does not prove its predecessor completed.
+This is cooperative host/worktree serialization, not a cluster-wide scheduler
+reservation.
+
+Training accounting records requested example exposure; it does not claim a
+content-token exposure count. Pilot selection may use only seeds at least 1000.
+The registered comparison that can make a candidate eligible uses generation
+seeds 1000 and 1001, 256 requested samples per seed, 128 NFE, and the
+released-compatible quality and diversity metrics. Smaller 32-sample or
 32/64-NFE runs remain disclosed engineering evidence but cannot enter the
 selection score. The machine-readable winner is the highest mean quality,
 then highest mean diversity, then lexicographically smallest attempt ID.
-Artifacts using benchmark-run schema 6, aggregate-report schema 5, or pilot
-training-summary/exit-receipt schema 1 are rejected: mandatory inference-weight,
-training-accounting, and EMA provenance begin at schemas 7, 6, and 2,
-respectively.
+Artifacts using benchmark-run schema 6 or aggregate-report schema 5 are
+rejected; the required versions are benchmark 7, report 6, launch manifest 1,
+training runtime config 2, training summary 3, and successful exit receipt 3.
 
 The MDLM side of the gate is independently bound to
 `experiments/udlm/baselines/mdlm_50000_rescore_attestation.json` (SHA-256
@@ -129,19 +151,45 @@ Combining clean logits would not equal the UDLM paper's D-CFG rule.
 1. CPU equation, gradient, legacy-checkpoint, and sampler tests.
 2. Tiny CPU overfit on a fixed set of molecules; require falling loss, finite
    gradients, and an executable 16-step reverse chain.
-3. One verified-idle GPU, full-size BERT, 10 optimizer steps; check memory,
-   throughput, checkpoint save/load, and no NaNs.
-4. Warm-start pilots at 100, 500, then 1,000 steps. Evaluate 32 samples first,
-   then use 32/64 reverse steps as speed diagnostics. A candidate becomes
-   selection-eligible only after the registered two-seed panel (seeds 1000 and
-   1001, 256 samples each, 128 NFE) is complete. All smaller or mismatched
-   panels remain disclosed but ineligible. Final seeds 0, 1, and 2 are
-   unavailable for tuning or candidate selection.
-5. Advance only a promising candidate to 2,000–5,000 steps. The user requests
-   a count of one or two GPUs; immediately before each job, the launcher scans
-   the full NVIDIA inventory, dynamically selects genuinely idle physical GPUs,
-   re-probes their exact UUIDs, and maps them into the isolated process.
-6. Close and commit the complete pilot ledger, then commit and push one
+3. After the user chooses a count of one or two GPUs, run the full-size
+   warm-start R/S/E panel for 10 optimizer updates in that order. Each job must
+   hold the global lease, use the same matched-panel contract, produce a valid
+   receipt, save/reload its checkpoint, and remain finite. This is a health and
+   plumbing check only. The current constant schedule warms up for 2,500 steps;
+   with peak learning rate $3\times10^{-4}$, its learning rate is only about
+   $1.2\times10^{-6}$ by update 10. Ten steps therefore cannot rank methods.
+4. **Future registered scheduler screen:** on E only, seed 17, compare 100
+   updates of E-L0 (the current additive conditioner and constant schedule with
+   2,500-step warmup) against E-L1 (the same model/process with cosine horizon
+   1,000, warmup 50, peak learning rate $3\times10^{-4}$, and minimum learning
+   rate $3\times10^{-6}$). On the fixed denoising panel at
+   $t\in\{0.1,0.5,0.9\}$, select E-L1 only if its mean loss is at least 2% lower,
+   at least two of the three time bins improve, and no bin is more than 2%
+   worse. Otherwise retain E-L0. These config names describe a prospective
+   registered comparison; they do not claim the variants or results already
+   exist.
+5. **Future registered conditioning screen:** on E only, seed 17, train 500
+   updates with the selected scheduler. Compare E-A0 (additive conditioning)
+   with E-A1 (post-timestep-MLP SiLU plus zero-initialized per-layer
+   FiLM/AdaLN-style modulation). A1 must exactly preserve the warm-start BERT
+   output at initialization. Select A1 only if mean fixed-panel loss is at least
+   2% lower, no $t\in\{0.1,0.5,0.9\}$ bin is more than 2% worse, clean-token
+   accuracy is nondecreasing, and the new modulation parameters receive finite,
+   nonzero gradients. Ties or any failed condition retain A0. This too is a
+   prospective plan, not an implemented-result claim.
+6. Train matched R/S/E controls for 1,000 updates each with the selected
+   scheduler and architecture. First decode 32 requests with generation seed
+   1100 as an ineligible health diagnostic. Candidate eligibility still
+   requires the registered 256-request runs for both seeds 1000 and 1001 at
+   128 NFE. All smaller or mismatched panels remain disclosed but ineligible;
+   final seeds 0, 1, and 2 are unavailable for tuning or selection. The user
+   chooses one or two GPUs, and immediately before each sequential job the
+   launcher scans the full NVIDIA inventory, dynamically selects genuinely idle
+   physical GPUs, re-probes their exact UUIDs, and binds the telemetry through
+   the launch/runtime/summary/receipt evidence chain.
+7. Advance only a promising candidate to 2,000–5,000 steps if the registered
+   pilot evidence justifies the cost.
+8. Close and commit the complete pilot ledger, then commit and push one
    candidate lock. Only that locked revision may run the three 1,000-sample
    final seeds, once each in their predeclared directories at 128 NFE. Update
    the benchmark PDF only after the raw-row reporter and registered superiority
