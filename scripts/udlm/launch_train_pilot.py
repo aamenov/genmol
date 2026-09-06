@@ -83,6 +83,16 @@ KNOWN_PYTHON_ENVIRONMENT_KEYS = {
     "PYTHONINTMAXSTRDIGITS",
     "PYTHONSAFEPATH",
 }
+DISTRIBUTED_ENVIRONMENT_KEYS = {
+    "GROUP_RANK",
+    "LOCAL_RANK",
+    "LOCAL_WORLD_SIZE",
+    "MASTER_ADDR",
+    "MASTER_PORT",
+    "NODE_RANK",
+    "RANK",
+    "WORLD_SIZE",
+}
 
 
 @dataclass(frozen=True)
@@ -688,7 +698,10 @@ def build_child_environment_command(
     }
     inherited_python_keys = {key for key in os.environ if key.startswith("PYTHON")}
     unset_python_keys = sorted(
-        KNOWN_PYTHON_ENVIRONMENT_KEYS | inherited_python_keys | set(controlled_python)
+        KNOWN_PYTHON_ENVIRONMENT_KEYS
+        | inherited_python_keys
+        | set(controlled_python)
+        | DISTRIBUTED_ENVIRONMENT_KEYS
     )
     environment_command = ["env"]
     for key in unset_python_keys:

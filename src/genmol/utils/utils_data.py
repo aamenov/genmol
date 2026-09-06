@@ -18,6 +18,7 @@ import hashlib
 import os
 import torch
 import datasets
+from datasets.distributed import split_dataset_by_node
 from huggingface_hub import hf_hub_download
 from safe.tokenizer import SAFETokenizer
 from rdkit import RDLogger
@@ -110,15 +111,75 @@ class UserDataset(datasets.Dataset):
         return {'input': self.safe_list[index]}
     
 
-def get_dataloader(config):
+def _validate_distributed_identity(streaming_rank, streaming_world_size):
+    """Validate the process identity used to shard hosted streaming data."""
+
+    if (
+        isinstance(streaming_rank, bool)
+        or not isinstance(streaming_rank, int)
+        or isinstance(streaming_world_size, bool)
+        or not isinstance(streaming_world_size, int)
+        or streaming_world_size <= 0
+        or not 0 <= streaming_rank < streaming_world_size
+    ):
+        raise ValueError(
+            "distributed data identity requires integer 0 <= streaming_rank < "
+            "streaming_world_size"
+        )
+    return streaming_rank, streaming_world_size
+
+
+def _shard_hosted_stream(
+    dataset,
+    *,
+    streaming_rank=None,
+    streaming_world_size=None,
+):
+    """Give each distributed rank a disjoint slice of the pinned stream.
+
+    Lightning cannot inject a ``DistributedSampler`` for an iterable dataset.
+    Without this explicit split, every DDP rank replays the same hosted stream
+    and the configured global batch overstates the number of unique examples.
+    """
+
+    if streaming_rank is None and streaming_world_size is None:
+        return dataset
+    if streaming_rank is None or streaming_world_size is None:
+        raise ValueError(
+            "streaming_rank and streaming_world_size must be provided together"
+        )
+    streaming_rank, streaming_world_size = _validate_distributed_identity(
+        streaming_rank, streaming_world_size
+    )
+    if streaming_world_size == 1:
+        return dataset
+    return split_dataset_by_node(
+        dataset,
+        rank=streaming_rank,
+        world_size=streaming_world_size,
+    )
+
+
+def get_dataloader(
+    config,
+    *,
+    streaming_rank=None,
+    streaming_world_size=None,
+):
     if config.data == 'safe':
+        dataset = datasets.load_dataset(
+            SAFE_GPT_REPO_ID,
+            revision=SAFE_GPT_DATASET_REVISION,
+            streaming=True,
+            split='train',
+        )
+        dataset = _shard_hosted_stream(
+            dataset,
+            streaming_rank=streaming_rank,
+            streaming_world_size=streaming_world_size,
+        )
         return torch.utils.data.DataLoader(
-            datasets.load_dataset(
-                SAFE_GPT_REPO_ID,
-                revision=SAFE_GPT_DATASET_REVISION,
-                streaming=True,
-                split='train',
-            ),
+            dataset,
             batch_size=config.loader.batch_size,
             collate_fn=Collator(config),
             num_workers=config.loader.num_workers,

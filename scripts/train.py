@@ -443,6 +443,69 @@ def _exact_positive_integer(value, label):
     return value
 
 
+def _pilot_streaming_partition(trainer):
+    """Resolve a strict single-node rank identity before loading the stream."""
+
+    if _PILOT_CONTRACT is None:
+        return None
+    expected_world_size = _PILOT_CONTRACT["expected_world_size"]
+    actual_world_size = _exact_positive_integer(
+        getattr(trainer, "world_size", None), "pilot runtime world size"
+    )
+    num_nodes = _exact_positive_integer(
+        getattr(trainer, "num_nodes", None), "pilot trainer num_nodes"
+    )
+    global_rank = getattr(trainer, "global_rank", None)
+    if (
+        isinstance(global_rank, bool)
+        or not isinstance(global_rank, int)
+        or not 0 <= global_rank < actual_world_size
+    ):
+        raise RuntimeError("pilot trainer has an invalid global rank")
+    if num_nodes != 1:
+        raise RuntimeError("pilot streaming partition requires exactly one node")
+    if actual_world_size != expected_world_size:
+        raise RuntimeError(
+            "pilot streaming world size disagrees with the launch contract"
+        )
+
+    distributed_environment = {
+        key: os.environ.get(key)
+        for key in ("LOCAL_RANK", "WORLD_SIZE", "NODE_RANK")
+    }
+    present_values = {
+        key: value
+        for key, value in distributed_environment.items()
+        if value is not None
+    }
+    if present_values:
+        expected_environment = {
+            "LOCAL_RANK": str(global_rank),
+            "WORLD_SIZE": str(actual_world_size),
+            "NODE_RANK": "0",
+        }
+        if distributed_environment != expected_environment:
+            raise RuntimeError(
+                "pilot distributed environment is partial or inconsistent: "
+                f"{distributed_environment!r}"
+            )
+    elif global_rank != 0:
+        raise RuntimeError("pilot nonzero rank lacks Lightning's DDP environment")
+    return global_rank, actual_world_size
+
+
+def _training_strategy():
+    """Use a self-spawning environment only for the reviewed local pilot."""
+
+    cluster_environment = None
+    if _PILOT_CONTRACT is not None:
+        cluster_environment = L.fabric.plugins.environments.LightningEnvironment()
+    return L.pytorch.strategies.DDPStrategy(
+        find_unused_parameters=False,
+        cluster_environment=cluster_environment,
+    )
+
+
 def _validate_pilot_completion_config(config):
     if _PILOT_CONTRACT is None:
         return None
@@ -934,15 +997,26 @@ def train(config):
             'a one-time provenance field and will not be reapplied.'
         )
     
-    train_dataloader = get_dataloader(config)
+    train_dataloader = None
+    if _PILOT_CONTRACT is None:
+        train_dataloader = get_dataloader(config)
     trainer = hydra.utils.instantiate(
         config.trainer,
         default_root_dir=os.getcwd(),
         callbacks=[hydra.utils.instantiate(config.callback), *pilot_callbacks],
-        strategy=hydra.utils.instantiate({'_target_': 'lightning.pytorch.strategies.DDPStrategy',
-                                          'find_unused_parameters': False}),
+        strategy=_training_strategy(),
         logger=wandb_logger,
         enable_progress_bar=True)
+    if _PILOT_CONTRACT is not None:
+        # Lightning cannot inject a DistributedSampler into an iterable
+        # dataset. Resolve the pilot rank after Trainer construction and split
+        # the hosted stream explicitly; manual/released paths remain unchanged.
+        streaming_rank, streaming_world_size = _pilot_streaming_partition(trainer)
+        train_dataloader = get_dataloader(
+            config,
+            streaming_rank=streaming_rank,
+            streaming_world_size=streaming_world_size,
+        )
     trainer.fit(model, train_dataloader, ckpt_path=ckpt_path)
     _write_pilot_training_summary(
         config=config,

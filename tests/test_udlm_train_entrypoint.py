@@ -35,6 +35,110 @@ def test_partial_pilot_environment_is_rejected(monkeypatch):
         train_entrypoint._pilot_environment_contract()
 
 
+def test_pilot_streaming_partition_accepts_parent_and_lightning_child(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        train_entrypoint,
+        "_PILOT_CONTRACT",
+        {"expected_world_size": 2},
+    )
+    for key in ("LOCAL_RANK", "WORLD_SIZE", "NODE_RANK"):
+        monkeypatch.delenv(key, raising=False)
+    parent = SimpleNamespace(global_rank=0, world_size=2, num_nodes=1)
+    assert train_entrypoint._pilot_streaming_partition(parent) == (0, 2)
+
+    monkeypatch.setenv("LOCAL_RANK", "1")
+    monkeypatch.setenv("WORLD_SIZE", "2")
+    monkeypatch.setenv("NODE_RANK", "0")
+    child = SimpleNamespace(global_rank=1, world_size=2, num_nodes=1)
+    assert train_entrypoint._pilot_streaming_partition(child) == (1, 2)
+
+
+@pytest.mark.parametrize(
+    ("trainer", "environment", "message"),
+    [
+        (
+            SimpleNamespace(global_rank=1, world_size=2, num_nodes=1),
+            {},
+            "nonzero rank lacks",
+        ),
+        (
+            SimpleNamespace(global_rank=0, world_size=2, num_nodes=1),
+            {"LOCAL_RANK": "0"},
+            "partial or inconsistent",
+        ),
+        (
+            SimpleNamespace(global_rank=1, world_size=2, num_nodes=1),
+            {"LOCAL_RANK": "01", "WORLD_SIZE": "2", "NODE_RANK": "0"},
+            "partial or inconsistent",
+        ),
+        (
+            SimpleNamespace(global_rank=0, world_size=1, num_nodes=2),
+            {},
+            "exactly one node",
+        ),
+        (
+            SimpleNamespace(global_rank=0, world_size=1, num_nodes=1),
+            {},
+            "world size disagrees",
+        ),
+    ],
+)
+def test_pilot_streaming_partition_rejects_ambiguous_identity(
+    monkeypatch, trainer, environment, message
+):
+    monkeypatch.setattr(
+        train_entrypoint,
+        "_PILOT_CONTRACT",
+        {"expected_world_size": 2},
+    )
+    for key in ("LOCAL_RANK", "WORLD_SIZE", "NODE_RANK"):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in environment.items():
+        monkeypatch.setenv(key, value)
+
+    with pytest.raises(RuntimeError, match=message):
+        train_entrypoint._pilot_streaming_partition(trainer)
+
+
+def test_pilot_strategy_ignores_inherited_scheduler_environment(monkeypatch):
+    monkeypatch.setattr(
+        train_entrypoint,
+        "_PILOT_CONTRACT",
+        {"expected_world_size": 2},
+    )
+    monkeypatch.setenv("SLURM_NTASKS", "2")
+    monkeypatch.setenv("SLURM_JOB_NAME", "hostile-allocation")
+    monkeypatch.setenv("SLURM_NODEID", "0")
+    monkeypatch.setenv("SLURM_LOCALID", "0")
+    monkeypatch.setenv("SLURM_PROCID", "0")
+
+    strategy = train_entrypoint._training_strategy()
+    trainer = train_entrypoint.L.Trainer(
+        accelerator="cpu",
+        devices=2,
+        strategy=strategy,
+        logger=False,
+        enable_checkpointing=False,
+        enable_progress_bar=False,
+    )
+
+    assert isinstance(
+        trainer.strategy.cluster_environment,
+        train_entrypoint.L.fabric.plugins.environments.LightningEnvironment,
+    )
+    assert trainer.strategy.cluster_environment.creates_processes_externally is False
+
+
+def test_manual_strategy_retains_lightning_environment_autodetection(monkeypatch):
+    monkeypatch.setattr(train_entrypoint, "_PILOT_CONTRACT", None)
+
+    strategy = train_entrypoint._training_strategy()
+
+    assert strategy.cluster_environment is None
+
+
 def test_ddp_child_accepts_only_lightning_exact_hydra_suffix(monkeypatch):
     run_dir = "/repo/output/udlm/pilot/hydra"
     base = [

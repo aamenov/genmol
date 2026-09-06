@@ -338,6 +338,9 @@ def test_child_command_sanitizes_python_and_binds_source_argv_config(
     monkeypatch.setenv("PYTHONHOME", "/hostile/home")
     monkeypatch.setenv("PYTHONWARNINGS", "error")
     monkeypatch.setenv("PYTHONARBITRARY", "hostile")
+    monkeypatch.setenv("LOCAL_RANK", "7")
+    monkeypatch.setenv("WORLD_SIZE", "8")
+    monkeypatch.setenv("MASTER_ADDR", "untrusted.example")
     command = [
         "/venv/python",
         "-u",
@@ -385,6 +388,10 @@ def test_child_command_sanitizes_python_and_binds_source_argv_config(
     )
     for hostile_key in ("PYTHONHOME", "PYTHONWARNINGS", "PYTHONARBITRARY"):
         assert ["-u", hostile_key] in [
+            child_command[index : index + 2] for index in range(len(child_command) - 1)
+        ]
+    for distributed_key in launcher.DISTRIBUTED_ENVIRONMENT_KEYS:
+        assert ["-u", distributed_key] in [
             child_command[index : index + 2] for index in range(len(child_command) - 1)
         ]
 
