@@ -116,6 +116,7 @@ class ExpectedRunIdentity:
     config_path: Path
     source_config: Mapping[str, Any]
     source_config_sha256: str
+    config_git_tracking: Mapping[str, Any] | None
     sampling_config: Mapping[str, Any]
     sampling_config_sha256: str
     effective_config: Mapping[str, Any]
@@ -243,7 +244,9 @@ def _require_project_virtual_environment() -> Path:
 
     expected_python = _project_venv_python()
     if not expected_python.is_file():
-        raise RuntimeError(f"project virtual-environment Python is missing: {expected_python}")
+        raise RuntimeError(
+            f"project virtual-environment Python is missing: {expected_python}"
+        )
     if Path(sys.executable).resolve() != expected_python.resolve():
         raise RuntimeError(
             "benchmark launcher must run with the project virtual environment: "
@@ -277,7 +280,9 @@ def _physical_gpu_indices() -> list[int]:
         text=True,
         check=True,
     )
-    indices = [int(line.strip()) for line in completed.stdout.splitlines() if line.strip()]
+    indices = [
+        int(line.strip()) for line in completed.stdout.splitlines() if line.strip()
+    ]
     if (
         not indices
         or any(index < 0 for index in indices)
@@ -543,6 +548,15 @@ def _build_expected_run_identity(
     metric_inputs = benchmark_runner.metric_input_provenance()
     checkpoint_info = benchmark_runner.checkpoint_metadata(checkpoint)
     source_config_sha256 = _sha256_file(config)
+    config_git_tracking = (
+        benchmark_runner.tracked_source_file_provenance(
+            config,
+            expected_revision=source_revision,
+            expected_sha256=source_config_sha256,
+        )
+        if source_revision is not None
+        else None
+    )
     source_config = benchmark_runner.load_yaml_config(config)
     if _sha256_file(config) != source_config_sha256:
         raise RuntimeError(f"Inference config changed while being inspected: {config}")
@@ -650,6 +664,7 @@ def _build_expected_run_identity(
         config_path=config,
         source_config=source_config,
         source_config_sha256=source_config_sha256,
+        config_git_tracking=config_git_tracking,
         sampling_config=sampling_config,
         sampling_config_sha256=_canonical_json_sha256(sampling_config),
         effective_config=effective_config,
@@ -827,7 +842,9 @@ def _completed(
             f"found {sorted(summary)}, expected {sorted(expected_top_level)}"
         )
 
-    expect("schema_version", summary.get("schema_version"), benchmark_runner.SCHEMA_VERSION)
+    expect(
+        "schema_version", summary.get("schema_version"), benchmark_runner.SCHEMA_VERSION
+    )
     expect("status", summary.get("status"), "completed")
     expect("seed", summary.get("seed"), seed)
     expect("num_samples", summary.get("num_samples"), expected.num_samples)
@@ -967,6 +984,9 @@ def _completed(
     config = _mapping(summary.get("config"))
     expect("config.path", _recorded_path(config.get("path")), expected.config_path)
     expect("config.sha256", config.get("sha256"), expected.source_config_sha256)
+    expect(
+        "config.git_tracking", config.get("git_tracking"), expected.config_git_tracking
+    )
     expect("config.source", config.get("source"), expected.source_config)
     expect("config.sampling", config.get("sampling"), expected.sampling_config)
     expect(
@@ -1014,11 +1034,12 @@ def _completed(
 
     metrics = _mapping(summary.get("metrics"))
     if set(metrics) != {"released_comparable", "strict"} or any(
-        not isinstance(metrics.get(branch), Mapping)
-        or not metrics.get(branch)
+        not isinstance(metrics.get(branch), Mapping) or not metrics.get(branch)
         for branch in ("released_comparable", "strict")
     ):
-        errors.append("metrics must contain non-empty released_comparable and strict branches")
+        errors.append(
+            "metrics must contain non-empty released_comparable and strict branches"
+        )
     expected_failure_fields = {
         "raw_safe_conversion_failed",
         "strict_decode_failed",
@@ -1034,7 +1055,9 @@ def _completed(
         isinstance(value, bool) or not isinstance(value, int) or value < 0
         for value in failure_counts.values()
     ):
-        errors.append("failure_counts does not match the current nonnegative count schema")
+        errors.append(
+            "failure_counts does not match the current nonnegative count schema"
+        )
     expected_runtime_fields = {
         "model_load_and_device_move",
         "model_sampling_and_tokenizer",
@@ -1053,13 +1076,19 @@ def _completed(
     ):
         errors.append("runtime_seconds does not match the current finite timing schema")
     environment = _mapping(summary.get("environment"))
-    expect("environment.requested_device", environment.get("requested_device"), "cuda:0")
+    expect(
+        "environment.requested_device", environment.get("requested_device"), "cuda:0"
+    )
     expect(
         "environment.resolved_model_device",
         environment.get("resolved_model_device"),
         "cuda:0",
     )
-    expect("environment.torch_cuda_available", environment.get("torch_cuda_available"), True)
+    expect(
+        "environment.torch_cuda_available",
+        environment.get("torch_cuda_available"),
+        True,
+    )
     if not _mapping(summary.get("tokenizer")):
         errors.append("tokenizer provenance must be a non-empty mapping")
     if expected.source_revision is not None:
@@ -1122,7 +1151,9 @@ def _completed(
     errors.extend(csv_errors)
     expect("raw_samples.csv actual row_count", actual_rows, expected.num_samples)
     expect("raw_samples.csv actual fields", actual_fields, expected_fields)
-    expect("artifacts.raw_samples_csv.sha256", raw_artifact.get("sha256"), actual_sha256)
+    expect(
+        "artifacts.raw_samples_csv.sha256", raw_artifact.get("sha256"), actual_sha256
+    )
 
     if errors:
         detail = "\n  - ".join(errors)
@@ -1137,6 +1168,22 @@ def _completed(
         # merely resemble a child summary structurally.  This shares the strict
         # raw-row arithmetic, metric, tokenizer, CUDA, and provenance contract
         # without imposing the final-report-only 1,000-row rules on pilot runs.
+        if expected.source_revision is None:
+            raise CompletionArtifactError(
+                f"Seed {seed} final completion lacks an expected source revision"
+            )
+        try:
+            current_source_revision = _require_clean_pushed_source()
+        except RuntimeError as error:
+            raise CompletionArtifactError(
+                f"Seed {seed} cannot validate completion against stable report code: "
+                f"{error}"
+            ) from error
+        if current_source_revision["head"] != expected.source_revision:
+            raise CompletionArtifactError(
+                f"Seed {seed} report code revision changed while the controller ran"
+            )
+
         from scripts.exps.denovo import report as benchmark_report
 
         try:
@@ -1228,11 +1275,9 @@ def _child_environment(
 
     environment = os.environ.copy()
     required_python_paths = [str(REPOSITORY_ROOT / "src"), str(REPOSITORY_ROOT)]
-    inherited_python_paths = [
-        entry
-        for entry in environment.get("PYTHONPATH", "").split(os.pathsep)
-        if entry and entry not in required_python_paths
-    ]
+    for inherited_key in tuple(environment):
+        if inherited_key.startswith("PYTHON"):
+            environment.pop(inherited_key)
     environment.update(
         {
             "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
@@ -1243,9 +1288,14 @@ def _child_environment(
             "PIP_CACHE_DIR": str(REPOSITORY_ROOT / ".cache/pip"),
             "TOKENIZERS_PARALLELISM": "false",
             "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
-            "PYTHONPATH": os.pathsep.join(
-                [*required_python_paths, *inherited_python_paths]
-            ),
+            # Do not inherit arbitrary startup code or dependency shadowing via
+            # sitecustomize/user paths from the controller shell.
+            "PYTHONPATH": os.pathsep.join(required_python_paths),
+            "PYTHONNOUSERSITE": "1",
+            "PYTHONOPTIMIZE": "0",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONUTF8": "1",
+            "PYTHONIOENCODING": "utf-8",
             "GENMOL_BENCHMARK_GPU_PHYSICAL_INDEX": str(gpu.index),
             "GENMOL_BENCHMARK_GPU_UUID": gpu.uuid,
             "GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT": json.dumps(
@@ -1481,23 +1531,27 @@ def main(argv: Optional[list[str]] = None) -> None:
             )
 
         free_slots = gpu_count - len(running)
-        candidates = sorted(
-            (
-                state
-                for state in states
-                if state.index not in running
-                and _eligible(
-                    state,
-                    max_utilization_percent=args.max_utilization_percent,
-                    min_free_memory_mib=args.min_free_memory_mib,
-                )
-            ),
-            key=lambda state: (
-                -(state.memory_total_mib - state.memory_used_mib),
-                state.utilization_percent,
-                state.index,
-            ),
-        )[:1] if free_slots > 0 else []
+        candidates = (
+            sorted(
+                (
+                    state
+                    for state in states
+                    if state.index not in running
+                    and _eligible(
+                        state,
+                        max_utilization_percent=args.max_utilization_percent,
+                        min_free_memory_mib=args.min_free_memory_mib,
+                    )
+                ),
+                key=lambda state: (
+                    -(state.memory_total_mib - state.memory_used_mib),
+                    state.utilization_percent,
+                    state.index,
+                ),
+            )[:1]
+            if free_slots > 0
+            else []
+        )
 
         launched_job = False
         for candidate in candidates:
@@ -1569,9 +1623,7 @@ def main(argv: Optional[list[str]] = None) -> None:
                     final_uuid_probe_completed_at_utc
                 ),
                 "source_revision": source_revision,
-                "gpu_inventory_at_selection": [
-                    state.as_dict() for state in states
-                ],
+                "gpu_inventory_at_selection": [state.as_dict() for state in states],
                 "running_physical_indices_at_selection": sorted(running),
                 "physical_gpu_at_final_uuid_probe": rechecked.as_dict(),
                 "policy": selection_policy,

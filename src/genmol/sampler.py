@@ -49,7 +49,12 @@ def load_model_from_path(path, expected_checkpoint_sha256=None):
 
 
 class Sampler:
-    def __init__(self, path, expected_checkpoint_sha256=None):
+    def __init__(
+        self,
+        path,
+        expected_checkpoint_sha256=None,
+        length_distribution=None,
+    ):
         self.model = load_model_from_path(path, expected_checkpoint_sha256)
         self.slicer = Slicer()
         self.dot_index = self.model.tokenizer('.')['input_ids'][1]
@@ -57,6 +62,18 @@ class Sampler:
         self.mdlm = self.model.mdlm
         self.mdlm.to_device(self.model.device)
         self.diffusion_type = getattr(self.model, 'diffusion_type', 'mdlm')
+        if length_distribution is None:
+            with open(os.path.join(ROOT_DIR, 'data/len.pk'), 'rb') as f:
+                length_distribution = pickle.load(f)
+        try:
+            self.length_distribution = tuple(length_distribution)
+        except TypeError as error:
+            raise ValueError('length_distribution must be an integer sequence') from error
+        if not self.length_distribution or any(
+            isinstance(value, bool) or not isinstance(value, int)
+            for value in self.length_distribution
+        ):
+            raise ValueError('length_distribution must be a nonempty integer sequence')
         
     @torch.no_grad()
     def generate(
@@ -154,13 +171,12 @@ class Sampler:
         return samples
 
     def _insert_mask(self, x, num_samples, min_add_len=18, **kwargs):
-        with open(os.path.join(ROOT_DIR, 'data/len.pk'), 'rb') as f:
-            seq_len_list = pickle.load(f)
-        
         x = x[0]
         x_new = []
         for _ in range(num_samples):
-            add_seq_len = max(random.choice(seq_len_list) - len(x), min_add_len)
+            add_seq_len = max(
+                random.choice(self.length_distribution) - len(x), min_add_len
+            )
             x_new.append(torch.hstack([x[:-1],
                                       torch.full((add_seq_len,), self.model.mask_index),
                                       x[-1:]]))

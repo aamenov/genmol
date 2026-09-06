@@ -47,7 +47,7 @@ for import_root in (REPO_ROOT, REPO_SRC):
         sys.path.remove(str(import_root))
     sys.path.insert(0, str(import_root))
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 TOKENIZER_REQUESTED_IDENTIFIER = "datamol-io/safe-gpt"
 RAW_SAMPLES_FILENAME = "raw_samples.csv"
 SUMMARY_FILENAME = "summary.json"
@@ -57,9 +57,7 @@ UDLM_PRIOR_CHECKPOINT_KEY = "udlm_prior_metadata"
 UDLM_PRIOR_VARIANTS = frozenset(
     {"release_uniform", "schedule_uniform", "empirical_frequency"}
 )
-UDLM_CATEGORICAL_PRIOR_VARIANTS = frozenset(
-    {"schedule_uniform", "empirical_frequency"}
-)
+UDLM_CATEGORICAL_PRIOR_VARIANTS = frozenset({"schedule_uniform", "empirical_frequency"})
 UDLM_PRIOR_VARIANT_IDENTITIES = {
     "release_uniform": {
         "comparison_role": "faithful_release_control",
@@ -137,9 +135,7 @@ SAFE_GPT_TOKENIZER_SHA256 = (
     "0db5f4dbdc7e8ff759e98483759611a426e187ee7f3f0a91edc8800abe7bf140"
 )
 SAFE_GPT_SPECIAL_TOKEN_IDS = (0, 1, 2, 3, 4)
-EMPIRICAL_FREQUENCY_IMPLEMENTATION_GIT_SHA = (
-    "56a96b2cd02f9be648a641c51c3d2d8b1ff3033b"
-)
+EMPIRICAL_FREQUENCY_IMPLEMENTATION_GIT_SHA = "56a96b2cd02f9be648a641c51c3d2d8b1ff3033b"
 
 METRIC_INPUT_SCHEMA_VERSION = 1
 SA_FRAGMENT_SCORES_RELATIVE_PATH = Path("oracle/fpscores.pkl")
@@ -171,6 +167,12 @@ TDC_METRIC_IMPLEMENTATION_SIZE_BYTES = {
 
 LAUNCH_ENVIRONMENT_KEYS = (
     "CUDA_VISIBLE_DEVICES",
+    "PYTHONPATH",
+    "PYTHONNOUSERSITE",
+    "PYTHONOPTIMIZE",
+    "PYTHONDONTWRITEBYTECODE",
+    "PYTHONUTF8",
+    "PYTHONIOENCODING",
     "GENMOL_BENCHMARK_GPU_PHYSICAL_INDEX",
     "GENMOL_BENCHMARK_GPU_UUID",
     "GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT",
@@ -178,6 +180,8 @@ LAUNCH_ENVIRONMENT_KEYS = (
 )
 
 IMPLEMENTATION_INPUT_PATHS = {
+    "genmol_package_init_source": REPO_ROOT / "src/genmol/__init__.py",
+    "genmol_utils_package_init_source": REPO_ROOT / "src/genmol/utils/__init__.py",
     "sampler_source": REPO_ROOT / "src/genmol/sampler.py",
     "model_source": REPO_ROOT / "src/genmol/model.py",
     "ema_source": REPO_ROOT / "src/genmol/utils/ema.py",
@@ -231,6 +235,14 @@ class PinnedSAMetricInput:
     fragment_scores: Mapping[int, float]
 
 
+@dataclass(frozen=True)
+class ImplementationInputSnapshot:
+    """Direct-input provenance plus resident data consumed during generation."""
+
+    provenance: Mapping[str, Any]
+    length_distribution: tuple[int, ...]
+
+
 def benchmark_run_label(global_step: int, checkpoint_sha256: str, seed: int) -> str:
     """Return the shared launcher/report identity label for one seed."""
     return f"denovo_step{int(global_step)}_{checkpoint_sha256[:12]}_seed{int(seed)}"
@@ -271,7 +283,9 @@ def _canonical_numeric_sequence_sha256(values: Sequence[Any]) -> str:
         elif type(value) is float and math.isfinite(value):
             canonical.append(value.hex())
         else:
-            raise RuntimeError("prior sequence contains a non-finite or nonnumeric value")
+            raise RuntimeError(
+                "prior sequence contains a non-finite or nonnumeric value"
+            )
     encoded = json.dumps(canonical, separators=(",", ":")).encode("ascii")
     return hashlib.sha256(encoded).hexdigest()
 
@@ -332,7 +346,9 @@ def _load_empirical_frequency_counts() -> tuple[dict[str, Any], list[int]]:
     if artifact.get("content_token_count") != 517_090:
         raise RuntimeError("pinned frequency artifact content_token_count is invalid")
     if artifact.get("git_sha") != EMPIRICAL_FREQUENCY_IMPLEMENTATION_GIT_SHA:
-        raise RuntimeError("pinned frequency artifact implementation git SHA is invalid")
+        raise RuntimeError(
+            "pinned frequency artifact implementation git SHA is invalid"
+        )
     dataset = artifact.get("dataset")
     expected_dataset = {
         "repo_id": TOKENIZER_REQUESTED_IDENTIFIER,
@@ -394,7 +410,9 @@ def validate_udlm_prior_metadata_record(
     """
 
     if not isinstance(value, Mapping):
-        raise RuntimeError("categorical UDLM checkpoint prior metadata must be a mapping")
+        raise RuntimeError(
+            "categorical UDLM checkpoint prior metadata must be a mapping"
+        )
     metadata = dict(value)
     if set(metadata) != UDLM_PRIOR_METADATA_FIELDS:
         missing = sorted(UDLM_PRIOR_METADATA_FIELDS - metadata.keys())
@@ -456,7 +474,10 @@ def validate_udlm_prior_metadata_record(
     ]
     if active_vocab_size != len(active_token_ids):
         raise RuntimeError("prior metadata active_vocab_size is inconsistent")
-    if expected_full_vocab_size is not None and full_vocab_size != expected_full_vocab_size:
+    if (
+        expected_full_vocab_size is not None
+        and full_vocab_size != expected_full_vocab_size
+    ):
         raise RuntimeError(
             "checkpoint prior metadata vocab size disagrees with hyperparameter config"
         )
@@ -553,14 +574,21 @@ def validate_udlm_prior_metadata_record(
             "frequency_active_token_count",
         ):
             if type(metadata[field]) is not int:
-                raise RuntimeError(f"empirical prior metadata {field} must be an integer")
+                raise RuntimeError(
+                    f"empirical prior metadata {field} must be an integer"
+                )
         for field, expected in expected_frequency.items():
             if metadata[field] != expected:
                 raise RuntimeError(f"empirical prior metadata {field} is invalid")
         if full_vocab_size != len(counts):
-            raise RuntimeError("empirical prior vocabulary disagrees with pinned counts")
+            raise RuntimeError(
+                "empirical prior vocabulary disagrees with pinned counts"
+            )
         active_count = sum(counts[token_id] for token_id in active_token_ids)
-        if active_count <= 0 or metadata["frequency_active_token_count"] != active_count:
+        if (
+            active_count <= 0
+            or metadata["frequency_active_token_count"] != active_count
+        ):
             raise RuntimeError("empirical prior active-token count is invalid")
         del artifact
         empirical = [counts[token_id] / active_count for token_id in active_token_ids]
@@ -583,7 +611,9 @@ def validate_udlm_prior_metadata_record(
 
     if state_dict is not None:
         if not isinstance(state_dict, Mapping):
-            raise RuntimeError("categorical UDLM checkpoint state_dict must be a mapping")
+            raise RuntimeError(
+                "categorical UDLM checkpoint state_dict must be a mapping"
+            )
         expected_ids = torch.tensor(active_token_ids, dtype=torch.long)
         ids = state_dict.get("mdlm.diffusion_token_ids")
         if (
@@ -596,7 +626,9 @@ def validate_udlm_prior_metadata_record(
                 "checkpoint mdlm.diffusion_token_ids disagrees with prior metadata"
             )
         expected_mapping = torch.full((full_vocab_size,), -1, dtype=torch.long)
-        expected_mapping[expected_ids] = torch.arange(active_vocab_size, dtype=torch.long)
+        expected_mapping[expected_ids] = torch.arange(
+            active_vocab_size, dtype=torch.long
+        )
         mapping = state_dict.get("mdlm.token_to_diffusion_index")
         if (
             not isinstance(mapping, torch.Tensor)
@@ -650,6 +682,7 @@ def _read_pinned_regular_file(
     relative_path: Path,
     expected_sha256: str,
     expected_size_bytes: int,
+    artifact_label: str = "TDC SA fragment-score artifact",
 ) -> tuple[Path, bytes]:
     """Read one exact in-repository regular file through a stable descriptor.
 
@@ -666,7 +699,9 @@ def _read_pinned_regular_file(
         or len(expected_sha256) != 64
         or any(character not in "0123456789abcdef" for character in expected_sha256)
     ):
-        raise ValueError("expected metric-input SHA-256 must be 64 lowercase hex digits")
+        raise ValueError(
+            "expected metric-input SHA-256 must be 64 lowercase hex digits"
+        )
     if type(expected_size_bytes) is not int or expected_size_bytes <= 0:
         raise ValueError("expected metric-input size must be a positive integer")
 
@@ -683,12 +718,12 @@ def _read_pinned_regular_file(
         resolved = candidate.resolve(strict=True)
     except OSError as error:
         raise FileNotFoundError(
-            "Pinned TDC SA fragment-score artifact is missing; refusing TDC's "
-            f"implicit downloader: {candidate}"
+            f"Pinned {artifact_label} is missing; refusing any implicit downloader: "
+            f"{candidate}"
         ) from error
     if resolved != candidate:
         raise RuntimeError(
-            "Pinned TDC SA fragment-score artifact must not traverse a symlink: "
+            f"Pinned {artifact_label} must not traverse a symlink: "
             f"{candidate} resolves to {resolved}"
         )
     try:
@@ -710,11 +745,10 @@ def _read_pinned_regular_file(
     try:
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode):
-            raise RuntimeError(f"Pinned metric input is not a regular file: {candidate}")
-        if (
-            path_before.st_dev != before.st_dev
-            or path_before.st_ino != before.st_ino
-        ):
+            raise RuntimeError(
+                f"Pinned metric input is not a regular file: {candidate}"
+            )
+        if path_before.st_dev != before.st_dev or path_before.st_ino != before.st_ino:
             raise RuntimeError(
                 f"Pinned metric-input path was replaced before open: {candidate}"
             )
@@ -764,12 +798,12 @@ def _read_pinned_regular_file(
     actual_sha256 = hashlib.sha256(payload).hexdigest()
     if actual_size != expected_size_bytes:
         raise RuntimeError(
-            "Pinned TDC SA fragment-score artifact has the wrong size: "
+            f"Pinned {artifact_label} has the wrong size: "
             f"{actual_size} bytes != {expected_size_bytes} bytes"
         )
     if actual_sha256 != expected_sha256:
         raise RuntimeError(
-            "Pinned TDC SA fragment-score artifact has the wrong SHA-256: "
+            f"Pinned {artifact_label} has the wrong SHA-256: "
             f"{actual_sha256} != {expected_sha256}"
         )
     return candidate, payload
@@ -786,7 +820,9 @@ def _decode_sa_fragment_scores(
     try:
         rows = pickle.loads(payload)
     except Exception as error:
-        raise RuntimeError("Pinned TDC SA fragment scores are not a valid pickle") from error
+        raise RuntimeError(
+            "Pinned TDC SA fragment scores are not a valid pickle"
+        ) from error
     if type(rows) is not list or len(rows) != expected_row_count:
         raise RuntimeError(
             "Pinned TDC SA fragment-score row count is invalid: "
@@ -834,7 +870,9 @@ def _tdc_metric_implementation_provenance() -> dict[str, Any]:
     try:
         distribution = importlib.metadata.distribution("PyTDC")
     except importlib.metadata.PackageNotFoundError as error:
-        raise RuntimeError("The pinned benchmark requires the PyTDC distribution") from error
+        raise RuntimeError(
+            "The pinned benchmark requires the PyTDC distribution"
+        ) from error
     if distribution.version != TDC_METRIC_DISTRIBUTION_VERSION:
         raise RuntimeError(
             "PyTDC version does not match the audited metric backend: "
@@ -844,7 +882,9 @@ def _tdc_metric_implementation_provenance() -> dict[str, Any]:
     for name, relative_path in TDC_METRIC_IMPLEMENTATION_PATHS.items():
         path = Path(distribution.locate_file(relative_path)).resolve()
         if not path.is_file() or path.is_symlink():
-            raise RuntimeError(f"Required TDC metric implementation is not regular: {path}")
+            raise RuntimeError(
+                f"Required TDC metric implementation is not regular: {path}"
+            )
         digest = _sha256(path)
         size_bytes = path.stat().st_size
         if digest != TDC_METRIC_IMPLEMENTATION_SHA256[name]:
@@ -1109,9 +1149,7 @@ def generate_raw_model_text(
     """
     import torch
 
-    loaded_diffusion_type = str(
-        getattr(sampler, "diffusion_type", "mdlm")
-    ).lower()
+    loaded_diffusion_type = str(getattr(sampler, "diffusion_type", "mdlm")).lower()
     if loaded_diffusion_type != diffusion_type:
         raise BenchmarkConfigurationError(
             "Inference config requests diffusion_type="
@@ -1263,9 +1301,7 @@ def decode_records(
 
     records: list[dict[str, Any]] = []
     for sample_index, raw_model_text in enumerate(raw_model_texts):
-        record: dict[str, Any] = {
-            field: None for field in RAW_SAMPLE_FIELDS
-        }
+        record: dict[str, Any] = {field: None for field in RAW_SAMPLE_FIELDS}
         record.update(
             {
                 "sample_index": sample_index,
@@ -1358,7 +1394,9 @@ def decode_records(
     return records
 
 
-def _first_unique_indices(records: Sequence[Mapping[str, Any]], smiles_key: str) -> list[int]:
+def _first_unique_indices(
+    records: Sequence[Mapping[str, Any]], smiles_key: str
+) -> list[int]:
     seen: set[str] = set()
     indices: list[int] = []
     for index, record in enumerate(records):
@@ -1385,7 +1423,9 @@ def _evaluate_metric_branch(
     valid_smiles = [records[index][smiles_key] for index in valid_indices]
 
     if valid_smiles:
-        qed_scores = _normalise_scores(oracle_qed(valid_smiles), len(valid_smiles), "QED")
+        qed_scores = _normalise_scores(
+            oracle_qed(valid_smiles), len(valid_smiles), "QED"
+        )
         sa_scores = _normalise_scores(oracle_sa(valid_smiles), len(valid_smiles), "SA")
         for index, qed, sa in zip(valid_indices, qed_scores, sa_scores):
             records[index][f"{prefix}_qed"] = qed
@@ -1400,8 +1440,7 @@ def _evaluate_metric_branch(
         )
     unique_smiles = [records[index][smiles_key] for index in unique_indices]
     quality_count = sum(
-        bool(records[index][f"{prefix}_quality_counted"])
-        for index in unique_indices
+        bool(records[index][f"{prefix}_quality_counted"]) for index in unique_indices
     )
 
     if unique_smiles:
@@ -1499,7 +1538,8 @@ def evaluate_records(
         "released_largest_component_applied": sum(
             bool(record["released_largest_component_applied"]) for record in records
         ),
-        "strict_duplicates": strict_metrics["valid_count"] - strict_metrics["unique_count"],
+        "strict_duplicates": strict_metrics["valid_count"]
+        - strict_metrics["unique_count"],
         "released_duplicates": (
             released_metrics["valid_count"] - released_metrics["unique_count"]
         ),
@@ -1507,7 +1547,9 @@ def evaluate_records(
     return metrics, failure_counts
 
 
-def _atomic_write(path: Path, writer: Callable[[Any], None], *, newline: str | None = None) -> None:
+def _atomic_write(
+    path: Path, writer: Callable[[Any], None], *, newline: str | None = None
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{path.name}.",
@@ -1539,7 +1581,9 @@ def _atomic_write(path: Path, writer: Callable[[Any], None], *, newline: str | N
 
 def atomic_write_csv(path: Path, records: Sequence[Mapping[str, Any]]) -> None:
     def write(handle: Any) -> None:
-        csv_writer = csv.DictWriter(handle, fieldnames=RAW_SAMPLE_FIELDS, extrasaction="raise")
+        csv_writer = csv.DictWriter(
+            handle, fieldnames=RAW_SAMPLE_FIELDS, extrasaction="raise"
+        )
         csv_writer.writeheader()
         csv_writer.writerows(records)
 
@@ -1566,7 +1610,9 @@ def output_lock(output_dir: Path) -> Iterable[None]:
             "before removing a stale lock."
         ) from exc
     try:
-        lock_payload = json.dumps({"pid": os.getpid(), "created_at_utc": _utc_now()}) + "\n"
+        lock_payload = (
+            json.dumps({"pid": os.getpid(), "created_at_utc": _utc_now()}) + "\n"
+        )
         os.write(descriptor, lock_payload.encode("utf-8"))
         os.fsync(descriptor)
         os.close(descriptor)
@@ -1613,7 +1659,9 @@ def load_yaml_config(path: Path) -> dict[str, Any]:
 
 def validate_sampling_config(config: Mapping[str, Any]) -> dict[str, Any]:
     missing = [
-        key for key in ("softmax_temp", "randomness", "min_add_len") if key not in config
+        key
+        for key in ("softmax_temp", "randomness", "min_add_len")
+        if key not in config
     ]
     if missing:
         raise BenchmarkConfigurationError(
@@ -1629,7 +1677,9 @@ def validate_sampling_config(config: Mapping[str, Any]) -> dict[str, Any]:
         randomness = float(config["randomness"])
         min_add_len = int(config["min_add_len"])
     except (TypeError, ValueError) as exc:
-        raise BenchmarkConfigurationError("Sampling parameters have invalid types") from exc
+        raise BenchmarkConfigurationError(
+            "Sampling parameters have invalid types"
+        ) from exc
     if not math.isfinite(softmax_temp) or softmax_temp <= 0:
         raise BenchmarkConfigurationError("softmax_temp must be finite and positive")
     if not math.isfinite(randomness) or randomness < 0:
@@ -1810,7 +1860,9 @@ def checkpoint_metadata(
     udlm_prior_metadata_sha256: str | None = None
     if diffusion_type == "mdlm":
         if checkpoint_prior_metadata is not None:
-            raise RuntimeError("MDLM checkpoint unexpectedly declares UDLM prior metadata")
+            raise RuntimeError(
+                "MDLM checkpoint unexpectedly declares UDLM prior metadata"
+            )
         if "mdlm.stationary_probs" in state_dict:
             raise RuntimeError(
                 "MDLM checkpoint unexpectedly contains a categorical UDLM prior"
@@ -1882,9 +1934,7 @@ def checkpoint_metadata(
                 expected_uniform_mixture_weight=expected_mix,
                 state_dict=state_dict,
             )
-            udlm_prior_metadata_sha256 = _canonical_json_sha256(
-                udlm_prior_metadata
-            )
+            udlm_prior_metadata_sha256 = _canonical_json_sha256(udlm_prior_metadata)
     metadata = {
         "path": checkpoint_identity.resolved_path,
         "sha256": checkpoint_identity.sha256,
@@ -1987,6 +2037,68 @@ def require_clean_pushed_source(expected_revision: str) -> dict[str, str]:
     return {"head": head, "upstream": upstream}
 
 
+def tracked_source_file_provenance(
+    path: Path,
+    *,
+    expected_revision: str,
+    expected_sha256: str,
+) -> dict[str, Any]:
+    """Require one worktree file to equal its blob at the pinned source commit."""
+
+    if (
+        not isinstance(expected_revision, str)
+        or len(expected_revision) != 40
+        or any(character not in "0123456789abcdef" for character in expected_revision)
+    ):
+        raise BenchmarkConfigurationError(
+            "expected source revision must be 40 lowercase hexadecimal digits"
+        )
+    expected_sha256 = _sha256_identity(expected_sha256, "expected tracked-file SHA-256")
+    resolved = path.resolve(strict=True)
+    if resolved == REPO_ROOT or REPO_ROOT not in resolved.parents:
+        raise BenchmarkConfigurationError(
+            f"tracked source file must remain inside the repository: {resolved}"
+        )
+    relative_path = resolved.relative_to(REPO_ROOT)
+    if any(":" in part for part in relative_path.parts):
+        raise BenchmarkConfigurationError(
+            f"tracked source path contains an unsupported colon: {relative_path}"
+        )
+    try:
+        committed = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(REPO_ROOT),
+                "show",
+                f"{expected_revision}:{relative_path.as_posix()}",
+            ],
+            check=True,
+            capture_output=True,
+        ).stdout
+    except (FileNotFoundError, subprocess.CalledProcessError) as error:
+        raise RuntimeError(
+            f"benchmark config is not tracked at {expected_revision}: {relative_path}"
+        ) from error
+    committed_sha256 = hashlib.sha256(committed).hexdigest()
+    if committed_sha256 != expected_sha256:
+        raise RuntimeError(
+            "tracked config blob disagrees with the controller-pinned digest: "
+            f"{committed_sha256} != {expected_sha256}"
+        )
+    if _sha256(resolved) != expected_sha256:
+        raise RuntimeError(
+            f"worktree config bytes disagree with the tracked blob: {relative_path}"
+        )
+    return {
+        "path": str(resolved),
+        "relative_path": relative_path.as_posix(),
+        "source_revision": expected_revision,
+        "sha256": committed_sha256,
+        "tracked_at_source_revision": True,
+    }
+
+
 def git_provenance() -> dict[str, Any]:
     status = _git_command(["status", "--porcelain=v1", "--untracked-files=normal"])
     return {
@@ -2000,10 +2112,8 @@ def git_provenance() -> dict[str, Any]:
     }
 
 
-def implementation_input_provenance() -> dict[str, Any]:
-    """Fingerprint source/data inputs that directly define generation semantics."""
-    import pickle
-
+def load_implementation_input_snapshot() -> ImplementationInputSnapshot:
+    """Fingerprint direct inputs and retain the exact generation-length values."""
     result: dict[str, Any] = {}
     for name, path in IMPLEMENTATION_INPUT_PATHS.items():
         if not path.is_file():
@@ -2014,9 +2124,24 @@ def implementation_input_provenance() -> dict[str, Any]:
             "size_bytes": path.stat().st_size,
         }
 
-    length_path = IMPLEMENTATION_INPUT_PATHS["length_distribution"]
-    with length_path.open("rb") as handle:
-        lengths = pickle.load(handle)
+    length_path = IMPLEMENTATION_INPUT_PATHS["length_distribution"].resolve()
+    try:
+        length_relative_path = length_path.relative_to(REPO_ROOT.resolve(strict=True))
+    except (OSError, ValueError) as error:
+        raise RuntimeError(
+            f"Length distribution must remain inside the repository: {length_path}"
+        ) from error
+    _, length_payload = _read_pinned_regular_file(
+        repository_root=REPO_ROOT,
+        relative_path=length_relative_path,
+        expected_sha256=result["length_distribution"]["sha256"],
+        expected_size_bytes=result["length_distribution"]["size_bytes"],
+        artifact_label="generation length-distribution artifact",
+    )
+    try:
+        lengths = pickle.loads(length_payload)
+    except Exception as error:
+        raise RuntimeError("data/len.pk is not a valid pickle") from error
     if not isinstance(lengths, Sequence) or isinstance(lengths, (str, bytes)):
         raise RuntimeError("data/len.pk must contain a sequence of lengths")
     if not lengths:
@@ -2029,9 +2154,19 @@ def implementation_input_provenance() -> dict[str, Any]:
             "minimum": min(lengths),
             "median": _json_compatible_number(statistics.median(lengths)),
             "maximum": max(lengths),
+            "loading_policy": "verified_bytes_retained_in_memory_for_generation",
         }
     )
-    return result
+    return ImplementationInputSnapshot(
+        provenance=result,
+        length_distribution=tuple(lengths),
+    )
+
+
+def implementation_input_provenance() -> dict[str, Any]:
+    """Fingerprint source/data inputs that directly define generation semantics."""
+
+    return dict(load_implementation_input_snapshot().provenance)
 
 
 def tokenizer_provenance(tokenizer: Any) -> dict[str, Any]:
@@ -2069,9 +2204,7 @@ def tokenizer_provenance(tokenizer: Any) -> dict[str, Any]:
         "base_vocab_size": int(tokenizer.vocab_size),
         "effective_size": int(len(tokenizer)),
         "vocabulary_sha256": _canonical_json_sha256(normalized_vocabulary),
-        "added_vocabulary_sha256": _canonical_json_sha256(
-            normalized_added_vocabulary
-        ),
+        "added_vocabulary_sha256": _canonical_json_sha256(normalized_added_vocabulary),
         "backend_json_sha256": (
             hashlib.sha256(backend_json.encode("utf-8")).hexdigest()
             if backend_json is not None
@@ -2127,7 +2260,11 @@ def environment_metadata(requested_device: str, resolved_device: str) -> dict[st
     }
     resolved = torch.device(resolved_device)
     if resolved.type == "cuda":
-        logical_index = resolved.index if resolved.index is not None else torch.cuda.current_device()
+        logical_index = (
+            resolved.index
+            if resolved.index is not None
+            else torch.cuda.current_device()
+        )
         properties = torch.cuda.get_device_properties(logical_index)
         metadata["cuda_device"] = {
             "logical_index": logical_index,
@@ -2165,6 +2302,7 @@ def assert_runtime_module_provenance(
 ) -> None:
     """Bind loaded generation modules to the source hashes in the summary."""
 
+    import genmol as genmol_package_module
     import genmol.backbone as backbone_module
     import genmol.diffusion as diffusion_module
     import genmol.model as model_module
@@ -2176,8 +2314,11 @@ def assert_runtime_module_provenance(
     import genmol.utils.utils_data as data_utils_module
     import genmol.utils.utils_moco as moco_utils_module
     import genmol.utils.utils_save as save_utils_module
+    import genmol.utils as genmol_utils_package_module
 
     modules = {
+        "genmol_package_init_source": genmol_package_module,
+        "genmol_utils_package_init_source": genmol_utils_package_module,
         "sampler_source": sampler_module,
         "model_source": model_module,
         "ema_source": ema_module,
@@ -2304,11 +2445,14 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     # This is deliberately the first content/provenance preflight.  A controller
     # may remain alive while its worktree changes, so every child independently
     # requires the exact pushed revision embedded in its command.
-    source_revision_before = require_clean_pushed_source(
-        args.expected_source_revision
-    )
+    source_revision_before = require_clean_pushed_source(args.expected_source_revision)
     expected_config_sha256 = _sha256_identity(
         args.expected_config_sha256, "expected config SHA-256"
+    )
+    config_git_provenance = tracked_source_file_provenance(
+        config_path,
+        expected_revision=source_revision_before["head"],
+        expected_sha256=expected_config_sha256,
     )
 
     started_at = _utc_now()
@@ -2340,7 +2484,8 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     effective_config_sha256 = _canonical_json_sha256(effective_config)
     # Capture every direct generation implementation before checkpoint metadata
     # imports the stable-descriptor helper or the sampler imports model code.
-    implementation_inputs = implementation_input_provenance()
+    implementation_snapshot = load_implementation_input_snapshot()
+    implementation_inputs = dict(implementation_snapshot.provenance)
 
     with output_lock(output_dir):
         validate_output_target(output_dir, overwrite=args.overwrite)
@@ -2374,10 +2519,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                 "Inference config exclude_special_tokens does not match checkpoint "
                 "metadata"
             )
-        if (
-            checkpoint_info["udlm_prior_variant"]
-            != sampling_config["prior_variant"]
-        ):
+        if checkpoint_info["udlm_prior_variant"] != sampling_config["prior_variant"]:
             raise BenchmarkConfigurationError(
                 "Inference config prior_variant does not match checkpoint metadata: "
                 f"{sampling_config['prior_variant']!r} != "
@@ -2403,6 +2545,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         sampler = Sampler(
             str(checkpoint_path),
             expected_checkpoint_sha256=checkpoint_info["sha256"],
+            length_distribution=implementation_snapshot.length_distribution,
         )
         sampler.model.to(args.device)
         sampler.mdlm.to_device(sampler.model.device)
@@ -2483,9 +2626,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "run": {
                 "seed": args.seed,
                 "requested_sample_count": args.num_samples,
-                "evaluation_tier": (
-                    "final" if args.num_samples == 1_000 else "pilot"
-                ),
+                "evaluation_tier": ("final" if args.num_samples == 1_000 else "pilot"),
                 "final_protocol_eligible": args.num_samples == 1_000,
                 "started_at_utc": started_at,
                 "completed_at_utc": _utc_now(),
@@ -2506,6 +2647,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "config": {
                 "path": str(config_path),
                 "sha256": source_config_sha256,
+                "git_tracking": config_git_provenance,
                 "sampling_sha256": sampling_config_sha256,
                 "effective_sha256": effective_config_sha256,
                 "source": source_config,

@@ -41,9 +41,7 @@ def _categorical_checkpoint_parts(
     torch = pytest.importorskip("torch")
     full_vocab_size = 1880
     excluded = (
-        list(benchmark.SAFE_GPT_SPECIAL_TOKEN_IDS)
-        if exclude_special_tokens
-        else []
+        list(benchmark.SAFE_GPT_SPECIAL_TOKEN_IDS) if exclude_special_tokens else []
     )
     active_ids = [
         token_id for token_id in range(full_vocab_size) if token_id not in excluded
@@ -53,20 +51,23 @@ def _categorical_checkpoint_parts(
             (len(active_ids),), 1.0 / len(active_ids), dtype=torch.float64
         )
         probabilities /= probabilities.sum()
-        frequency = {field: None for field in (
-            "frequency_artifact_path",
-            "frequency_artifact_sha256",
-            "frequency_artifact_schema_version",
-            "frequency_example_count",
-            "frequency_content_token_count",
-            "frequency_active_token_count",
-            "frequency_dataset_repo_id",
-            "frequency_dataset_revision",
-            "frequency_dataset_split",
-            "frequency_dataset_selection",
-            "frequency_ordered_text_sha256",
-            "frequency_implementation_git_sha",
-        )}
+        frequency = {
+            field: None
+            for field in (
+                "frequency_artifact_path",
+                "frequency_artifact_sha256",
+                "frequency_artifact_schema_version",
+                "frequency_example_count",
+                "frequency_content_token_count",
+                "frequency_active_token_count",
+                "frequency_dataset_repo_id",
+                "frequency_dataset_revision",
+                "frequency_dataset_split",
+                "frequency_dataset_selection",
+                "frequency_ordered_text_sha256",
+                "frequency_implementation_git_sha",
+            )
+        }
         recorded_mix = None
     else:
         artifact, counts = benchmark._load_empirical_frequency_counts()
@@ -431,9 +432,9 @@ def test_config_validation_and_fingerprints(tmp_path: Path) -> None:
         "prior_variant": None,
         "prior_metadata_sha256": None,
     }
-    assert benchmark._canonical_json_sha256(sampling) == benchmark._canonical_json_sha256(
-        dict(reversed(list(sampling.items())))
-    )
+    assert benchmark._canonical_json_sha256(
+        sampling
+    ) == benchmark._canonical_json_sha256(dict(reversed(list(sampling.items()))))
 
     with pytest.raises(benchmark.BenchmarkConfigurationError, match="missing"):
         benchmark.validate_sampling_config({})
@@ -632,9 +633,7 @@ def test_checkpoint_metadata_validates_full_categorical_prior_identity(
     assert observed["udlm_exclude_special_tokens"] is exclude_special_tokens
 
 
-@pytest.mark.parametrize(
-    "variant", ["schedule_uniform", "empirical_frequency"]
-)
+@pytest.mark.parametrize("variant", ["schedule_uniform", "empirical_frequency"])
 def test_prior_metadata_hash_is_validated_without_state(variant: str) -> None:
     metadata, _, _ = _categorical_checkpoint_parts(variant)
     benchmark.validate_udlm_prior_metadata_record(
@@ -717,9 +716,7 @@ def test_checkpoint_metadata_rejects_tampered_empirical_artifact(
     metadata, state, config = _categorical_checkpoint_parts("empirical_frequency")
     artifact = tmp_path / benchmark.EMPIRICAL_FREQUENCY_RELATIVE_PATH
     artifact.parent.mkdir(parents=True)
-    source_artifact = (
-        benchmark.REPO_ROOT / benchmark.EMPIRICAL_FREQUENCY_RELATIVE_PATH
-    )
+    source_artifact = benchmark.REPO_ROOT / benchmark.EMPIRICAL_FREQUENCY_RELATIVE_PATH
     artifact.write_bytes(source_artifact.read_bytes() + b"\n")
     monkeypatch.setattr(benchmark, "REPO_ROOT", tmp_path)
     checkpoint_path = tmp_path / "tampered-artifact.ckpt"
@@ -738,9 +735,12 @@ def test_checkpoint_metadata_rejects_tampered_empirical_artifact(
 
 
 def test_implementation_inputs_include_length_distribution_statistics() -> None:
-    inputs = benchmark.implementation_input_provenance()
+    snapshot = benchmark.load_implementation_input_snapshot()
+    inputs = snapshot.provenance
 
     assert set(inputs) == {
+        "genmol_package_init_source",
+        "genmol_utils_package_init_source",
         "sampler_source",
         "model_source",
         "ema_source",
@@ -760,6 +760,16 @@ def test_implementation_inputs_include_length_distribution_statistics() -> None:
     lengths = inputs["length_distribution"]
     assert lengths["count"] > 0
     assert lengths["minimum"] <= lengths["median"] <= lengths["maximum"]
+    assert lengths["count"] == len(snapshot.length_distribution)
+    assert (
+        lengths["sha256"]
+        == hashlib.sha256(
+            (benchmark.REPO_ROOT / "data/len.pk").read_bytes()
+        ).hexdigest()
+    )
+    assert lengths["loading_policy"] == (
+        "verified_bytes_retained_in_memory_for_generation"
+    )
 
 
 def test_pinned_sa_artifact_loads_verified_bytes_without_tdc_download(
@@ -948,6 +958,64 @@ def test_child_source_preflight_binds_expected_head_and_upstream(
         benchmark.require_clean_pushed_source(revision)
     with pytest.raises(benchmark.BenchmarkConfigurationError, match="40 lowercase"):
         benchmark.require_clean_pushed_source("A" * 40)
+
+
+def test_tracked_source_file_provenance_rejects_external_or_modified_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    config = tmp_path / "configs" / "inference.yaml"
+    config.parent.mkdir()
+    config.write_text("num_steps: 16\n", encoding="utf-8")
+    (tmp_path / ".gitignore").write_text("/output/\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.name=GenMol Test",
+            "-c",
+            "user.email=genmol@example.invalid",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+        check=True,
+    )
+    revision = subprocess.check_output(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"], text=True
+    ).strip()
+    digest = hashlib.sha256(config.read_bytes()).hexdigest()
+    monkeypatch.setattr(benchmark, "REPO_ROOT", tmp_path)
+
+    provenance = benchmark.tracked_source_file_provenance(
+        config,
+        expected_revision=revision,
+        expected_sha256=digest,
+    )
+    assert provenance["relative_path"] == "configs/inference.yaml"
+    assert provenance["tracked_at_source_revision"] is True
+
+    external = tmp_path / "output" / "custom.yaml"
+    external.parent.mkdir()
+    external.write_text("num_steps: 8\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="not tracked"):
+        benchmark.tracked_source_file_provenance(
+            external,
+            expected_revision=revision,
+            expected_sha256=hashlib.sha256(external.read_bytes()).hexdigest(),
+        )
+
+    config.write_text("num_steps: 32\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="worktree config bytes"):
+        benchmark.tracked_source_file_provenance(
+            config,
+            expected_revision=revision,
+            expected_sha256=digest,
+        )
 
 
 def test_seed_sampling_repeats_python_numpy_and_torch_streams() -> None:

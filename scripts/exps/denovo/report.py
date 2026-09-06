@@ -54,12 +54,14 @@ from scripts.exps.denovo.benchmark import (  # noqa: E402
     UDLM_PRIOR_VARIANT_IDENTITIES,
     UDLM_PRIOR_VARIANTS,
     benchmark_run_label,
+    require_clean_pushed_source,
+    tracked_source_file_provenance,
     validate_udlm_prior_metadata_record,
     validate_sampling_config,
 )
 
 
-REPORT_SCHEMA_VERSION = 4
+REPORT_SCHEMA_VERSION = 5
 EXPECTED_SEEDS = (0, 1, 2)
 EXPECTED_SAMPLES_PER_SEED = 1_000
 EXPECTED_GLOBAL_STEP = 50_000
@@ -243,7 +245,9 @@ def _integer(value: Any, context: str) -> int:
     return value
 
 
-def _finite_number(value: Any, context: str, *, allow_none: bool = False) -> float | None:
+def _finite_number(
+    value: Any, context: str, *, allow_none: bool = False
+) -> float | None:
     if value is None and allow_none:
         return None
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -262,7 +266,9 @@ def _utc_datetime(value: Any, context: str) -> datetime:
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as error:
-        raise ReportValidationError(f"{context} must be an ISO-8601 timestamp") from error
+        raise ReportValidationError(
+            f"{context} must be an ISO-8601 timestamp"
+        ) from error
     if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
         raise ReportValidationError(f"{context} must include an explicit UTC offset")
     return parsed
@@ -340,7 +346,9 @@ def _csv_number(value: str, context: str, *, optional: bool = False) -> float | 
     try:
         number = float(value)
     except (TypeError, ValueError) as exc:
-        raise ReportValidationError(f"{context} must be numeric; got {value!r}") from exc
+        raise ReportValidationError(
+            f"{context} must be numeric; got {value!r}"
+        ) from exc
     if not math.isfinite(number):
         raise ReportValidationError(f"{context} must be finite")
     return number
@@ -353,7 +361,9 @@ def _ratio(numerator: int, denominator: int) -> float | None:
 def _assert_close(actual: Any, expected: float | None, context: str) -> None:
     if expected is None:
         if actual is not None:
-            raise ReportValidationError(f"{context} must be null when its denominator is zero")
+            raise ReportValidationError(
+                f"{context} must be null when its denominator is zero"
+            )
         return
     number = _finite_number(actual, context)
     if not math.isclose(number, expected, rel_tol=0.0, abs_tol=1e-12):
@@ -399,12 +409,18 @@ def discover_run_directories(runs_dir: Path) -> dict[int, Path]:
     by_seed: dict[int, Path] = {}
     for run_dir in sorted(candidate_dirs):
         try:
-            summary = json.loads((run_dir / SUMMARY_FILENAME).read_text(encoding="utf-8"))
+            summary = json.loads(
+                (run_dir / SUMMARY_FILENAME).read_text(encoding="utf-8")
+            )
         except json.JSONDecodeError as exc:
-            raise ReportValidationError(f"invalid JSON in {run_dir / SUMMARY_FILENAME}") from exc
+            raise ReportValidationError(
+                f"invalid JSON in {run_dir / SUMMARY_FILENAME}"
+            ) from exc
         summary = _mapping(summary, str(run_dir / SUMMARY_FILENAME))
         run = _mapping(_required(summary, "run", str(run_dir)), f"{run_dir}: run")
-        seed = _integer(_required(run, "seed", f"{run_dir}: run"), f"{run_dir}: run.seed")
+        seed = _integer(
+            _required(run, "seed", f"{run_dir}: run"), f"{run_dir}: run.seed"
+        )
         if seed in by_seed:
             raise ReportValidationError(f"duplicate benchmark summary for seed {seed}")
         by_seed[seed] = run_dir
@@ -437,7 +453,10 @@ def _load_csv(path: Path) -> list[dict[str, str]]:
             raise ReportValidationError(
                 f"{path}: row {expected_index + 2} has invalid sample_index"
             ) from exc
-        if str(sample_index) != record["sample_index"] or sample_index != expected_index:
+        if (
+            str(sample_index) != record["sample_index"]
+            or sample_index != expected_index
+        ):
             raise ReportValidationError(
                 f"{path}: sample_index must be the ordered range 0..999; "
                 f"row {expected_index + 2} contains {record['sample_index']!r}"
@@ -487,18 +506,28 @@ def _validate_branch_rows(
 
         if smiles is None:
             if decode_error is None:
-                raise ReportValidationError(f"{row_context} lacks both SMILES and decode error")
+                raise ReportValidationError(
+                    f"{row_context} lacks both SMILES and decode error"
+                )
             if any(value is not None for value in (qed, sa, quality_pass)):
-                raise ReportValidationError(f"{row_context} scores an invalid decoded sample")
+                raise ReportValidationError(
+                    f"{row_context} scores an invalid decoded sample"
+                )
             if is_unique or quality_counted:
-                raise ReportValidationError(f"{row_context} counts an invalid decoded sample")
+                raise ReportValidationError(
+                    f"{row_context} counts an invalid decoded sample"
+                )
             continue
 
         valid_count += 1
         if decode_error is not None:
-            raise ReportValidationError(f"{row_context} has both SMILES and a decode error")
+            raise ReportValidationError(
+                f"{row_context} has both SMILES and a decode error"
+            )
         if qed is None or sa is None or quality_pass is None:
-            raise ReportValidationError(f"{row_context} valid sample lacks QED/SA/quality")
+            raise ReportValidationError(
+                f"{row_context} valid sample lacks QED/SA/quality"
+            )
         expected_pass = bool(qed >= 0.6 and sa <= 4.0)
         if quality_pass != expected_pass:
             raise ReportValidationError(
@@ -617,13 +646,17 @@ def _validate_metric_branch(
             raise ReportValidationError(
                 f"{context}.{key}={actual} disagrees with raw rows ({expected})"
             )
-    _assert_close(branch.get("validity"), _ratio(valid_count, requested), f"{context}.validity")
+    _assert_close(
+        branch.get("validity"), _ratio(valid_count, requested), f"{context}.validity"
+    )
     _assert_close(
         branch.get("uniqueness"),
         _ratio(unique_count, valid_count),
         f"{context}.uniqueness",
     )
-    _assert_close(branch.get("quality"), _ratio(quality_count, requested), f"{context}.quality")
+    _assert_close(
+        branch.get("quality"), _ratio(quality_count, requested), f"{context}.quality"
+    )
 
     diversity = _finite_number(
         branch.get("diversity"), f"{context}.diversity", allow_none=True
@@ -642,18 +675,24 @@ def _validate_metric_branch(
         )
 
     thresholds = _mapping(
-        _required(branch, "quality_thresholds", context), f"{context}.quality_thresholds"
+        _required(branch, "quality_thresholds", context),
+        f"{context}.quality_thresholds",
     )
     if thresholds != {"qed_min_inclusive": 0.6, "sa_max_inclusive": 4.0}:
         raise ReportValidationError(f"{context} has unexpected quality thresholds")
-    if not isinstance(branch.get("definition"), str) or not branch["definition"].strip():
+    if (
+        not isinstance(branch.get("definition"), str)
+        or not branch["definition"].strip()
+    ):
         raise ReportValidationError(f"{context}.definition must be non-empty")
 
 
 def _command_option(command: Sequence[str], option: str, context: str) -> str:
     positions = [index for index, value in enumerate(command) if value == option]
     if len(positions) != 1 or positions[0] + 1 >= len(command):
-        raise ReportValidationError(f"{context} must contain exactly one {option} value")
+        raise ReportValidationError(
+            f"{context} must contain exactly one {option} value"
+        )
     return command[positions[0] + 1]
 
 
@@ -673,7 +712,9 @@ def _validate_cuda_provenance(
     """Validate the launcher's point-in-time idle-GPU selection evidence."""
     context = f"{summary_path}: environment"
     if environment.get("requested_device") != "cuda:0":
-        raise ReportValidationError(f"{context}.requested_device must be logical cuda:0")
+        raise ReportValidationError(
+            f"{context}.requested_device must be logical cuda:0"
+        )
     if environment.get("resolved_model_device") != "cuda:0":
         raise ReportValidationError(
             f"{context}.resolved_model_device must be logical cuda:0"
@@ -682,7 +723,12 @@ def _validate_cuda_provenance(
         raise ReportValidationError(f"{context} does not confirm CUDA availability")
 
     cuda_device = _mapping(environment.get("cuda_device"), f"{context}.cuda_device")
-    if _integer(cuda_device.get("logical_index"), f"{context}.cuda_device.logical_index") != 0:
+    if (
+        _integer(
+            cuda_device.get("logical_index"), f"{context}.cuda_device.logical_index"
+        )
+        != 0
+    ):
         raise ReportValidationError(f"{context}.cuda_device.logical_index must be zero")
     device_name = cuda_device.get("name")
     if not isinstance(device_name, str) or "RTX A6000" not in device_name:
@@ -694,7 +740,9 @@ def _validate_cuda_provenance(
         f"{context}.cuda_device.total_memory_bytes",
     )
     if total_memory <= 0:
-        raise ReportValidationError(f"{context}.cuda_device total memory must be positive")
+        raise ReportValidationError(
+            f"{context}.cuda_device total memory must be positive"
+        )
     compute_capability = cuda_device.get("compute_capability")
     if (
         not isinstance(compute_capability, list)
@@ -726,17 +774,43 @@ def _validate_cuda_provenance(
             f"{context}.versions must contain exactly {sorted(expected_version_keys)}"
         )
     if any(not isinstance(value, str) or not value for value in versions.values()):
-        raise ReportValidationError(f"{context}.versions contains an unrecorded dependency")
+        raise ReportValidationError(
+            f"{context}.versions contains an unrecorded dependency"
+        )
     for name in ("python", "platform", "torch_cuda_version"):
         if not isinstance(environment.get(name), str) or not environment[name]:
             raise ReportValidationError(f"{context}.{name} must be recorded")
-    cudnn_version = _integer(environment.get("cudnn_version"), f"{context}.cudnn_version")
+    cudnn_version = _integer(
+        environment.get("cudnn_version"), f"{context}.cudnn_version"
+    )
     if cudnn_version <= 0:
         raise ReportValidationError(f"{context}.cudnn_version must be positive")
 
     launch = _mapping(
         environment.get("launch_environment"), f"{context}.launch_environment"
     )
+    expected_pythonpath = os.pathsep.join(
+        [str(REPOSITORY_ROOT / "src"), str(REPOSITORY_ROOT)]
+    )
+    if launch.get("PYTHONPATH") != expected_pythonpath:
+        raise ReportValidationError(
+            f"{context} must use only the benchmark worktree on PYTHONPATH"
+        )
+    if launch.get("PYTHONNOUSERSITE") != "1":
+        raise ReportValidationError(
+            f"{context} must disable inherited Python user-site packages"
+        )
+    expected_python_environment = {
+        "PYTHONOPTIMIZE": "0",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONUTF8": "1",
+        "PYTHONIOENCODING": "utf-8",
+    }
+    for key, expected_value in expected_python_environment.items():
+        if launch.get(key) != expected_value:
+            raise ReportValidationError(
+                f"{context} has an unexpected deterministic Python environment: {key}"
+            )
     visible_uuid = launch.get("CUDA_VISIBLE_DEVICES")
     selected_uuid = launch.get("GENMOL_BENCHMARK_GPU_UUID")
     if (
@@ -766,7 +840,9 @@ def _validate_cuda_provenance(
     try:
         snapshot_value = json.loads(snapshot_text)
     except json.JSONDecodeError as exc:
-        raise ReportValidationError(f"{context} launch snapshot is not valid JSON") from exc
+        raise ReportValidationError(
+            f"{context} launch snapshot is not valid JSON"
+        ) from exc
     snapshot = _mapping(snapshot_value, f"{context} launch snapshot")
     if snapshot.get("event") != "launch":
         raise ReportValidationError(f"{context} launch snapshot has the wrong event")
@@ -871,12 +947,17 @@ def _validate_cuda_provenance(
         raise ReportValidationError(
             f"{context} {physical_gpu_field} must contain exact GPU telemetry"
         )
-    if _integer(physical_gpu.get("index"), f"{context} physical_gpu.index") != physical_index:
+    if (
+        _integer(physical_gpu.get("index"), f"{context} physical_gpu.index")
+        != physical_index
+    ):
         raise ReportValidationError(f"{context} physical GPU indices disagree")
     if physical_gpu.get("uuid") != visible_uuid:
         raise ReportValidationError(f"{context} physical GPU UUIDs disagree")
     if physical_gpu.get("name") != device_name:
-        raise ReportValidationError(f"{context} physical and logical GPU names disagree")
+        raise ReportValidationError(
+            f"{context} physical and logical GPU names disagree"
+        )
     validated_processes = _validate_compute_processes(
         physical_gpu.get("compute_processes"),
         f"{context} {physical_gpu_field}.compute_processes",
@@ -897,7 +978,9 @@ def _validate_cuda_provenance(
         or memory_used > memory_total
         or not 0 <= utilization <= 100
     ):
-        raise ReportValidationError(f"{context} contains impossible GPU utilization data")
+        raise ReportValidationError(
+            f"{context} contains impossible GPU utilization data"
+        )
     memory_free = memory_total - memory_used
     compute_mode = physical_gpu.get("compute_mode")
     if (
@@ -992,9 +1075,7 @@ def _validate_cuda_provenance(
             "compute_processes",
         }
         for inventory_index, inventory_item in enumerate(inventory_value):
-            item_context = (
-                f"{context} gpu_inventory_at_selection[{inventory_index}]"
-            )
+            item_context = f"{context} gpu_inventory_at_selection[{inventory_index}]"
             item = _mapping(inventory_item, item_context)
             if set(item) != expected_inventory_fields:
                 raise ReportValidationError(
@@ -1038,11 +1119,10 @@ def _validate_cuda_provenance(
             identity = (item_index, item_uuid)
             inventory_identities.append(identity)
             validated_inventory.append(dict(item))
-        if (
-            len({index for index, _ in inventory_identities})
-            != len(inventory_identities)
-            or len({uuid for _, uuid in inventory_identities})
-            != len(inventory_identities)
+        if len({index for index, _ in inventory_identities}) != len(
+            inventory_identities
+        ) or len({uuid for _, uuid in inventory_identities}) != len(
+            inventory_identities
         ):
             raise ReportValidationError(
                 f"{context} dynamic GPU inventory contains duplicate identities"
@@ -1140,7 +1220,9 @@ def _validate_cuda_provenance(
         or not command
         or any(not isinstance(value, str) for value in command)
     ):
-        raise ReportValidationError(f"{summary_path}: run.command must be a string list")
+        raise ReportValidationError(
+            f"{summary_path}: run.command must be a string list"
+        )
     if snapshot.get("command") != command:
         raise ReportValidationError(
             f"{context} snapshot command disagrees with the executed run command"
@@ -1222,7 +1304,11 @@ def _validate_cuda_provenance(
 
     def command_path(value: str) -> Path:
         path = Path(value)
-        return (Path(working_directory) / path).resolve() if not path.is_absolute() else path.resolve()
+        return (
+            (Path(working_directory) / path).resolve()
+            if not path.is_absolute()
+            else path.resolve()
+        )
 
     if command_path(command[0]) != command_path(executable):
         raise ReportValidationError(
@@ -1237,9 +1323,10 @@ def _validate_cuda_provenance(
         raise ReportValidationError(
             f"{summary_path}: run.command did not use the project .venv Python"
         )
-    if command_path(command[1]) != (
-        REPOSITORY_ROOT / "scripts/exps/denovo/benchmark.py"
-    ).resolve():
+    if (
+        command_path(command[1])
+        != (REPOSITORY_ROOT / "scripts/exps/denovo/benchmark.py").resolve()
+    ):
         raise ReportValidationError(
             f"{summary_path}: run.command does not execute the pinned benchmark script"
         )
@@ -1299,9 +1386,7 @@ def _validate_cuda_provenance(
     return environment_signature, launch_provenance
 
 
-def _validate_tokenizer_provenance(
-    value: Any, *, summary_path: Path
-) -> dict[str, Any]:
+def _validate_tokenizer_provenance(value: Any, *, summary_path: Path) -> dict[str, Any]:
     context = f"{summary_path}: tokenizer"
     tokenizer = dict(_mapping(value, context))
     expected_fields = {
@@ -1356,7 +1441,9 @@ def _validate_tokenizer_provenance(
         raise ReportValidationError(
             f"{context}.backend_serialization_error must be null or a string"
         )
-    special_ids = _mapping(tokenizer["special_token_ids"], f"{context}.special_token_ids")
+    special_ids = _mapping(
+        tokenizer["special_token_ids"], f"{context}.special_token_ids"
+    )
     expected_special_ids = {"pad": 3, "bos": 1, "eos": 2, "mask": 4}
     if dict(special_ids) != expected_special_ids:
         raise ReportValidationError(
@@ -1420,9 +1507,10 @@ def _validate_metric_inputs(value: Any, *, summary_path: Path) -> dict[str, Any]
                 f"expected pinned value {expected!r}"
             )
     recorded_fragment_path = fragment_scores.get("path")
-    if not isinstance(recorded_fragment_path, str) or not Path(
-        recorded_fragment_path
-    ).is_absolute():
+    if (
+        not isinstance(recorded_fragment_path, str)
+        or not Path(recorded_fragment_path).is_absolute()
+    ):
         raise ReportValidationError(
             f"{context}.sa_fragment_scores.path must be absolute"
         )
@@ -1550,13 +1638,21 @@ def _validate_generation_protocol(
         )
 
     if diffusion_type == "udlm":
-        if protocol.get("num_steps") != sampling["num_steps"] or nfe != sampling["num_steps"]:
+        if (
+            protocol.get("num_steps") != sampling["num_steps"]
+            or nfe != sampling["num_steps"]
+        ):
             raise ReportValidationError(
                 f"{context} UDLM NFE must equal the explicit num_steps"
             )
         if protocol.get("inference_eps") != sampling["inference_eps"]:
-            raise ReportValidationError(f"{context}.inference_eps disagrees with config")
-        if protocol.get("exclude_special_tokens") is not sampling["exclude_special_tokens"]:
+            raise ReportValidationError(
+                f"{context}.inference_eps disagrees with config"
+            )
+        if (
+            protocol.get("exclude_special_tokens")
+            is not sampling["exclude_special_tokens"]
+        ):
             raise ReportValidationError(
                 f"{context}.exclude_special_tokens disagrees with config"
             )
@@ -1595,7 +1691,9 @@ def _validate_generation_protocol(
     }
     for key, expected in common_expected.items():
         if protocol.get(key) != expected:
-            raise ReportValidationError(f"{context}.{key}={protocol.get(key)!r}; expected {expected!r}")
+            raise ReportValidationError(
+                f"{context}.{key}={protocol.get(key)!r}; expected {expected!r}"
+            )
 
 
 def _validate_summary_and_rows(
@@ -1681,8 +1779,13 @@ def _validate_summary_and_rows(
             f"{summary_path} did not use exactly one seed per invocation"
         )
     if run.get("single_generation_batch") is not True:
-        raise ReportValidationError(f"{summary_path} did not use one released-style batch")
-    if run.get("evaluation_tier") != "final" or run.get("final_protocol_eligible") is not True:
+        raise ReportValidationError(
+            f"{summary_path} did not use one released-style batch"
+        )
+    if (
+        run.get("evaluation_tier") != "final"
+        or run.get("final_protocol_eligible") is not True
+    ):
         raise ReportValidationError(
             f"{summary_path} is a pilot artifact and cannot enter the final report"
         )
@@ -1753,7 +1856,10 @@ def _validate_summary_and_rows(
                 "UDLM checkpoint has an invalid udlm_prior_variant"
             )
         if checkpoint_prior_variant == "release_uniform":
-            if checkpoint_prior_metadata is not None or checkpoint_prior_digest is not None:
+            if (
+                checkpoint_prior_metadata is not None
+                or checkpoint_prior_digest is not None
+            ):
                 raise ReportValidationError(
                     "release_uniform checkpoint must not declare categorical prior metadata"
                 )
@@ -1779,6 +1885,42 @@ def _validate_summary_and_rows(
     config = _mapping(summary["config"], f"{summary_path}: config")
     for key in ("sha256", "sampling_sha256", "effective_sha256"):
         _sha256_value(config.get(key), f"config.{key}")
+    config_path_value = config.get("path")
+    if not isinstance(config_path_value, str) or not config_path_value:
+        raise ReportValidationError(f"{summary_path} config.path must be recorded")
+    config_path = Path(config_path_value).resolve()
+    if config_path == REPOSITORY_ROOT or REPOSITORY_ROOT not in config_path.parents:
+        raise ReportValidationError(
+            f"{summary_path} config.path must remain inside the benchmark repository"
+        )
+    config_git_tracking = _mapping(
+        config.get("git_tracking"), f"{summary_path}: config.git_tracking"
+    )
+    expected_tracking_fields = {
+        "path",
+        "relative_path",
+        "source_revision",
+        "sha256",
+        "tracked_at_source_revision",
+    }
+    if set(config_git_tracking) != expected_tracking_fields:
+        raise ReportValidationError(
+            f"{summary_path} config.git_tracking fields are incomplete"
+        )
+    config_tracking_revision = _git_revision_value(
+        config_git_tracking.get("source_revision"),
+        "config.git_tracking.source_revision",
+    )
+    if (
+        Path(str(config_git_tracking.get("path"))).resolve() != config_path
+        or config_git_tracking.get("relative_path")
+        != config_path.relative_to(REPOSITORY_ROOT).as_posix()
+        or config_git_tracking.get("sha256") != config["sha256"]
+        or config_git_tracking.get("tracked_at_source_revision") is not True
+    ):
+        raise ReportValidationError(
+            f"{summary_path} config is not bound to its tracked source-revision blob"
+        )
     sampling = _mapping(config.get("sampling"), "config.sampling")
     if _sha256_json(sampling) != config["sampling_sha256"]:
         raise ReportValidationError(f"{summary_path} config.sampling_sha256 is invalid")
@@ -1793,7 +1935,10 @@ def _validate_summary_and_rows(
             f"{summary_path} sampling config is not canonical: "
             f"expected {normalized_sampling}, found {dict(sampling)}"
         )
-    if sampling["diffusion_type"] == "mdlm" and dict(sampling) != PAPER_V1_SAMPLING_CONFIG:
+    if (
+        sampling["diffusion_type"] == "mdlm"
+        and dict(sampling) != PAPER_V1_SAMPLING_CONFIG
+    ):
         raise ReportValidationError(
             f"{summary_path} sampling config is not the exact GenMol V1 MDLM protocol: "
             f"expected {PAPER_V1_SAMPLING_CONFIG}, found {dict(sampling)}"
@@ -1832,9 +1977,7 @@ def _validate_summary_and_rows(
                 validate_udlm_prior_metadata_record(
                     checkpoint_prior_metadata,
                     expected_variant=checkpoint_prior_variant,
-                    expected_exclude_special_tokens=sampling[
-                        "exclude_special_tokens"
-                    ],
+                    expected_exclude_special_tokens=sampling["exclude_special_tokens"],
                 )
             except RuntimeError as exc:
                 raise ReportValidationError(
@@ -1865,7 +2008,9 @@ def _validate_summary_and_rows(
         )
     effective = _mapping(config.get("effective"), "config.effective")
     if _sha256_json(effective) != config["effective_sha256"]:
-        raise ReportValidationError(f"{summary_path} config.effective_sha256 is invalid")
+        raise ReportValidationError(
+            f"{summary_path} config.effective_sha256 is invalid"
+        )
     expected_effective = dict(source)
     expected_effective.update(
         {
@@ -1887,12 +2032,17 @@ def _validate_summary_and_rows(
         _required(artifacts, "raw_samples_csv", "artifacts"),
         "artifacts.raw_samples_csv",
     )
-    if _sha256_value(raw_artifact.get("sha256"), "raw_samples_csv.sha256") != raw_sha256:
+    if (
+        _sha256_value(raw_artifact.get("sha256"), "raw_samples_csv.sha256")
+        != raw_sha256
+    ):
         raise ReportValidationError(f"{samples_path} SHA-256 disagrees with summary")
     if raw_artifact.get("row_count") != EXPECTED_SAMPLES_PER_SEED:
         raise ReportValidationError(f"{samples_path} summary row_count is not 1000")
     if raw_artifact.get("fields") != list(RAW_SAMPLE_FIELDS):
-        raise ReportValidationError(f"{samples_path} summary field list disagrees with CSV")
+        raise ReportValidationError(
+            f"{samples_path} summary field list disagrees with CSV"
+        )
     artifact_path = Path(str(raw_artifact.get("path", "")))
     if not artifact_path.is_absolute():
         artifact_path = (REPOSITORY_ROOT / artifact_path).resolve()
@@ -1904,7 +2054,9 @@ def _validate_summary_and_rows(
         )
 
     strict_counts = _validate_branch_rows(records, prefix="strict", seed=expected_seed)
-    released_counts = _validate_branch_rows(records, prefix="released", seed=expected_seed)
+    released_counts = _validate_branch_rows(
+        records, prefix="released", seed=expected_seed
+    )
     cross_counts = _validate_cross_branch_rows(records, seed=expected_seed)
     metrics = _mapping(summary["metrics"], f"{summary_path}: metrics")
     if set(metrics) != {"released_comparable", "strict"}:
@@ -1924,16 +2076,20 @@ def _validate_summary_and_rows(
 
     expected_failures = {
         **cross_counts,
-        "strict_decode_failed": EXPECTED_SAMPLES_PER_SEED - strict_counts["valid_count"],
+        "strict_decode_failed": EXPECTED_SAMPLES_PER_SEED
+        - strict_counts["valid_count"],
         "released_decode_failed": (
             EXPECTED_SAMPLES_PER_SEED - released_counts["valid_count"]
         ),
-        "strict_duplicates": strict_counts["valid_count"] - strict_counts["unique_count"],
+        "strict_duplicates": strict_counts["valid_count"]
+        - strict_counts["unique_count"],
         "released_duplicates": (
             released_counts["valid_count"] - released_counts["unique_count"]
         ),
     }
-    failure_counts = _mapping(summary["failure_counts"], f"{summary_path}: failure_counts")
+    failure_counts = _mapping(
+        summary["failure_counts"], f"{summary_path}: failure_counts"
+    )
     if dict(failure_counts) != expected_failures:
         raise ReportValidationError(
             f"{summary_path} failure_counts disagree with raw rows: expected "
@@ -1958,8 +2114,7 @@ def _validate_summary_and_rows(
         if number < 0:
             raise ReportValidationError(f"runtime_seconds.{name} cannot be negative")
     expected_generation = (
-        runtime["model_sampling_and_tokenizer"]
-        + runtime["released_postprocessing"]
+        runtime["model_sampling_and_tokenizer"] + runtime["released_postprocessing"]
     )
     if not math.isclose(
         runtime["generation"], expected_generation, rel_tol=1e-9, abs_tol=1e-6
@@ -1990,6 +2145,10 @@ def _validate_summary_and_rows(
     if not (git_commit == git_upstream == expected_source_revision):
         raise ReportValidationError(
             f"{summary_path} Git commit, upstream, and expected source revision disagree"
+        )
+    if config_tracking_revision != git_commit:
+        raise ReportValidationError(
+            f"{summary_path} tracked config revision disagrees with the run Git commit"
         )
     if git.get("dirty") is not False:
         raise ReportValidationError(
@@ -2022,6 +2181,8 @@ def _validate_summary_and_rows(
         summary["implementation_inputs"], f"{summary_path}: implementation_inputs"
     )
     if set(implementation_inputs) != {
+        "genmol_package_init_source",
+        "genmol_utils_package_init_source",
         "sampler_source",
         "model_source",
         "ema_source",
@@ -2041,7 +2202,9 @@ def _validate_summary_and_rows(
     for name, value in implementation_inputs.items():
         item = _mapping(value, f"implementation_inputs.{name}")
         _sha256_value(item.get("sha256"), f"implementation_inputs.{name}.sha256")
-        size = _integer(item.get("size_bytes"), f"implementation_inputs.{name}.size_bytes")
+        size = _integer(
+            item.get("size_bytes"), f"implementation_inputs.{name}.size_bytes"
+        )
         if size <= 0:
             raise ReportValidationError(
                 f"implementation_inputs.{name}.size_bytes must be positive"
@@ -2069,6 +2232,13 @@ def _validate_summary_and_rows(
         raise ReportValidationError(
             "length-distribution SHA-256 differs from the verified training artifact"
         )
+    if (
+        length_input.get("loading_policy")
+        != "verified_bytes_retained_in_memory_for_generation"
+    ):
+        raise ReportValidationError(
+            "length distribution was not retained from verified bytes for generation"
+        )
 
     return {
         "seed": expected_seed,
@@ -2082,7 +2252,9 @@ def _validate_summary_and_rows(
         "summary": summary,
         "checkpoint": dict(checkpoint),
         "config": dict(config),
-        "metrics": {name: dict(_mapping(value, name)) for name, value in metrics.items()},
+        "metrics": {
+            name: dict(_mapping(value, name)) for name, value in metrics.items()
+        },
         "failure_counts": expected_failures,
         "runtime_seconds": dict(runtime),
         "environment": dict(environment),
@@ -2101,7 +2273,9 @@ def _validate_summary_and_rows(
 
 def _aggregate(values: Sequence[float]) -> dict[str, Any]:
     if len(values) != len(EXPECTED_SEEDS):
-        raise ReportValidationError("every aggregate must contain exactly three seed values")
+        raise ReportValidationError(
+            "every aggregate must contain exactly three seed values"
+        )
     numbers = [float(value) for value in values]
     if not all(math.isfinite(value) for value in numbers):
         raise ReportValidationError("aggregate inputs must be finite")
@@ -2120,7 +2294,9 @@ def _aggregate(values: Sequence[float]) -> dict[str, Any]:
     }
 
 
-def _common_identity(runs: Sequence[Mapping[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]]:
+def _common_identity(
+    runs: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, Any], dict[str, Any]]:
     first = runs[0]
     checkpoint = first["checkpoint"]
     config = first["config"]
@@ -2132,6 +2308,10 @@ def _common_identity(runs: Sequence[Mapping[str, Any]]) -> tuple[dict[str, Any],
             "independent stochastic outputs are not established"
         )
     for run in runs[1:]:
+        if run["git"].get("commit") != first["git"].get("commit"):
+            raise ReportValidationError(
+                "Git commit differs across seeds; aggregation is forbidden"
+            )
         if run["checkpoint"] != checkpoint:
             raise ReportValidationError(
                 "checkpoint metadata differs across seeds; aggregation is forbidden"
@@ -2141,7 +2321,7 @@ def _common_identity(runs: Sequence[Mapping[str, Any]]) -> tuple[dict[str, Any],
                 raise ReportValidationError(
                     f"config.{key} differs across seeds; aggregation is forbidden"
                 )
-        for key in ("source", "sampling", "effective"):
+        for key in ("source", "sampling", "effective", "git_tracking"):
             if run["config"].get(key) != config.get(key):
                 raise ReportValidationError(
                     f"config.{key} differs across seeds despite its fingerprint"
@@ -2175,9 +2355,9 @@ def _common_identity(runs: Sequence[Mapping[str, Any]]) -> tuple[dict[str, Any],
                 "idle-GPU launch policy differs across seeds; aggregation is forbidden"
             )
         current_protocol = run["summary"]["run"]["generation_protocol"]
-        if {
-            key: value for key, value in current_protocol.items() if key != "nfe"
-        } != {key: value for key, value in generation_protocol.items() if key != "nfe"}:
+        if {key: value for key, value in current_protocol.items() if key != "nfe"} != {
+            key: value for key, value in generation_protocol.items() if key != "nfe"
+        }:
             raise ReportValidationError(
                 "generation protocol differs across seeds; aggregation is forbidden"
             )
@@ -2247,7 +2427,9 @@ def _prior_interpretation(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
             "which must be reported separately."
         )
     elif variant == "empirical_frequency":
-        matched_control = "schedule_uniform with the same categorical process and schedule"
+        matched_control = (
+            "schedule_uniform with the same categorical process and schedule"
+        )
         boundary = (
             "Only empirical_frequency minus a matched schedule_uniform checkpoint can "
             "estimate a stationary-prior effect. Comparison with release_uniform or MDLM "
@@ -2278,10 +2460,7 @@ def _prior_interpretation(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
 def collect_report(runs_dir: Path) -> dict[str, Any]:
     """Validate three run directories and return the report data model."""
     by_seed = discover_run_directories(runs_dir)
-    runs = [
-        _validate_summary_and_rows(by_seed[seed], seed)
-        for seed in EXPECTED_SEEDS
-    ]
+    runs = [_validate_summary_and_rows(by_seed[seed], seed) for seed in EXPECTED_SEEDS]
     checkpoint, config = _common_identity(runs)
     prior_interpretation = _prior_interpretation(checkpoint)
 
@@ -2299,7 +2478,10 @@ def collect_report(runs_dir: Path) -> dict[str, Any]:
                 "score" if metric_name == "diversity" else "fraction"
             )
     local_metrics["runtime_seconds"] = {
-        name: {**_aggregate([run["runtime_seconds"][name] for run in runs]), "unit": "seconds"}
+        name: {
+            **_aggregate([run["runtime_seconds"][name] for run in runs]),
+            "unit": "seconds",
+        }
         for name in (
             "model_load_and_device_move",
             "model_sampling_and_tokenizer",
@@ -2348,9 +2530,7 @@ def collect_report(runs_dir: Path) -> dict[str, Any]:
         ),
     }
 
-    per_seed_funnel = [
-        {"seed": run["seed"], **_funnel_for_run(run)} for run in runs
-    ]
+    per_seed_funnel = [{"seed": run["seed"], **_funnel_for_run(run)} for run in runs]
     pooled_funnel = {
         key: sum(row[key] for row in per_seed_funnel)
         for key in per_seed_funnel[0]
@@ -2481,9 +2661,7 @@ def collect_report(runs_dir: Path) -> dict[str, Any]:
                     f"{prior_identity['schedule_variant']}"
                 ),
                 "published": "GenMol V1 masked diffusion (MDLM)",
-                "consequence": (
-                    prior_interpretation["causal_claim_boundary"]
-                ),
+                "consequence": (prior_interpretation["causal_claim_boundary"]),
             },
             {
                 "item": "Evaluation seeds",
@@ -2503,6 +2681,16 @@ def collect_report(runs_dir: Path) -> dict[str, Any]:
                 ),
             },
         ]
+    training_data_caveat = (
+        TRAINING_CONTEXT["data_and_tokenizer"]["revision_status"]
+        if evaluated_diffusion_type == "mdlm"
+        else (
+            "The evaluated UDLM checkpoint's training dataset and tokenizer provenance "
+            "are not established by these evaluation artifacts. The tokenizer loaded "
+            "for evaluation is fingerprinted separately and must not be mistaken for "
+            "training provenance."
+        )
+    )
     caveats = [
         (
             "This is a from-scratch implementation benchmark against published "
@@ -2518,7 +2706,7 @@ def collect_report(runs_dir: Path) -> dict[str, Any]:
             "interval, or equivalence claim is made. Paper seed values are unavailable."
         ),
         comparison["generation_time"]["comparability"],
-        TRAINING_CONTEXT["data_and_tokenizer"]["revision_status"],
+        training_data_caveat,
         (
             "Training RNG and full training-system provenance are not inferred from "
             "evaluation artifacts. Evaluation seeds are explicit but do not repair "
@@ -2551,8 +2739,7 @@ def collect_report(runs_dir: Path) -> dict[str, Any]:
             "seeds": list(EXPECTED_SEEDS),
             "samples_per_seed": EXPECTED_SAMPLES_PER_SEED,
             "seed_count": len(EXPECTED_SEEDS),
-            "total_requested_samples": len(EXPECTED_SEEDS)
-            * EXPECTED_SAMPLES_PER_SEED,
+            "total_requested_samples": len(EXPECTED_SEEDS) * EXPECTED_SAMPLES_PER_SEED,
         },
         "checkpoint": checkpoint,
         "udlm_prior_interpretation": prior_interpretation,
@@ -2655,15 +2842,9 @@ def aggregate_csv_rows(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
         "checkpoint_sha256": checkpoint["sha256"],
         "global_step": checkpoint["global_step"],
         "udlm_prior_variant": checkpoint.get("udlm_prior_variant"),
-        "udlm_prior_metadata_sha256": checkpoint.get(
-            "udlm_prior_metadata_sha256"
-        ),
-        "udlm_comparison_role": payload["udlm_prior_interpretation"][
-            "comparison_role"
-        ],
-        "udlm_objective_scope": payload["udlm_prior_interpretation"][
-            "objective_scope"
-        ],
+        "udlm_prior_metadata_sha256": checkpoint.get("udlm_prior_metadata_sha256"),
+        "udlm_comparison_role": payload["udlm_prior_interpretation"]["comparison_role"],
+        "udlm_objective_scope": payload["udlm_prior_interpretation"]["objective_scope"],
     }
     count_names = {
         "validity": ("valid_count", "validity_denominator"),
@@ -2719,7 +2900,9 @@ def aggregate_csv_rows(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
                     "n_seeds": aggregate["n"],
                     "mean": aggregate["mean"],
                     "sample_sd": aggregate["sample_sd"],
-                    "published_mean": comparison["published_mean"] if comparison else "",
+                    "published_mean": comparison["published_mean"]
+                    if comparison
+                    else "",
                     "published_reported_sd": (
                         comparison["published_reported_sd"] if comparison else ""
                     ),
@@ -2894,7 +3077,11 @@ def _comparison_chart(payload: Mapping[str, Any]) -> Any:
     drawing.add(String(318, 189, "Local released-comparable", fontSize=7.2))
     drawing.add(Rect(411, 188, 9, 9, fillColor=paper_color, strokeColor=None))
     drawing.add(String(425, 189, "Paper", fontSize=7.2))
-    drawing.add(String(12, 187, "score x 100", fontSize=7.2, fillColor=colors.HexColor("#53636D")))
+    drawing.add(
+        String(
+            12, 187, "score x 100", fontSize=7.2, fillColor=colors.HexColor("#53636D")
+        )
+    )
     return drawing
 
 
@@ -3039,10 +3226,14 @@ def render_pdf(payload: Mapping[str, Any], pdf_path: Path) -> None:
     ) -> Any:
         converted = []
         for row_index, row in enumerate(raw_rows):
-            style = styles["table_header"] if header and row_index == 0 else styles["table"]
+            style = (
+                styles["table_header"] if header and row_index == 0 else styles["table"]
+            )
             converted.append(
                 [
-                    item if hasattr(item, "wrap") else Paragraph(escape(str(item)), style)
+                    item
+                    if hasattr(item, "wrap")
+                    else Paragraph(escape(str(item)), style)
                     for item in row
                 ]
             )
@@ -3080,7 +3271,9 @@ def render_pdf(payload: Mapping[str, Any], pdf_path: Path) -> None:
     def callout(text: str, *, caution: bool = False) -> Any:
         background = palette["pale_coral"] if caution else palette["pale_teal"]
         accent = palette["coral"] if caution else palette["teal"]
-        item = Table([[Paragraph(escape(text), styles["callout"])]], colWidths=[174 * mm])
+        item = Table(
+            [[Paragraph(escape(text), styles["callout"])]], colWidths=[174 * mm]
+        )
         item.setStyle(
             TableStyle(
                 [
@@ -3118,19 +3311,25 @@ def render_pdf(payload: Mapping[str, Any], pdf_path: Path) -> None:
         Spacer(1, 7 * mm),
         Paragraph("Headline comparison", styles["h1"]),
     ]
-    headline = [["Metric", "Local released-comparable", "Published GenMol V1", "Local - paper"]]
+    headline = [
+        ["Metric", "Local released-comparable", "Published GenMol V1", "Local - paper"]
+    ]
     for metric_name in (*METRIC_NAMES, "generation_time"):
         item = comparison[metric_name]
         headline.append(
             [
                 METRIC_LABELS[metric_name],
-                _format_metric(metric_name, item["local_mean"], item["local_sample_sd"]),
+                _format_metric(
+                    metric_name, item["local_mean"], item["local_sample_sd"]
+                ),
                 _format_metric(
                     metric_name,
                     item["published_mean"],
                     item["published_reported_sd"],
                 ),
-                _format_difference(metric_name, item["difference_local_minus_published"]),
+                _format_difference(
+                    metric_name, item["difference_local_minus_published"]
+                ),
             ]
         )
     story.extend(
@@ -3223,9 +3422,7 @@ def render_pdf(payload: Mapping[str, Any], pdf_path: Path) -> None:
             ),
             _format_metric(
                 "generation_time",
-                payload["aggregate_metrics"]["runtime_seconds"]["generation"][
-                    "mean"
-                ],
+                payload["aggregate_metrics"]["runtime_seconds"]["generation"]["mean"],
                 payload["aggregate_metrics"]["runtime_seconds"]["generation"][
                     "sample_sd"
                 ],
@@ -3317,7 +3514,8 @@ def render_pdf(payload: Mapping[str, Any], pdf_path: Path) -> None:
                 highlight_last=True,
             ),
             Paragraph(
-                escape(payload["strict_vs_repaired_funnel"]["pooling_note"]), styles["small"]
+                escape(payload["strict_vs_repaired_funnel"]["pooling_note"]),
+                styles["small"],
             ),
             Paragraph("Exact metric definitions", styles["h2"]),
         ]
@@ -3382,13 +3580,27 @@ def render_pdf(payload: Mapping[str, Any], pdf_path: Path) -> None:
         ],
         [
             "UDLM objective scope",
-            payload["udlm_prior_interpretation"]["objective_scope"]
-            or "not applicable",
+            payload["udlm_prior_interpretation"]["objective_scope"] or "not applicable",
         ],
         ["Config SHA-256", payload["config"]["sha256"]],
         ["Effective-config SHA-256", payload["config"]["effective_sha256"]],
         ["Sampling-config SHA-256", payload["config"]["sampling_sha256"]],
         ["Runner SHA-256", payload["runner_sha256"]],
+        ["Report generator SHA-256", payload["report_generator"]["sha256"]],
+        [
+            "Report generator Git revision",
+            payload["report_generator"]["source_revision"],
+        ],
+        [
+            "GenMol package initializer SHA-256",
+            payload["implementation_inputs"]["genmol_package_init_source"]["sha256"],
+        ],
+        [
+            "GenMol utilities initializer SHA-256",
+            payload["implementation_inputs"]["genmol_utils_package_init_source"][
+                "sha256"
+            ],
+        ],
         [
             "Sampler source SHA-256",
             payload["implementation_inputs"]["sampler_source"]["sha256"],
@@ -3530,9 +3742,7 @@ def render_pdf(payload: Mapping[str, Any], pdf_path: Path) -> None:
     story.extend(
         [
             table(protocol_rows, [50 * mm, 124 * mm]),
-            callout(
-                payload["udlm_prior_interpretation"]["causal_claim_boundary"]
-            ),
+            callout(payload["udlm_prior_interpretation"]["causal_claim_boundary"]),
             Paragraph("Loaded tokenizer provenance", styles["h2"]),
             table(tokenizer_rows, [50 * mm, 124 * mm]),
             PageBreak(),
@@ -3586,7 +3796,9 @@ def render_pdf(payload: Mapping[str, Any], pdf_path: Path) -> None:
         device_label = device.get("name") or device.get("resolved") or "not recorded"
         physical = device.get("physical_index_at_launch")
         if physical is not None:
-            device_label += f"; physical {physical}, logical {device.get('logical_index')}"
+            device_label += (
+                f"; physical {physical}, logical {device.get('logical_index')}"
+            )
         artifact_rows.append(
             [
                 seed_run["seed"],
@@ -3714,6 +3926,7 @@ def render_pdf(payload: Mapping[str, Any], pdf_path: Path) -> None:
         validate_pdf(
             temporary_path,
             expected_checkpoint_sha256=payload["checkpoint"]["sha256"],
+            expected_report_generator_sha256=payload["report_generator"]["sha256"],
         )
         os.replace(temporary_path, pdf_path)
     except Exception:
@@ -3725,6 +3938,7 @@ def validate_pdf(
     path: Path,
     *,
     expected_checkpoint_sha256: str | None = None,
+    expected_report_generator_sha256: str | None = None,
 ) -> dict[str, Any]:
     try:
         from pypdf import PdfReader
@@ -3734,7 +3948,9 @@ def validate_pdf(
         ) from exc
     reader = PdfReader(str(path))
     if len(reader.pages) < 3:
-        raise RuntimeError(f"report PDF unexpectedly has only {len(reader.pages)} page(s)")
+        raise RuntimeError(
+            f"report PDF unexpectedly has only {len(reader.pages)} page(s)"
+        )
     text = "\n".join(page.extract_text() or "" for page in reader.pages)
     required_fragments = (
         "GenMol from-scratch benchmark",
@@ -3750,6 +3966,8 @@ def validate_pdf(
     )
     if expected_checkpoint_sha256 is not None:
         required_fragments = (*required_fragments, expected_checkpoint_sha256)
+    if expected_report_generator_sha256 is not None:
+        required_fragments = (*required_fragments, expected_report_generator_sha256)
     missing = [fragment for fragment in required_fragments if fragment not in text]
     if missing:
         raise RuntimeError(f"report PDF text validation failed; missing {missing}")
@@ -3762,6 +3980,45 @@ def validate_pdf(
     }
 
 
+def _report_generator_provenance(expected_revision: str) -> dict[str, Any]:
+    """Bind report generation to this file at the runs' clean pushed commit."""
+
+    source_state = require_clean_pushed_source(expected_revision)
+    source_path = Path(__file__).resolve()
+    source_sha256 = _sha256_file(source_path)
+    tracking = tracked_source_file_provenance(
+        source_path,
+        expected_revision=expected_revision,
+        expected_sha256=source_sha256,
+    )
+    return {
+        **tracking,
+        "size_bytes": source_path.stat().st_size,
+        "git": {
+            **source_state,
+            "clean_pushed_source_verified": True,
+        },
+    }
+
+
+def _report_source_revision(payload: Mapping[str, Any]) -> str:
+    seed_runs = payload.get("seed_runs")
+    if not isinstance(seed_runs, list) or not seed_runs:
+        raise ReportValidationError("report payload lacks seed-run source revisions")
+    revisions = {
+        _git_revision_value(
+            _mapping(seed_run, "seed_run").get("git", {}).get("commit"),
+            "seed_run.git.commit",
+        )
+        for seed_run in seed_runs
+    }
+    if len(revisions) != 1:
+        raise ReportValidationError(
+            "report payload Git commits differ; bundle generation is forbidden"
+        )
+    return revisions.pop()
+
+
 def write_report_bundle(
     payload: dict[str, Any],
     *,
@@ -3769,6 +4026,9 @@ def write_report_bundle(
     pdf_path: Path,
     overwrite: bool = False,
 ) -> dict[str, Path]:
+    expected_source_revision = _report_source_revision(payload)
+    report_generator = _report_generator_provenance(expected_source_revision)
+    payload["report_generator"] = report_generator
     output_dir = _resolve_in_repository(output_dir)
     pdf_path = _resolve_in_repository(pdf_path)
     json_path = output_dir / AGGREGATE_JSON_FILENAME
@@ -3789,6 +4049,7 @@ def write_report_bundle(
     pdf_metadata = validate_pdf(
         pdf_path,
         expected_checkpoint_sha256=payload["checkpoint"]["sha256"],
+        expected_report_generator_sha256=report_generator["sha256"],
     )
     payload["artifacts"] = {
         "report_pdf": pdf_metadata,
@@ -3808,7 +4069,10 @@ def write_report_bundle(
 
     # Re-open final artifacts rather than trusting the writers.
     loaded = json.loads(json_path.read_text(encoding="utf-8"))
-    if loaded.get("status") != "completed" or loaded.get("schema_version") != REPORT_SCHEMA_VERSION:
+    if (
+        loaded.get("status") != "completed"
+        or loaded.get("schema_version") != REPORT_SCHEMA_VERSION
+    ):
         raise RuntimeError("aggregate JSON failed post-write validation")
     with csv_path.open("r", encoding="utf-8", newline="") as handle:
         csv_reader = csv.DictReader(handle)
@@ -3818,7 +4082,12 @@ def write_report_bundle(
     validate_pdf(
         pdf_path,
         expected_checkpoint_sha256=payload["checkpoint"]["sha256"],
+        expected_report_generator_sha256=report_generator["sha256"],
     )
+    if _report_generator_provenance(expected_source_revision) != report_generator:
+        raise RuntimeError(
+            "report source or clean pushed revision changed during bundle generation"
+        )
     return {"json": json_path, "csv": csv_path, "pdf": pdf_path}
 
 

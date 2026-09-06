@@ -70,9 +70,7 @@ def test_gpu_with_compute_process_is_not_genuinely_idle():
     state = _gpu(
         index=2,
         uuid="GPU-example",
-        processes=(
-            {"pid": 123, "process_name": "python", "used_memory_mib": 900},
-        ),
+        processes=({"pid": 123, "process_name": "python", "used_memory_mib": 900},),
     )
 
     reasons = state.rejection_reasons(
@@ -117,10 +115,7 @@ def test_full_inventory_probe_records_uuid_telemetry_and_processes(monkeypatch):
             "GPU-three, 991, /other/user/python, 1800\n"
             "GPU-three, 991, /other/user/python, 1800\n"
         ),
-        (
-            "No running processes found\n"
-            "GPU-three, 991, /other/user/python, 1800\n"
-        ),
+        ("No running processes found\n" "GPU-three, 991, /other/user/python, 1800\n"),
         "GPU-unknown, 991, /other/user/python, 1800\n",
     ],
 )
@@ -303,6 +298,80 @@ def test_training_command_checkpoint_digest_validation(monkeypatch, tmp_path):
         )
 
 
+def test_resolved_hydra_config_is_bound_before_launch(monkeypatch, tmp_path):
+    monkeypatch.setattr(launcher, "_python_executable", lambda: Path("/venv/python"))
+    command = launcher.build_training_command(
+        gpu_count=2,
+        run_dir=tmp_path / "pilot",
+        max_steps=10,
+        global_batch_size=16,
+        micro_batch_size=2,
+        num_workers=1,
+        seed=7,
+        checkpoint=None,
+        exclude_special_tokens=False,
+        training_variant="schedule_uniform",
+    )
+
+    config, digest = launcher.compose_resolved_training_config(
+        config_name="udlm",
+        overrides=command[5:],
+        gpu_count=2,
+    )
+
+    assert len(digest) == 64
+    assert digest == launcher.canonical_json_sha256(config)
+    assert config["seed"] == 7
+    assert config["trainer"]["devices"] == 2
+    assert config["trainer"]["accumulate_grad_batches"] == 4
+    assert config["training"]["udlm"]["prior_variant"] == "schedule_uniform"
+    assert "hydra" not in config
+
+
+def test_child_command_sanitizes_python_and_binds_source_argv_config(
+    monkeypatch,
+):
+    monkeypatch.setenv("PYTHONHOME", "/hostile/home")
+    monkeypatch.setenv("PYTHONWARNINGS", "error")
+    monkeypatch.setenv("PYTHONARBITRARY", "hostile")
+    command = [
+        "/venv/python",
+        "-u",
+        str(launcher.REPOSITORY_ROOT / "scripts/train.py"),
+        "--config-name",
+        "udlm",
+        "seed=7",
+    ]
+    runtime_path = launcher.REPOSITORY_ROOT / "output/udlm/test/runtime_config.json"
+
+    child_command, environment = launcher.build_child_environment_command(
+        command=command,
+        source_revision="a" * 40,
+        resolved_config_sha256="b" * 64,
+        runtime_config_path=runtime_path,
+        visible_uuids="GPU-one,GPU-two",
+        seed=7,
+    )
+
+    assert child_command[-len(command) :] == command
+    assert environment["GENMOL_TRAIN_EXPECTED_SOURCE_REVISION"] == "a" * 40
+    assert environment["GENMOL_TRAIN_EXPECTED_CONFIG_SHA256"] == "b" * 64
+    assert environment["GENMOL_TRAIN_EXPECTED_ARGV_SHA256"] == (
+        launcher.canonical_json_sha256(command[2:])
+    )
+    assert environment["PYTHONHASHSEED"] == "7"
+    assert environment["PYTHONPATH"] == launcher.os.pathsep.join(
+        [
+            str(launcher.REPOSITORY_ROOT / "src"),
+            str(launcher.REPOSITORY_ROOT),
+        ]
+    )
+    for hostile_key in ("PYTHONHOME", "PYTHONWARNINGS", "PYTHONARBITRARY"):
+        assert ["-u", hostile_key] in [
+            child_command[index : index + 2] for index in range(len(child_command) - 1)
+        ]
+
+
 @pytest.mark.parametrize(
     ("training_variant", "config_name", "fixed_prior_override"),
     [
@@ -379,3 +448,81 @@ def test_pushed_commit_check_rejects_untracked_source_but_allows_output(monkeypa
 
     with pytest.raises(RuntimeError, match="scripts/new_launcher.py"):
         launcher.require_pushed_commit()
+
+
+def test_main_keeps_final_uuid_probe_adjacent_to_tmux_spawn(monkeypatch, tmp_path):
+    repository_root = tmp_path / "worktree"
+    repository_root.mkdir()
+    monkeypatch.setattr(launcher, "REPOSITORY_ROOT", repository_root)
+    monkeypatch.setattr(launcher, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(
+        launcher,
+        "_parse_args",
+        lambda: launcher.argparse.Namespace(
+            run_name="ordering",
+            training_variant="udlm",
+            gpu_count=1,
+            max_steps=1,
+            global_batch_size=2,
+            micro_batch_size=2,
+            num_workers=0,
+            seed=1,
+            checkpoint=tmp_path / "unused.ckpt",
+            scratch=True,
+            exclude_special_tokens=False,
+            max_utilization_percent=10,
+            min_free_memory_mib=30_000,
+            dry_run=False,
+        ),
+    )
+    monkeypatch.setattr(
+        launcher, "_python_executable", lambda: tmp_path / ".venv/bin/python"
+    )
+    events = []
+
+    def pushed_commit():
+        events.append("source_check")
+        return "a" * 40
+
+    gpu = _gpu(index=3, uuid="GPU-idle")
+    monkeypatch.setattr(launcher, "require_pushed_commit", pushed_commit)
+    monkeypatch.setattr(
+        launcher,
+        "probe_all_gpus",
+        lambda: events.append("inventory") or [gpu],
+    )
+    monkeypatch.setattr(
+        launcher,
+        "reprobe_selected_gpus",
+        lambda *_args, **_kwargs: events.append("final_uuid_probe") or (gpu,),
+    )
+    monkeypatch.setattr(
+        launcher,
+        "compose_resolved_training_config",
+        lambda **_kwargs: ({"seed": 1}, "b" * 64),
+    )
+
+    def subprocess_run(command, **_kwargs):
+        if command[:2] == ["tmux", "has-session"]:
+            events.append("tmux_preflight")
+            return subprocess.CompletedProcess(command, 1)
+        if command[:2] == ["tmux", "new-session"]:
+            events.append("tmux_spawn")
+            assert (
+                repository_root / "output/udlm/ordering/launch_manifest.json"
+            ).is_file()
+            return subprocess.CompletedProcess(command, 0)
+        raise AssertionError(f"unexpected subprocess: {command}")
+
+    monkeypatch.setattr(subprocess, "run", subprocess_run)
+
+    launcher.main()
+
+    assert events == [
+        "source_check",
+        "tmux_preflight",
+        "inventory",
+        "source_check",
+        "final_uuid_probe",
+        "tmux_spawn",
+    ]

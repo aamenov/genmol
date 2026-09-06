@@ -49,6 +49,38 @@ TRAINING_VARIANTS = {
         "fixed_overrides": (),
     },
 }
+PILOT_ENVIRONMENT_PREFIX = "GENMOL_TRAIN_"
+CONTROLLED_PYTHON_ENVIRONMENT = {
+    "PYTHONNOUSERSITE": "1",
+    "PYTHONOPTIMIZE": "0",
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "PYTHONUTF8": "1",
+    "PYTHONIOENCODING": "utf-8",
+}
+KNOWN_PYTHON_ENVIRONMENT_KEYS = {
+    "PYTHONHOME",
+    "PYTHONSTARTUP",
+    "PYTHONPLATLIBDIR",
+    "PYTHONUSERBASE",
+    "PYTHONPYCACHEPREFIX",
+    "PYTHONWARNINGS",
+    "PYTHONBREAKPOINT",
+    "PYTHONDEBUG",
+    "PYTHONINSPECT",
+    "PYTHONUNBUFFERED",
+    "PYTHONVERBOSE",
+    "PYTHONCASEOK",
+    "PYTHONFAULTHANDLER",
+    "PYTHONTRACEMALLOC",
+    "PYTHONPROFILEIMPORTTIME",
+    "PYTHONASYNCIODEBUG",
+    "PYTHONMALLOC",
+    "PYTHONCOERCECLOCALE",
+    "PYTHONWARNDEFAULTENCODING",
+    "PYTHONNODEBUGRANGES",
+    "PYTHONINTMAXSTRDIGITS",
+    "PYTHONSAFEPATH",
+}
 
 
 @dataclass(frozen=True)
@@ -141,8 +173,7 @@ def validate_safety_thresholds(
         )
     if min_free_memory_mib < MIN_SAFE_FREE_MEMORY_MIB:
         raise ValueError(
-            "min-free-memory-mib cannot be below "
-            f"{MIN_SAFE_FREE_MEMORY_MIB}"
+            "min-free-memory-mib cannot be below " f"{MIN_SAFE_FREE_MEMORY_MIB}"
         )
 
 
@@ -166,7 +197,9 @@ def _probe_gpus(device_uuid: str | None = None) -> list[GPUState]:
         ]
     )
     if status.stderr.strip():
-        raise RuntimeError(f"nvidia-smi GPU query returned stderr: {status.stderr.strip()}")
+        raise RuntimeError(
+            f"nvidia-smi GPU query returned stderr: {status.stderr.strip()}"
+        )
     rows: dict[int, dict[str, object]] = {}
     seen_uuids: set[str] = set()
     for row in csv.reader(io.StringIO(status.stdout), skipinitialspace=True):
@@ -356,10 +389,9 @@ def reprobe_selected_gpus(
 ) -> tuple[GPUState, ...]:
     """Verify exact selected UUIDs one last time and refuse identity changes."""
 
-    if (
-        len({state.uuid for state in selected}) != len(selected)
-        or len({state.physical_index for state in selected}) != len(selected)
-    ):
+    if len({state.uuid for state in selected}) != len(selected) or len(
+        {state.physical_index for state in selected}
+    ) != len(selected):
         raise RuntimeError("selected GPU identities must be unique before final probes")
     rechecked_states = []
     rejected: dict[str, list[str]] = {}
@@ -412,7 +444,9 @@ def require_pushed_commit() -> str:
     if subprocess.run(
         ["git", "-C", str(REPOSITORY_ROOT), "diff", "--quiet"], check=False
     ).returncode:
-        raise RuntimeError("tracked working-tree changes must be committed before launch")
+        raise RuntimeError(
+            "tracked working-tree changes must be committed before launch"
+        )
     if subprocess.run(
         ["git", "-C", str(REPOSITORY_ROOT), "diff", "--cached", "--quiet"],
         check=False,
@@ -495,6 +529,127 @@ def sha256_file(path: Path) -> str:
         return digest.hexdigest()
     finally:
         os.close(descriptor)
+
+
+def canonical_json_sha256(value: object) -> str:
+    payload = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def training_argv_sha256(command: list[str]) -> str:
+    """Fingerprint exactly the argv observed by scripts/train.py."""
+
+    expected_script = str(REPOSITORY_ROOT / "scripts" / "train.py")
+    if len(command) < 5 or command[2] != expected_script:
+        raise ValueError("training command does not invoke the reviewed train.py")
+    return canonical_json_sha256(command[2:])
+
+
+def compose_resolved_training_config(
+    *,
+    config_name: str,
+    overrides: list[str],
+    gpu_count: int,
+) -> tuple[dict[str, object], str]:
+    """Compose the exact Hydra task config before any GPU is exposed."""
+
+    from hydra import compose, initialize_config_dir
+    from omegaconf import OmegaConf
+
+    validate_gpu_count(gpu_count)
+    if config_name not in {
+        str(variant["config_name"]) for variant in TRAINING_VARIANTS.values()
+    }:
+        raise ValueError(f"unreviewed Hydra config name: {config_name}")
+    resolvers = {
+        "cwd": lambda: str(REPOSITORY_ROOT),
+        "device_count": lambda: gpu_count,
+        "eval": lambda expression: eval(expression, {"__builtins__": {}}, {}),
+        "div_up": lambda x, y: (x + y - 1) // y,
+    }
+    for name, resolver in resolvers.items():
+        if OmegaConf.has_resolver(name):
+            OmegaConf.clear_resolver(name)
+        OmegaConf.register_new_resolver(name, resolver)
+    with initialize_config_dir(
+        version_base=None,
+        config_dir=str(REPOSITORY_ROOT / "configs"),
+    ):
+        config = compose(
+            config_name=config_name,
+            overrides=overrides,
+            return_hydra_config=False,
+        )
+    resolved = OmegaConf.to_container(config, resolve=True, enum_to_str=True)
+    if not isinstance(resolved, dict):
+        raise RuntimeError("resolved Hydra task config must be a mapping")
+    return resolved, canonical_json_sha256(resolved)
+
+
+def build_child_environment_command(
+    *,
+    command: list[str],
+    source_revision: str,
+    resolved_config_sha256: str,
+    runtime_config_path: Path,
+    visible_uuids: str,
+    seed: int,
+) -> tuple[list[str], dict[str, str]]:
+    """Sanitize Python controls and bind the child to source, argv, and config."""
+
+    if not re.fullmatch(r"[0-9a-f]{40}", source_revision):
+        raise ValueError("source_revision must be 40 lowercase hexadecimal digits")
+    if not re.fullmatch(r"[0-9a-f]{64}", resolved_config_sha256):
+        raise ValueError(
+            "resolved_config_sha256 must be 64 lowercase hexadecimal digits"
+        )
+    if not visible_uuids or any(
+        not value.startswith("GPU-") for value in visible_uuids.split(",")
+    ):
+        raise ValueError("visible_uuids must contain NVIDIA GPU UUIDs")
+    runtime_config_path = runtime_config_path.resolve()
+    if (
+        runtime_config_path == REPOSITORY_ROOT
+        or REPOSITORY_ROOT not in runtime_config_path.parents
+    ):
+        raise ValueError("runtime config record must remain inside the repository")
+    controlled_python = {
+        **CONTROLLED_PYTHON_ENVIRONMENT,
+        "PYTHONPATH": os.pathsep.join(
+            [str(REPOSITORY_ROOT / "src"), str(REPOSITORY_ROOT)]
+        ),
+        "PYTHONHASHSEED": str(seed),
+    }
+    pilot_environment = {
+        "GENMOL_TRAIN_EXPECTED_SOURCE_REVISION": source_revision,
+        "GENMOL_TRAIN_EXPECTED_CONFIG_SHA256": resolved_config_sha256,
+        "GENMOL_TRAIN_EXPECTED_ARGV_SHA256": training_argv_sha256(command),
+        "GENMOL_TRAIN_RUNTIME_CONFIG_PATH": str(runtime_config_path),
+    }
+    assigned_environment = {
+        "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
+        "CUDA_VISIBLE_DEVICES": visible_uuids,
+        **controlled_python,
+        **pilot_environment,
+    }
+    inherited_python_keys = {key for key in os.environ if key.startswith("PYTHON")}
+    unset_python_keys = sorted(
+        KNOWN_PYTHON_ENVIRONMENT_KEYS | inherited_python_keys | set(controlled_python)
+    )
+    environment_command = ["env"]
+    for key in unset_python_keys:
+        environment_command.extend(["-u", key])
+    environment_command.extend(
+        f"{key}={value}" for key, value in assigned_environment.items()
+    )
+    environment_command.extend(command)
+    return environment_command, assigned_environment
 
 
 def build_training_command(
@@ -649,14 +804,23 @@ def main():
         exclude_special_tokens=args.exclude_special_tokens,
         training_variant=training_variant,
     )
+    resolved_config, resolved_config_sha256 = compose_resolved_training_config(
+        config_name=str(variant["config_name"]),
+        overrides=command[5:],
+        gpu_count=gpu_count,
+    )
+    argv_sha256 = training_argv_sha256(command)
 
     session_name = f"genmol_{training_variant}_{args.run_name}"
-    if subprocess.run(
-        ["tmux", "has-session", "-t", session_name],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    ).returncode == 0:
+    if (
+        subprocess.run(
+            ["tmux", "has-session", "-t", session_name],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        ).returncode
+        == 0
+    ):
         raise RuntimeError(f"tmux session already exists: {session_name}")
 
     # Inventory every NVIDIA GPU only after all potentially expensive source and
@@ -672,21 +836,16 @@ def main():
         max_utilization_percent=args.max_utilization_percent,
         min_free_memory_mib=args.min_free_memory_mib,
     )
-    gpu_states = reprobe_selected_gpus(
-        initially_selected,
-        max_utilization_percent=args.max_utilization_percent,
-        min_free_memory_mib=args.min_free_memory_mib,
+    visible_uuids = ",".join(state.uuid for state in initially_selected)
+    runtime_config_path = run_dir / "runtime_config.json"
+    environment_command, child_environment = build_child_environment_command(
+        command=command,
+        source_revision=git_sha,
+        resolved_config_sha256=resolved_config_sha256,
+        runtime_config_path=runtime_config_path,
+        visible_uuids=visible_uuids,
+        seed=args.seed,
     )
-    final_uuid_probes_completed_at_utc = datetime.now(timezone.utc).isoformat()
-
-    visible_uuids = ",".join(state.uuid for state in gpu_states)
-    environment_command = [
-        "env",
-        "CUDA_DEVICE_ORDER=PCI_BUS_ID",
-        f"CUDA_VISIBLE_DEVICES={visible_uuids}",
-        f"PYTHONPATH={REPOSITORY_ROOT / 'src'}:{REPOSITORY_ROOT}",
-        *command,
-    ]
     manifest = {
         "created_at": datetime.now(timezone.utc).isoformat(),
         "purpose": "bounded UDLM training pilot",
@@ -702,17 +861,11 @@ def main():
         "gpu_selection_method": "dynamic_idle_discovery",
         "gpu_inventory_scope": "all_nvidia_gpus",
         "inventory_snapshot_completed_at_utc": inventory_snapshot_completed_at_utc,
-        "gpu_inventory_at_selection": [
-            asdict(state) for state in gpu_inventory
-        ],
+        "gpu_inventory_at_selection": [asdict(state) for state in gpu_inventory],
         "initially_selected_gpu_states": [
             asdict(state) for state in initially_selected
         ],
-        "physical_gpu_indices": [state.physical_index for state in gpu_states],
         "logical_cuda_devices": list(range(gpu_count)),
-        "cuda_visible_device_uuids": [state.uuid for state in gpu_states],
-        "final_uuid_probes_completed_at_utc": final_uuid_probes_completed_at_utc,
-        "gpu_states_at_final_uuid_probe": [asdict(state) for state in gpu_states],
         "gpu_safety_policy": {
             "max_utilization_percent": args.max_utilization_percent,
             "utilization_comparison": "strictly_less_than",
@@ -721,6 +874,11 @@ def main():
             "compute_mode_prohibited_allowed": False,
         },
         "command": environment_command,
+        "training_argv_sha256": argv_sha256,
+        "resolved_training_config": resolved_config,
+        "resolved_training_config_sha256": resolved_config_sha256,
+        "runtime_config_path": str(runtime_config_path),
+        "child_environment": child_environment,
         "log_path": str(log_path),
         "checkpoint": None if checkpoint is None else str(checkpoint),
         "checkpoint_sha256": checkpoint_sha256,
@@ -735,11 +893,32 @@ def main():
         "exclude_special_tokens": args.exclude_special_tokens,
         "dry_run": args.dry_run,
     }
+    source_revision_before_final_gpu_probe = require_pushed_commit()
+    if source_revision_before_final_gpu_probe != git_sha:
+        raise RuntimeError("source revision changed before the pilot's final GPU probe")
+    gpu_states = reprobe_selected_gpus(
+        initially_selected,
+        max_utilization_percent=args.max_utilization_percent,
+        min_free_memory_mib=args.min_free_memory_mib,
+    )
+    final_uuid_probes_completed_at_utc = datetime.now(timezone.utc).isoformat()
+    manifest.update(
+        {
+            "source_revision_before_final_gpu_probe": (
+                source_revision_before_final_gpu_probe
+            ),
+            "physical_gpu_indices": [state.physical_index for state in gpu_states],
+            "cuda_visible_device_uuids": [state.uuid for state in gpu_states],
+            "final_uuid_probes_completed_at_utc": (final_uuid_probes_completed_at_utc),
+            "gpu_states_at_final_uuid_probe": [asdict(state) for state in gpu_states],
+        }
+    )
     run_dir.mkdir(parents=True)
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
-    print(json.dumps(manifest, indent=2, sort_keys=True))
+    manifest_json = json.dumps(manifest, indent=2, sort_keys=True)
+    manifest_path.write_text(manifest_json + "\n")
     if args.dry_run:
+        print(manifest_json)
         return
 
     shell_command = (
@@ -763,6 +942,7 @@ def main():
         ],
         check=True,
     )
+    print(manifest_json)
     print(f"launched tmux session {session_name}; log: {log_path}")
 
 

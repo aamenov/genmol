@@ -8,6 +8,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from scripts.exps.denovo import benchmark, report
 
@@ -15,6 +16,31 @@ from scripts.exps.denovo import benchmark, report
 class DenovoReportTests(unittest.TestCase):
     def _workspace(self) -> tempfile.TemporaryDirectory[str]:
         return tempfile.TemporaryDirectory(dir=report.REPOSITORY_ROOT)
+
+    def _write_report_bundle(self, payload: dict, **kwargs):
+        expected_revision = payload["seed_runs"][0]["git"]["commit"]
+        source_path = Path(report.__file__).resolve()
+        provenance = {
+            "path": str(source_path),
+            "relative_path": "scripts/exps/denovo/report.py",
+            "source_revision": expected_revision,
+            "sha256": "e" * 64,
+            "tracked_at_source_revision": True,
+            "size_bytes": source_path.stat().st_size,
+            "git": {
+                "head": expected_revision,
+                "upstream": expected_revision,
+                "clean_pushed_source_verified": True,
+            },
+        }
+        with mock.patch.object(
+            report,
+            "_report_generator_provenance",
+            return_value=provenance,
+        ) as provenance_mock:
+            outputs = report.write_report_bundle(payload, **kwargs)
+        self.assertEqual(provenance_mock.call_count, 2)
+        return outputs
 
     @staticmethod
     def _branch_metrics(
@@ -29,7 +55,9 @@ class DenovoReportTests(unittest.TestCase):
             "uniqueness_denominator": valid,
             "diversity": diversity if unique else None,
             "diversity_input_count": unique,
-            "diversity_undefined_reason": None if unique else "no_unique_valid_molecules",
+            "diversity_undefined_reason": None
+            if unique
+            else "no_unique_valid_molecules",
             "quality": quality / 1_000,
             "quality_count": quality,
             "quality_denominator": 1_000,
@@ -253,6 +281,16 @@ class DenovoReportTests(unittest.TestCase):
             "released_duplicates": released_valid - released_unique,
         }
         implementation_inputs = {
+            "genmol_package_init_source": {
+                "path": str(report.REPOSITORY_ROOT / "src/genmol/__init__.py"),
+                "sha256": "0" * 64,
+                "size_bytes": 12,
+            },
+            "genmol_utils_package_init_source": {
+                "path": str(report.REPOSITORY_ROOT / "src/genmol/utils/__init__.py"),
+                "sha256": "f" * 64,
+                "size_bytes": 13,
+            },
             "sampler_source": {
                 "path": str(report.REPOSITORY_ROOT / "src/genmol/sampler.py"),
                 "sha256": "1" * 64,
@@ -323,6 +361,7 @@ class DenovoReportTests(unittest.TestCase):
                 "minimum": 10,
                 "median": 49.0,
                 "maximum": 87,
+                "loading_policy": ("verified_bytes_retained_in_memory_for_generation"),
             },
         }
         metric_inputs = {
@@ -350,9 +389,7 @@ class DenovoReportTests(unittest.TestCase):
                             / relative_path
                         ),
                         "sha256": report.TDC_METRIC_IMPLEMENTATION_SHA256[name],
-                        "size_bytes": report.TDC_METRIC_IMPLEMENTATION_SIZE_BYTES[
-                            name
-                        ],
+                        "size_bytes": report.TDC_METRIC_IMPLEMENTATION_SIZE_BYTES[name],
                     }
                     for name, relative_path in report.TDC_METRIC_IMPLEMENTATION_PATHS.items()
                 },
@@ -488,8 +525,19 @@ class DenovoReportTests(unittest.TestCase):
                 "udlm_prior_metadata_sha256": None,
             },
             "config": {
-                "path": str(report.REPOSITORY_ROOT / "scripts/exps/denovo/hparams.yaml"),
+                "path": str(
+                    report.REPOSITORY_ROOT / "scripts/exps/denovo/hparams.yaml"
+                ),
                 "sha256": "3" * 64,
+                "git_tracking": {
+                    "path": str(
+                        report.REPOSITORY_ROOT / "scripts/exps/denovo/hparams.yaml"
+                    ),
+                    "relative_path": "scripts/exps/denovo/hparams.yaml",
+                    "source_revision": "4" * 40,
+                    "sha256": "3" * 64,
+                    "tracked_at_source_revision": True,
+                },
                 "sampling_sha256": report._sha256_json(sampling),
                 "effective_sha256": report._sha256_json(effective),
                 "source": source,
@@ -539,6 +587,17 @@ class DenovoReportTests(unittest.TestCase):
                 },
                 "launch_environment": {
                     "CUDA_VISIBLE_DEVICES": gpu_uuid,
+                    "PYTHONPATH": report.os.pathsep.join(
+                        [
+                            str(report.REPOSITORY_ROOT / "src"),
+                            str(report.REPOSITORY_ROOT),
+                        ]
+                    ),
+                    "PYTHONNOUSERSITE": "1",
+                    "PYTHONOPTIMIZE": "0",
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                    "PYTHONUTF8": "1",
+                    "PYTHONIOENCODING": "utf-8",
                     "GENMOL_BENCHMARK_GPU_PHYSICAL_INDEX": str(physical_index),
                     "GENMOL_BENCHMARK_GPU_UUID": gpu_uuid,
                     "GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT": json.dumps(
@@ -658,16 +717,18 @@ class DenovoReportTests(unittest.TestCase):
             summary["config"]["path"] = str(
                 report.REPOSITORY_ROOT / "scripts/exps/denovo" / config_name
             )
+            summary["config"]["git_tracking"].update(
+                {
+                    "path": summary["config"]["path"],
+                    "relative_path": f"scripts/exps/denovo/{config_name}",
+                }
+            )
             command = summary["run"]["command"]
             command[command.index("--checkpoint") + 1] = str(checkpoint_path)
-            command[command.index("--expected-checkpoint-sha256") + 1] = (
-                checkpoint_sha
-            )
+            command[command.index("--expected-checkpoint-sha256") + 1] = checkpoint_sha
             command[command.index("--config") + 1] = summary["config"]["path"]
             launch = summary["environment"]["launch_environment"]
-            snapshot = json.loads(
-                launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"]
-            )
+            snapshot = json.loads(launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"])
             snapshot["command"] = command
             launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"] = json.dumps(snapshot)
             summary["config"]["sampling"] = sampling
@@ -710,7 +771,9 @@ class DenovoReportTests(unittest.TestCase):
             self._three_runs(runs)
             payload = report.collect_report(runs)
 
-            self.assertEqual(payload["required_protocol"]["total_requested_samples"], 3_000)
+            self.assertEqual(
+                payload["required_protocol"]["total_requested_samples"], 3_000
+            )
             released = payload["aggregate_metrics"]["released_comparable"]
             self.assertAlmostEqual(released["validity"]["mean"], 0.999)
             self.assertAlmostEqual(released["validity"]["sample_sd"], 0.001)
@@ -737,7 +800,9 @@ class DenovoReportTests(unittest.TestCase):
                 payload["metric_inputs"]["sa_fragment_scores"]["sha256"],
                 report.SA_FRAGMENT_SCORES_SHA256,
             )
-            self.assertIn("pinned fragment-score", payload["metric_definitions"]["quality"])
+            self.assertIn(
+                "pinned fragment-score", payload["metric_definitions"]["quality"]
+            )
 
     def test_missing_or_wrong_sa_metric_provenance_is_rejected(self):
         with self._workspace() as directory:
@@ -796,7 +861,16 @@ class DenovoReportTests(unittest.TestCase):
                     {"seed": 2, "nfe": 32},
                 ],
             )
-            outputs = report.write_report_bundle(
+            caveats = "\n".join(payload["caveats"])
+            self.assertIn(
+                "evaluated UDLM checkpoint's training dataset and tokenizer provenance",
+                caveats,
+            )
+            self.assertNotIn(
+                report.TRAINING_CONTEXT["data_and_tokenizer"]["revision_status"],
+                payload["caveats"],
+            )
+            outputs = self._write_report_bundle(
                 payload,
                 output_dir=Path(directory) / "udlm-aggregate",
                 pdf_path=Path(directory) / "udlm-report.pdf",
@@ -811,9 +885,7 @@ class DenovoReportTests(unittest.TestCase):
 
             summary_path = runs / "seed_1" / "summary.json"
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
-            summary["run"]["generation_protocol"][
-                "randomness_used_by_sampler"
-            ] = True
+            summary["run"]["generation_protocol"]["randomness_used_by_sampler"] = True
             summary_path.write_text(json.dumps(summary), encoding="utf-8")
             with self.assertRaisesRegex(
                 report.ReportValidationError,
@@ -821,7 +893,9 @@ class DenovoReportTests(unittest.TestCase):
             ):
                 report.collect_report(runs)
 
-    def test_empirical_report_requires_exact_prior_identity_and_labels_causal_scope(self):
+    def test_empirical_report_requires_exact_prior_identity_and_labels_causal_scope(
+        self,
+    ):
         with self._workspace() as directory:
             runs = Path(directory) / "runs"
             self._three_udlm_runs(runs, prior_variant="empirical_frequency")
@@ -834,7 +908,9 @@ class DenovoReportTests(unittest.TestCase):
                 identity["matched_prior_effect_control"],
                 "schedule_uniform with the same categorical process and schedule",
             )
-            self.assertIn("not prior-benefit evidence", identity["causal_claim_boundary"])
+            self.assertIn(
+                "not prior-benefit evidence", identity["causal_claim_boundary"]
+            )
             self.assertEqual(
                 identity["objective_scope"],
                 "model_dependent_ct_integrand_without_parameter_independent_endpoint_kl",
@@ -854,7 +930,7 @@ class DenovoReportTests(unittest.TestCase):
                     for row in csv_rows
                 )
             )
-            outputs = report.write_report_bundle(
+            outputs = self._write_report_bundle(
                 payload,
                 output_dir=Path(directory) / "empirical-aggregate",
                 pdf_path=Path(directory) / "empirical-report.pdf",
@@ -898,8 +974,12 @@ class DenovoReportTests(unittest.TestCase):
 
         self.assertEqual(schedule["process_family"], empirical["process_family"])
         self.assertEqual(schedule["schedule_variant"], empirical["schedule_variant"])
-        self.assertIn("not evidence of empirical-prior benefit", schedule["causal_claim_boundary"])
-        self.assertIn("Only empirical_frequency minus", empirical["causal_claim_boundary"])
+        self.assertIn(
+            "not evidence of empirical-prior benefit", schedule["causal_claim_boundary"]
+        )
+        self.assertIn(
+            "Only empirical_frequency minus", empirical["causal_claim_boundary"]
+        )
 
     def test_full_bundle_writes_machine_outputs_and_valid_pdf(self):
         with self._workspace() as directory:
@@ -909,13 +989,17 @@ class DenovoReportTests(unittest.TestCase):
             pdf_path = workspace / "pdf" / "benchmark.pdf"
             self._three_runs(runs)
             payload = report.collect_report(runs)
-            outputs = report.write_report_bundle(
+            outputs = self._write_report_bundle(
                 payload, output_dir=output, pdf_path=pdf_path
             )
 
             self.assertEqual(set(outputs), {"json", "csv", "pdf"})
             aggregate = json.loads(outputs["json"].read_text(encoding="utf-8"))
             self.assertEqual(aggregate["status"], "completed")
+            self.assertEqual(aggregate["report_generator"]["sha256"], "e" * 64)
+            self.assertTrue(
+                aggregate["report_generator"]["git"]["clean_pushed_source_verified"]
+            )
             self.assertEqual(
                 aggregate["checkpoint"]["sha256"], report.EXPECTED_CHECKPOINT_SHA256
             )
@@ -926,8 +1010,48 @@ class DenovoReportTests(unittest.TestCase):
                 len([row for row in rows if row["row_type"] == "aggregate_metric"]),
                 9,
             )
-            validation = report.validate_pdf(outputs["pdf"])
+            validation = report.validate_pdf(
+                outputs["pdf"], expected_report_generator_sha256="e" * 64
+            )
             self.assertGreaterEqual(validation["page_count"], 3)
+
+    def test_report_generator_provenance_binds_clean_pushed_source(self):
+        expected_revision = "4" * 40
+        source_path = Path(report.__file__).resolve()
+        source_sha256 = report._sha256_file(source_path)
+        tracking = {
+            "path": str(source_path),
+            "relative_path": "scripts/exps/denovo/report.py",
+            "source_revision": expected_revision,
+            "sha256": source_sha256,
+            "tracked_at_source_revision": True,
+        }
+        with (
+            mock.patch.object(
+                report,
+                "require_clean_pushed_source",
+                return_value={
+                    "head": expected_revision,
+                    "upstream": expected_revision,
+                },
+            ) as clean_mock,
+            mock.patch.object(
+                report,
+                "tracked_source_file_provenance",
+                return_value=tracking,
+            ) as tracking_mock,
+        ):
+            provenance = report._report_generator_provenance(expected_revision)
+
+        clean_mock.assert_called_once_with(expected_revision)
+        tracking_mock.assert_called_once_with(
+            source_path,
+            expected_revision=expected_revision,
+            expected_sha256=source_sha256,
+        )
+        self.assertEqual(provenance["sha256"], source_sha256)
+        self.assertEqual(provenance["source_revision"], expected_revision)
+        self.assertTrue(provenance["git"]["clean_pushed_source_verified"])
 
     def test_missing_seed_is_rejected(self):
         with self._workspace() as directory:
@@ -960,7 +1084,9 @@ class DenovoReportTests(unittest.TestCase):
                 summary["config"]["effective"]
             )
             summary_path.write_text(json.dumps(summary), encoding="utf-8")
-            with self.assertRaisesRegex(report.ReportValidationError, "effective_sha256 differs"):
+            with self.assertRaisesRegex(
+                report.ReportValidationError, "effective_sha256 differs"
+            ):
                 report.collect_report(runs)
 
     def test_summary_count_tampering_is_rejected(self):
@@ -971,7 +1097,9 @@ class DenovoReportTests(unittest.TestCase):
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
             summary["metrics"]["strict"]["quality_count"] += 1
             summary_path.write_text(json.dumps(summary), encoding="utf-8")
-            with self.assertRaisesRegex(report.ReportValidationError, "disagrees with raw rows"):
+            with self.assertRaisesRegex(
+                report.ReportValidationError, "disagrees with raw rows"
+            ):
                 report.collect_report(runs)
 
     def test_uniform_self_consistent_nonpaper_sampling_is_rejected(self):
@@ -995,7 +1123,9 @@ class DenovoReportTests(unittest.TestCase):
                     summary["config"]["effective"]
                 )
                 summary_path.write_text(json.dumps(summary), encoding="utf-8")
-            with self.assertRaisesRegex(report.ReportValidationError, "exact GenMol V1"):
+            with self.assertRaisesRegex(
+                report.ReportValidationError, "exact GenMol V1"
+            ):
                 report.collect_report(runs)
 
     def test_duplicate_ordered_raw_outputs_are_rejected(self):
@@ -1017,7 +1147,9 @@ class DenovoReportTests(unittest.TestCase):
                 report._sha256_file(target_raw_path)
             )
             target_summary_path.write_text(json.dumps(target_summary), encoding="utf-8")
-            with self.assertRaisesRegex(report.ReportValidationError, "identical ordered"):
+            with self.assertRaisesRegex(
+                report.ReportValidationError, "identical ordered"
+            ):
                 report.collect_report(runs)
 
     def test_invalid_seed_provenance_is_rejected(self):
@@ -1028,7 +1160,9 @@ class DenovoReportTests(unittest.TestCase):
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
             summary["run"]["seed_configuration"]["python_hash_seed"] = "0"
             summary_path.write_text(json.dumps(summary), encoding="utf-8")
-            with self.assertRaisesRegex(report.ReportValidationError, "python_hash_seed"):
+            with self.assertRaisesRegex(
+                report.ReportValidationError, "python_hash_seed"
+            ):
                 report.collect_report(runs)
 
     def test_launcher_run_label_contract_is_required(self):
@@ -1066,9 +1200,7 @@ class DenovoReportTests(unittest.TestCase):
             summary_path = runs / "seed_0" / "summary.json"
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
             launch = summary["environment"]["launch_environment"]
-            snapshot = json.loads(
-                launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"]
-            )
+            snapshot = json.loads(launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"])
             snapshot["source_revision"]["upstream"] = "f" * 40
             launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"] = json.dumps(snapshot)
             summary_path.write_text(json.dumps(summary), encoding="utf-8")
@@ -1085,9 +1217,7 @@ class DenovoReportTests(unittest.TestCase):
             summary_path = runs / "seed_0" / "summary.json"
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
             launch = summary["environment"]["launch_environment"]
-            snapshot = json.loads(
-                launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"]
-            )
+            snapshot = json.loads(launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"])
             snapshot.pop("gpu_selection_schema_version")
             launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"] = json.dumps(snapshot)
             summary_path.write_text(json.dumps(summary), encoding="utf-8")
@@ -1106,9 +1236,7 @@ class DenovoReportTests(unittest.TestCase):
             command = summary["run"]["command"]
             command[command.index("--expected-source-revision") + 1] = "f" * 40
             launch = summary["environment"]["launch_environment"]
-            snapshot = json.loads(
-                launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"]
-            )
+            snapshot = json.loads(launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"])
             snapshot["command"] = command
             launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"] = json.dumps(snapshot)
             summary_path.write_text(json.dumps(summary), encoding="utf-8")
@@ -1127,9 +1255,7 @@ class DenovoReportTests(unittest.TestCase):
             command = summary["run"]["command"]
             command[command.index("--expected-config-sha256") + 1] = "0" * 64
             launch = summary["environment"]["launch_environment"]
-            snapshot = json.loads(
-                launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"]
-            )
+            snapshot = json.loads(launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"])
             snapshot["command"] = command
             launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"] = json.dumps(snapshot)
             summary_path.write_text(json.dumps(summary), encoding="utf-8")
@@ -1145,9 +1271,7 @@ class DenovoReportTests(unittest.TestCase):
             self._three_runs(runs)
             summary_path = runs / "seed_0" / "summary.json"
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
-            summary["git"][
-                "clean_pushed_source_verified_before_and_after_run"
-            ] = False
+            summary["git"]["clean_pushed_source_verified_before_and_after_run"] = False
             summary_path.write_text(json.dumps(summary), encoding="utf-8")
             with self.assertRaisesRegex(
                 report.ReportValidationError,
@@ -1191,7 +1315,39 @@ class DenovoReportTests(unittest.TestCase):
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
             summary["environment"]["versions"]["torch"] = "different"
             summary_path.write_text(json.dumps(summary), encoding="utf-8")
-            with self.assertRaisesRegex(report.ReportValidationError, "metadata differs"):
+            with self.assertRaisesRegex(
+                report.ReportValidationError, "metadata differs"
+            ):
+                report.collect_report(runs)
+
+    def test_git_commit_must_match_across_all_seeds(self):
+        with self._workspace() as directory:
+            runs = Path(directory) / "runs"
+            self._three_runs(runs)
+            summary_path = runs / "seed_1" / "summary.json"
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            alternate_revision = "f" * 40
+            summary["git"]["commit"] = alternate_revision
+            summary["git"]["upstream"] = alternate_revision
+            summary["git"]["expected_source_revision"] = alternate_revision
+            summary["config"]["git_tracking"]["source_revision"] = alternate_revision
+            command = summary["run"]["command"]
+            command[command.index("--expected-source-revision") + 1] = (
+                alternate_revision
+            )
+            launch = summary["environment"]["launch_environment"]
+            snapshot = json.loads(launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"])
+            snapshot["source_revision"] = {
+                "head": alternate_revision,
+                "upstream": alternate_revision,
+            }
+            snapshot["command"] = command
+            launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"] = json.dumps(snapshot)
+            summary_path.write_text(json.dumps(summary), encoding="utf-8")
+            with self.assertRaisesRegex(
+                report.ReportValidationError,
+                "Git commit differs across seeds",
+            ):
                 report.collect_report(runs)
 
     def test_active_gpu_process_is_rejected_even_below_utilization_threshold(self):
@@ -1201,9 +1357,7 @@ class DenovoReportTests(unittest.TestCase):
             summary_path = runs / "seed_0" / "summary.json"
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
             launch = summary["environment"]["launch_environment"]
-            snapshot = json.loads(
-                launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"]
-            )
+            snapshot = json.loads(launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"])
             snapshot["physical_gpu_at_final_uuid_probe"]["compute_processes"] = [
                 {"pid": 123, "process_name": "other", "used_memory_mib": 4}
             ]
@@ -1223,9 +1377,7 @@ class DenovoReportTests(unittest.TestCase):
             summary_path = runs / "seed_0" / "summary.json"
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
             launch = summary["environment"]["launch_environment"]
-            snapshot = json.loads(
-                launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"]
-            )
+            snapshot = json.loads(launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"])
             snapshot["physical_gpu_at_final_uuid_probe"]["utilization_percent"] = 10
             launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"] = json.dumps(snapshot)
             summary_path.write_text(json.dumps(summary), encoding="utf-8")
@@ -1242,9 +1394,7 @@ class DenovoReportTests(unittest.TestCase):
             summary_path = runs / "seed_0" / "summary.json"
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
             launch = summary["environment"]["launch_environment"]
-            snapshot = json.loads(
-                launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"]
-            )
+            snapshot = json.loads(launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"])
             snapshot["gpu_inventory_at_selection"][0]["uuid"] = "GPU-not-selected"
             launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"] = json.dumps(snapshot)
             summary_path.write_text(json.dumps(summary), encoding="utf-8")
@@ -1281,9 +1431,7 @@ class DenovoReportTests(unittest.TestCase):
             digest_index = command.index("--expected-checkpoint-sha256") + 1
             command[digest_index] = "0" * 64
             launch = summary["environment"]["launch_environment"]
-            snapshot = json.loads(
-                launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"]
-            )
+            snapshot = json.loads(launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"])
             snapshot["command"] = command
             launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"] = json.dumps(snapshot)
             summary_path.write_text(json.dumps(summary), encoding="utf-8")
@@ -1293,7 +1441,9 @@ class DenovoReportTests(unittest.TestCase):
             ):
                 report.collect_report(runs)
 
-    def test_duplicate_process_telemetry_is_rejected_in_final_or_inventory_snapshot(self):
+    def test_duplicate_process_telemetry_is_rejected_in_final_or_inventory_snapshot(
+        self,
+    ):
         process = {"pid": 123, "process_name": "other", "used_memory_mib": 4}
         with self._workspace() as directory:
             runs = Path(directory) / "runs"
@@ -1301,9 +1451,7 @@ class DenovoReportTests(unittest.TestCase):
             summary_path = runs / "seed_0" / "summary.json"
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
             launch = summary["environment"]["launch_environment"]
-            snapshot = json.loads(
-                launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"]
-            )
+            snapshot = json.loads(launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"])
             snapshot["physical_gpu_at_final_uuid_probe"]["compute_processes"] = [
                 process,
                 process,
@@ -1322,9 +1470,7 @@ class DenovoReportTests(unittest.TestCase):
             summary_path = runs / "seed_0" / "summary.json"
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
             launch = summary["environment"]["launch_environment"]
-            snapshot = json.loads(
-                launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"]
-            )
+            snapshot = json.loads(launch["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"])
             snapshot["gpu_inventory_at_selection"][0]["compute_processes"] = [
                 process,
                 process,
@@ -1345,7 +1491,9 @@ class DenovoReportTests(unittest.TestCase):
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
             summary["tokenizer"]["vocabulary_sha256"] = "c" * 64
             summary_path.write_text(json.dumps(summary), encoding="utf-8")
-            with self.assertRaisesRegex(report.ReportValidationError, "tokenizer metadata"):
+            with self.assertRaisesRegex(
+                report.ReportValidationError, "tokenizer metadata"
+            ):
                 report.collect_report(runs)
 
     def test_generation_timing_must_equal_audited_subcomponents(self):
@@ -1356,7 +1504,9 @@ class DenovoReportTests(unittest.TestCase):
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
             summary["runtime_seconds"]["generation"] += 1.0
             summary_path.write_text(json.dumps(summary), encoding="utf-8")
-            with self.assertRaisesRegex(report.ReportValidationError, "generation runtime"):
+            with self.assertRaisesRegex(
+                report.ReportValidationError, "generation runtime"
+            ):
                 report.collect_report(runs)
 
 

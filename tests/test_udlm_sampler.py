@@ -78,9 +78,7 @@ class _MDLMProcess:
     def get_num_steps_confidence(self, x):
         return 3
 
-    def step_confidence(
-        self, logits, x, step, num_steps, softmax_temp, randomness
-    ):
+    def step_confidence(self, logits, x, step, num_steps, softmax_temp, randomness):
         self.steps.append((step, num_steps, softmax_temp, randomness))
         return x
 
@@ -96,9 +94,7 @@ def _sampler(model, process, diffusion_type):
 
 @pytest.fixture(autouse=True)
 def _identity_decoder(monkeypatch):
-    monkeypatch.setattr(
-        sampler_module, "safe_to_smiles", lambda value, fix=True: value
-    )
+    monkeypatch.setattr(sampler_module, "safe_to_smiles", lambda value, fix=True: value)
 
 
 def test_udlm_sampling_uses_fixed_time_grid_and_clamps_context():
@@ -117,7 +113,9 @@ def test_udlm_sampling_uses_fixed_time_grid_and_clamps_context():
         assert model_input[0, 0] == 1
         assert model_input[0, 3] == 2
         assert model_input[0, 4] == 3
-        assert torch.equal(attention_mask, torch.tensor([[True, True, True, True, False]]))
+        assert torch.equal(
+            attention_mask, torch.tensor([[True, True, True, True, False]])
+        )
     for _, _, _, editable, temperature in process.steps:
         assert torch.equal(editable, expected_editable)
         assert temperature == pytest.approx(0.7)
@@ -180,3 +178,24 @@ def test_mdlm_confidence_loop_contract_is_preserved():
         (1, 3, 0.5, 0.25),
         (2, 3, 0.5, 0.25),
     ]
+
+
+def test_insert_mask_consumes_resident_length_distribution(monkeypatch):
+    sampler = _sampler(_MDLMModel(), _MDLMProcess(), "mdlm")
+    sampler.length_distribution = (8,)
+    sampler.model.mask_index = 4
+
+    def fail_if_reopened(*_args, **_kwargs):
+        raise AssertionError("the sampler must not reopen data/len.pk")
+
+    monkeypatch.setattr(sampler_module, "open", fail_if_reopened, raising=False)
+    output = sampler._insert_mask(
+        torch.tensor([[sampler.model.bos_index, sampler.model.eos_index]]),
+        num_samples=2,
+        min_add_len=1,
+    )
+
+    assert output.shape == (2, 8)
+    assert torch.all(output[:, 0] == sampler.model.bos_index)
+    assert torch.all(output[:, -1] == sampler.model.eos_index)
+    assert torch.all(output[:, 1:-1] == sampler.model.mask_index)

@@ -52,6 +52,15 @@ def _expected(tmp_path: Path, *, num_samples: int = 3) -> launcher.ExpectedRunId
         "randomness": 0.5,
         "min_add_len": 40,
     }
+    source_revision = "e" * 40
+    source_config_sha256 = launcher._sha256_file(config)
+    config_git_tracking = {
+        "path": str(config),
+        "relative_path": "config.yaml",
+        "source_revision": source_revision,
+        "sha256": source_config_sha256,
+        "tracked_at_source_revision": True,
+    }
     sampling = {
         "diffusion_type": "mdlm",
         "softmax_temp": 0.5,
@@ -108,7 +117,8 @@ def _expected(tmp_path: Path, *, num_samples: int = 3) -> launcher.ExpectedRunId
         checkpoint_udlm_prior_metadata_sha256=None,
         config_path=config,
         source_config=source,
-        source_config_sha256=launcher._sha256_file(config),
+        source_config_sha256=source_config_sha256,
+        config_git_tracking=config_git_tracking,
         sampling_config=sampling,
         sampling_config_sha256=launcher._canonical_json_sha256(sampling),
         effective_config=effective,
@@ -117,14 +127,16 @@ def _expected(tmp_path: Path, *, num_samples: int = 3) -> launcher.ExpectedRunId
         implementation_inputs=implementation_inputs,
         metric_inputs=metric_inputs,
         num_samples=num_samples,
-        source_revision="e" * 40,
+        source_revision=source_revision,
     )
 
 
 def _write_raw_csv(path: Path, count: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=launcher.benchmark_runner.RAW_SAMPLE_FIELDS)
+        writer = csv.DictWriter(
+            handle, fieldnames=launcher.benchmark_runner.RAW_SAMPLE_FIELDS
+        )
         writer.writeheader()
         for index in range(count):
             row = {field: "" for field in launcher.benchmark_runner.RAW_SAMPLE_FIELDS}
@@ -168,9 +180,7 @@ def _write_matching_artifacts(
         "run": {
             "seed": seed,
             "requested_sample_count": expected.num_samples,
-            "evaluation_tier": (
-                "final" if expected.num_samples == 1_000 else "pilot"
-            ),
+            "evaluation_tier": ("final" if expected.num_samples == 1_000 else "pilot"),
             "final_protocol_eligible": expected.num_samples == 1_000,
             "started_at_utc": "2026-09-05T00:00:00+00:00",
             "completed_at_utc": "2026-09-05T00:01:00+00:00",
@@ -225,6 +235,7 @@ def _write_matching_artifacts(
         "config": {
             "path": str(expected.config_path),
             "sha256": expected.source_config_sha256,
+            "git_tracking": expected.config_git_tracking,
             "source": expected.source_config,
             "sampling": expected.sampling_config,
             "sampling_sha256": expected.sampling_config_sha256,
@@ -294,7 +305,9 @@ def _read_summary(path: Path) -> dict[str, object]:
 
 
 def _write_summary(path: Path, payload: dict[str, object]) -> None:
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
 
 
 def test_gpu_request_accepts_only_a_count_capped_at_two() -> None:
@@ -551,9 +564,7 @@ def test_final_probe_rechecks_policy_uuid_and_active_processes() -> None:
     probe.assert_called_once_with(candidate.uuid)
 
     shared_but_below_threshold = _gpu(
-        processes=(
-            {"pid": 9, "process_name": "/other/python", "used_memory_mib": 20},
-        )
+        processes=({"pid": 9, "process_name": "/other/python", "used_memory_mib": 20},)
     )
     with mock.patch.object(
         launcher,
@@ -582,7 +593,7 @@ def test_final_probe_rechecks_policy_uuid_and_active_processes() -> None:
     assert any("identity changed" in reason for reason in reasons)
 
 
-def test_child_environment_maps_uuid_and_uses_logical_cuda_zero(
+def test_child_environment_maps_uuid_and_drops_inherited_pythonpath(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -590,6 +601,11 @@ def test_child_environment_maps_uuid_and_uses_logical_cuda_zero(
     monkeypatch.setenv("UNRELATED", "preserved")
     hostile_main = "/hostile/main-checkout/src"
     monkeypatch.setenv("PYTHONPATH", hostile_main)
+    monkeypatch.setenv("PYTHONHOME", "/hostile/python-home")
+    monkeypatch.setenv("PYTHONUSERBASE", "/hostile/user-base")
+    monkeypatch.setenv("PYTHONPYCACHEPREFIX", "/hostile/pycache")
+    monkeypatch.setenv("PYTHONWARNINGS", "error")
+    monkeypatch.setenv("PYTHONOPTIMIZE", "2")
     selection = {"event": "launch", "physical_gpu": _gpu().as_dict()}
     environment = launcher._child_environment(
         seed=17,
@@ -606,9 +622,20 @@ def test_child_environment_maps_uuid_and_uses_logical_cuda_zero(
     assert environment["PYTHONPATH"].split(launcher.os.pathsep) == [
         str(tmp_path / "src"),
         str(tmp_path),
-        hostile_main,
     ]
-    assert json.loads(environment["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"]) == selection
+    assert hostile_main not in environment["PYTHONPATH"]
+    assert environment["PYTHONNOUSERSITE"] == "1"
+    assert environment["PYTHONOPTIMIZE"] == "0"
+    assert environment["PYTHONDONTWRITEBYTECODE"] == "1"
+    assert environment["PYTHONUTF8"] == "1"
+    assert environment["PYTHONIOENCODING"] == "utf-8"
+    assert "PYTHONHOME" not in environment
+    assert "PYTHONUSERBASE" not in environment
+    assert "PYTHONPYCACHEPREFIX" not in environment
+    assert "PYTHONWARNINGS" not in environment
+    assert (
+        json.loads(environment["GENMOL_BENCHMARK_GPU_SELECTION_SNAPSHOT"]) == selection
+    )
     command = launcher._command(
         checkpoint=tmp_path / "model.ckpt",
         expected_checkpoint_sha256="a" * 64,
@@ -678,23 +705,31 @@ def test_final_completion_delegates_to_report_consumability_validator(
     _write_matching_artifacts(output_root, 7, expected)
 
     with mock.patch.object(
-        report,
-        "_validate_summary_and_rows",
-        return_value={"validated": True},
-    ) as validate:
-        assert launcher._completed(output_root, 7, expected) is True
-    validate.assert_called_once_with(output_root / "seed_7", 7)
-
-    with mock.patch.object(
-        report,
-        "_validate_summary_and_rows",
-        side_effect=report.ReportValidationError("synthetic report rejection"),
+        launcher,
+        "_require_clean_pushed_source",
+        return_value={
+            "head": expected.source_revision,
+            "upstream": expected.source_revision,
+        },
     ):
-        with pytest.raises(
-            launcher.CompletionArtifactError,
-            match="fail final report validation.*synthetic report rejection",
+        with mock.patch.object(
+            report,
+            "_validate_summary_and_rows",
+            return_value={"validated": True},
+        ) as validate:
+            assert launcher._completed(output_root, 7, expected) is True
+        validate.assert_called_once_with(output_root / "seed_7", 7)
+
+        with mock.patch.object(
+            report,
+            "_validate_summary_and_rows",
+            side_effect=report.ReportValidationError("synthetic report rejection"),
         ):
-            launcher._completed(output_root, 7, expected)
+            with pytest.raises(
+                launcher.CompletionArtifactError,
+                match="fail final report validation.*synthetic report rejection",
+            ):
+                launcher._completed(output_root, 7, expected)
 
 
 def test_expected_identity_uses_checkpoint_metadata_and_normalized_sampling(
@@ -942,7 +977,9 @@ def test_partial_artifacts_fail_before_launch(
     raw_path, summary_path = _write_matching_artifacts(output_root, 1, expected)
     (raw_path if missing_name == "raw_samples.csv" else summary_path).unlink()
 
-    with pytest.raises(launcher.CompletionArtifactError, match="partial benchmark artifacts"):
+    with pytest.raises(
+        launcher.CompletionArtifactError, match="partial benchmark artifacts"
+    ):
         launcher._completed(output_root, 1, expected)
 
 
@@ -1038,7 +1075,9 @@ def test_main_skips_matching_run_without_probing_gpus(
         ]
     )
 
-    assert "already have matching, integrity-checked artifacts" in capsys.readouterr().out
+    assert (
+        "already have matching, integrity-checked artifacts" in capsys.readouterr().out
+    )
 
 
 def test_main_requires_tmux_only_for_real_execution(
@@ -1138,7 +1177,9 @@ def test_main_rejects_partial_output_before_probing_gpus(
         lambda *_: pytest.fail("partial artifacts must fail before a GPU probe"),
     )
 
-    with pytest.raises(launcher.CompletionArtifactError, match="partial benchmark artifacts"):
+    with pytest.raises(
+        launcher.CompletionArtifactError, match="partial benchmark artifacts"
+    ):
         launcher.main(
             [
                 "--checkpoint",
@@ -1197,7 +1238,9 @@ def test_main_rejects_mismatched_completion_before_probing_gpus(
         lambda *_: pytest.fail("mismatched artifacts must fail before a GPU probe"),
     )
 
-    with pytest.raises(launcher.CompletionArtifactError, match="checkpoint.global_step"):
+    with pytest.raises(
+        launcher.CompletionArtifactError, match="checkpoint.global_step"
+    ):
         launcher.main(
             [
                 "--checkpoint",
