@@ -1751,9 +1751,12 @@ def load_checkpoint_model(
 
     model = GenMol(hyper_parameters["config"])
     # Manual construction bypasses Lightning's on_load_checkpoint hook. Invoke
-    # the same immutable categorical-prior validation before accepting tensors.
+    # the same immutable process and conditioning validations before accepting
+    # tensors so an A1 checkpoint cannot evade its topology contract here.
     model._validate_runtime_udlm_prior_identity()
     model._validate_udlm_prior_checkpoint(checkpoint)
+    model._validate_runtime_udlm_conditioning_identity()
+    model._validate_udlm_conditioning_checkpoint(checkpoint)
     runtime_metadata = getattr(model, "udlm_prior_metadata", None)
     runtime_record = None if runtime_metadata is None else runtime_metadata.to_dict()
     checkpoint_record = checkpoint.get(UDLM_PRIOR_CHECKPOINT_KEY)
@@ -1764,6 +1767,7 @@ def load_checkpoint_model(
         raise ValueError("categorical UDLM checkpoint prior metadata is not type-exact")
     model.load_state_dict(checkpoint_state, strict=True)
     model._validate_runtime_udlm_prior_identity()
+    model._validate_runtime_udlm_conditioning_identity()
     manifest = _backbone_parameter_manifest(model, checkpoint_state)
     names = [name for name, _parameter, _raw_tensor in manifest]
     ema_enabled = model.ema is not None

@@ -24,10 +24,9 @@ from numbers import Real
 from pathlib import Path
 from typing import Any
 
-import hydra.utils
 import lightning as L
 import torch
-from transformers import BertForMaskedLM
+from transformers import BertForMaskedLM, get_constant_schedule_with_warmup
 from transformers.models.bert.configuration_bert import BertConfig
 from bionemo.moco.interpolants import MDLM
 from bionemo.moco.distributions.time import UniformTimeDistribution
@@ -35,7 +34,12 @@ from genmol.utils.utils_moco import AntitheticUniformTimeDistribution
 from bionemo.moco.schedules.noise.continuous_noise_transforms import LogLinearExpNoiseTransform
 from bionemo.moco.distributions.prior import DiscreteMaskedPrior
 
-from genmol.backbone import TimeConditionedBertForMaskedLM
+from genmol.backbone import (
+    ADDITIVE_CONDITIONING,
+    FILM_ADALN_CONDITIONING,
+    TimeConditionedBertForMaskedLM,
+    is_conditioning_parameter_name,
+)
 from genmol.diffusion import (
     ContinuousCategoricalDiffusion,
     ContinuousUniformDiffusion,
@@ -64,9 +68,21 @@ EMPIRICAL_FREQUENCY_ORDERED_TEXT_SHA256 = (
     "53aee8e5592fc96159788e86519abbbcc9f1ab7c6348a1cb59a939bd57051d8f"
 )
 UDLM_PRIOR_CHECKPOINT_KEY = "udlm_prior_metadata"
+UDLM_CONDITIONING_CHECKPOINT_KEY = "udlm_conditioning_metadata"
+UDLM_CONDITIONING_METADATA_SCHEMA_VERSION = 1
+OFFICIAL_UDLM_REFERENCE_REVISION = "edb0f8c28b7caeb4ea7a06a2fee8d74ab6da1661"
 UDLM_PRIOR_VARIANTS = frozenset(
     {"release_uniform", "schedule_uniform", "empirical_frequency"}
 )
+CONSTANT_WITH_LINEAR_WARMUP = "constant_with_linear_warmup"
+HALF_COSINE_WITH_LINEAR_WARMUP_AND_FLOOR = (
+    "half_cosine_with_linear_warmup_and_floor"
+)
+OPTIMIZER_SCHEDULER_SPEC_SCHEMA_VERSION = 1
+_OPTIMIZER_SCHEDULER_FIELDS = frozenset(
+    {"name", "warmup_updates", "horizon_updates", "decay_floor_lr"}
+)
+_MISSING = object()
 UDLM_PRIOR_VARIANT_IDENTITIES = {
     "release_uniform": {
         "comparison_role": "faithful_release_control",
@@ -94,6 +110,332 @@ UDLM_PRIOR_VARIANT_IDENTITIES = {
         "prior_source": "pinned_frequency_artifact_uniform_mixture",
     },
 }
+
+
+@dataclass(frozen=True)
+class OptimizerSchedulerSpec:
+    """Immutable optimizer-step schedule identity for execution evidence."""
+
+    schema_version: int
+    name: str
+    peak_lr: float
+    warmup_updates: int
+    horizon_updates: int | None
+    decay_floor_lr: float | None
+    step_unit: str
+    horizon_includes_warmup: bool
+    post_horizon_policy: str
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.schema_version) is not int
+            or self.schema_version != OPTIMIZER_SCHEDULER_SPEC_SCHEMA_VERSION
+        ):
+            raise ValueError("optimizer scheduler spec schema version is invalid")
+        _finite_positive_real(self.peak_lr, "optimizer scheduler spec peak_lr")
+        _nonnegative_update_count(
+            self.warmup_updates, "optimizer scheduler spec warmup_updates"
+        )
+        if self.step_unit != "optimizer_update":
+            raise ValueError("optimizer scheduler spec step_unit is invalid")
+        if self.horizon_includes_warmup is not True:
+            raise ValueError(
+                "optimizer scheduler spec must count warmup inside its horizon"
+            )
+        if self.name == CONSTANT_WITH_LINEAR_WARMUP:
+            if self.horizon_updates is not None or self.decay_floor_lr is not None:
+                raise ValueError("constant optimizer scheduler spec is inconsistent")
+            if self.post_horizon_policy != "constant_at_peak":
+                raise ValueError("constant optimizer scheduler policy is invalid")
+            return
+        if self.name != HALF_COSINE_WITH_LINEAR_WARMUP_AND_FLOOR:
+            raise ValueError("optimizer scheduler spec name is not registered")
+        horizon_updates = _nonnegative_update_count(
+            self.horizon_updates, "optimizer scheduler spec horizon_updates"
+        )
+        if horizon_updates <= self.warmup_updates:
+            raise ValueError(
+                "optimizer scheduler spec horizon must exceed its warmup"
+            )
+        if isinstance(self.decay_floor_lr, bool) or not isinstance(
+            self.decay_floor_lr, Real
+        ):
+            raise ValueError("optimizer scheduler spec decay floor is invalid")
+        decay_floor_lr = float(self.decay_floor_lr)
+        if (
+            not math.isfinite(decay_floor_lr)
+            or decay_floor_lr < 0.0
+            or decay_floor_lr >= float(self.peak_lr)
+        ):
+            raise ValueError("optimizer scheduler spec decay floor is invalid")
+        if self.post_horizon_policy != "clamped_at_decay_floor":
+            raise ValueError("cosine optimizer scheduler policy is invalid")
+
+
+@dataclass(frozen=True)
+class UDLMConditioningMetadata:
+    """Immutable identity for the non-legacy BERT conditioning topology."""
+
+    schema_version: int
+    variant: str
+    architecture: str
+    timestep_input: str
+    timestep_outer_activation: str
+    timestep_mlp_output_initialization: str
+    per_layer_modulation: str
+    per_layer_modulation_initialization: str
+    hidden_size: int
+    layer_count: int
+    conditioning_parameter_manifest: tuple[tuple[str, tuple[int, ...]], ...]
+    official_udlm_reference_revision: str
+    official_architecture_difference: str
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a detached, JSON-compatible checkpoint record."""
+
+        record = asdict(self)
+        record["conditioning_parameter_manifest"] = [
+            {"name": name, "shape": list(shape)}
+            for name, shape in self.conditioning_parameter_manifest
+        ]
+        return record
+
+
+def _finite_positive_real(value: object, label: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise ValueError(f"{label} must be a finite positive real number")
+    parsed = float(value)
+    if not math.isfinite(parsed) or parsed <= 0.0:
+        raise ValueError(f"{label} must be a finite positive real number")
+    return parsed
+
+
+def _nonnegative_update_count(value: object, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{label} must be a nonnegative integer")
+    return value
+
+
+def _exact_nested_data_equal(observed: object, expected: object) -> bool:
+    """Compare JSON-like records without Python's bool/int coercions."""
+
+    if type(observed) is not type(expected):
+        return False
+    if isinstance(expected, dict):
+        return observed.keys() == expected.keys() and all(
+            _exact_nested_data_equal(observed[key], expected[key])
+            for key in expected
+        )
+    if isinstance(expected, list):
+        return len(observed) == len(expected) and all(
+            _exact_nested_data_equal(left, right)
+            for left, right in zip(observed, expected, strict=True)
+        )
+    return observed == expected
+
+
+def optimizer_scheduler_spec(optim_config: Mapping[str, Any]) -> OptimizerSchedulerSpec:
+    """Resolve one strict schedule, retaining the released config fallback.
+
+    Checkpoints created before scheduler configuration was exposed have no
+    ``optim.scheduler`` block.  That one absence maps exactly to the released
+    constant schedule with 2,500 linear-warmup optimizer updates.  Once the
+    block is present, every field is required so a typo cannot silently change
+    an experiment.
+    """
+
+    if not isinstance(optim_config, Mapping):
+        raise ValueError("optim must be a mapping")
+    peak_lr = _finite_positive_real(optim_config.get("lr"), "optim.lr")
+    scheduler_config = optim_config.get("scheduler", _MISSING)
+    if scheduler_config is _MISSING:
+        return OptimizerSchedulerSpec(
+            schema_version=OPTIMIZER_SCHEDULER_SPEC_SCHEMA_VERSION,
+            name=CONSTANT_WITH_LINEAR_WARMUP,
+            peak_lr=peak_lr,
+            warmup_updates=2500,
+            horizon_updates=None,
+            decay_floor_lr=None,
+            step_unit="optimizer_update",
+            horizon_includes_warmup=True,
+            post_horizon_policy="constant_at_peak",
+        )
+    if not isinstance(scheduler_config, Mapping):
+        raise ValueError("optim.scheduler must be a mapping when present")
+    actual_fields = frozenset(scheduler_config)
+    if actual_fields != _OPTIMIZER_SCHEDULER_FIELDS:
+        missing = sorted(_OPTIMIZER_SCHEDULER_FIELDS - actual_fields)
+        unexpected = sorted(actual_fields - _OPTIMIZER_SCHEDULER_FIELDS)
+        raise ValueError(
+            "optim.scheduler must contain exactly the registered fields: "
+            f"missing={missing}, unexpected={unexpected}"
+        )
+
+    name = scheduler_config["name"]
+    if not isinstance(name, str) or name not in {
+        CONSTANT_WITH_LINEAR_WARMUP,
+        HALF_COSINE_WITH_LINEAR_WARMUP_AND_FLOOR,
+    }:
+        raise ValueError("optim.scheduler.name is not registered")
+    warmup_updates = _nonnegative_update_count(
+        scheduler_config["warmup_updates"], "optim.scheduler.warmup_updates"
+    )
+    horizon_updates = scheduler_config["horizon_updates"]
+    decay_floor_lr = scheduler_config["decay_floor_lr"]
+
+    if name == CONSTANT_WITH_LINEAR_WARMUP:
+        if horizon_updates is not None or decay_floor_lr is not None:
+            raise ValueError(
+                "constant schedule requires null horizon_updates and decay_floor_lr"
+            )
+        post_horizon_policy = "constant_at_peak"
+    else:
+        horizon_updates = _nonnegative_update_count(
+            horizon_updates, "optim.scheduler.horizon_updates"
+        )
+        if horizon_updates <= warmup_updates:
+            raise ValueError(
+                "cosine horizon_updates must be greater than warmup_updates"
+            )
+        if isinstance(decay_floor_lr, bool) or not isinstance(decay_floor_lr, Real):
+            raise ValueError(
+                "optim.scheduler.decay_floor_lr must be a finite real number"
+            )
+        decay_floor_lr = float(decay_floor_lr)
+        if (
+            not math.isfinite(decay_floor_lr)
+            or decay_floor_lr < 0.0
+            or decay_floor_lr >= peak_lr
+        ):
+            raise ValueError(
+                "optim.scheduler.decay_floor_lr must be finite and lie in "
+                "[0, optim.lr)"
+            )
+        post_horizon_policy = "clamped_at_decay_floor"
+
+    return OptimizerSchedulerSpec(
+        schema_version=OPTIMIZER_SCHEDULER_SPEC_SCHEMA_VERSION,
+        name=name,
+        peak_lr=peak_lr,
+        warmup_updates=warmup_updates,
+        horizon_updates=horizon_updates,
+        decay_floor_lr=decay_floor_lr,
+        step_unit="optimizer_update",
+        horizon_includes_warmup=True,
+        post_horizon_policy=post_horizon_policy,
+    )
+
+
+def optimizer_scheduler_multiplier(
+    spec: OptimizerSchedulerSpec, scheduler_index: int
+) -> float:
+    """Return the LR multiplier at one nonnegative ``LambdaLR`` index."""
+
+    if not isinstance(spec, OptimizerSchedulerSpec):
+        raise TypeError("spec must be an OptimizerSchedulerSpec")
+    scheduler_index = _nonnegative_update_count(
+        scheduler_index, "scheduler_index"
+    )
+    if scheduler_index < spec.warmup_updates:
+        return scheduler_index / spec.warmup_updates
+    if spec.name == CONSTANT_WITH_LINEAR_WARMUP:
+        return 1.0
+    if spec.name != HALF_COSINE_WITH_LINEAR_WARMUP_AND_FLOOR:
+        raise ValueError("optimizer scheduler spec name is not registered")
+    if spec.horizon_updates is None or spec.decay_floor_lr is None:
+        raise ValueError("cosine optimizer scheduler spec is incomplete")
+    progress = min(
+        max(
+            (scheduler_index - spec.warmup_updates)
+            / (spec.horizon_updates - spec.warmup_updates),
+            0.0,
+        ),
+        1.0,
+    )
+    floor_multiplier = spec.decay_floor_lr / spec.peak_lr
+    half_cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+    return floor_multiplier + (1.0 - floor_multiplier) * half_cosine
+
+
+def build_optimizer_scheduler(
+    optimizer: torch.optim.Optimizer,
+    spec: OptimizerSchedulerSpec,
+) -> torch.optim.lr_scheduler.LRScheduler:
+    """Construct the scheduler identified by a validated immutable spec."""
+
+    if not isinstance(spec, OptimizerSchedulerSpec):
+        raise TypeError("spec must be an OptimizerSchedulerSpec")
+    if spec.name == CONSTANT_WITH_LINEAR_WARMUP:
+        # Keep the exact released Transformers implementation and state shape.
+        return get_constant_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=spec.warmup_updates,
+        )
+    if spec.name == HALF_COSINE_WITH_LINEAR_WARMUP_AND_FLOOR:
+        return torch.optim.lr_scheduler.LambdaLR(
+            optimizer,
+            lr_lambda=lambda index: optimizer_scheduler_multiplier(spec, index),
+        )
+    raise ValueError("optimizer scheduler spec name is not registered")
+
+
+def _build_udlm_conditioning_metadata(
+    backbone: TimeConditionedBertForMaskedLM,
+) -> UDLMConditioningMetadata | None:
+    """Describe and structurally validate a configured UDLM conditioner."""
+
+    variant = getattr(backbone, "conditioning_variant", None)
+    if variant == ADDITIVE_CONDITIONING:
+        return None
+    if variant != FILM_ADALN_CONDITIONING:
+        raise RuntimeError("UDLM backbone has an unknown conditioning variant")
+
+    hidden_size = int(backbone.config.hidden_size)
+    layer_count = int(backbone.config.num_hidden_layers)
+    manifest = tuple(
+        (name, tuple(parameter.shape))
+        for name, parameter in backbone.named_parameters()
+        if is_conditioning_parameter_name(name)
+    )
+    expected_names_and_shapes = []
+    for index in range(layer_count):
+        prefix = f"bert.encoder.layer.{index}.film_modulation"
+        expected_names_and_shapes.extend(
+            [
+                (f"{prefix}.weight", (2 * hidden_size, hidden_size)),
+                (f"{prefix}.bias", (2 * hidden_size,)),
+            ]
+        )
+    time_parameters = tuple(
+        (name, tuple(parameter.shape))
+        for name, parameter in backbone.named_parameters()
+        if name.startswith("time_conditioner.")
+    )
+    if len(time_parameters) != 4:
+        raise RuntimeError("FiLM UDLM must have exactly four timestep-MLP tensors")
+    expected = set(expected_names_and_shapes) | set(time_parameters)
+    if len(manifest) != len(expected) or set(manifest) != expected:
+        raise RuntimeError(
+            "FiLM UDLM conditioning parameter names or shapes are inconsistent"
+        )
+
+    return UDLMConditioningMetadata(
+        schema_version=UDLM_CONDITIONING_METADATA_SCHEMA_VERSION,
+        variant=FILM_ADALN_CONDITIONING,
+        architecture="bert_post_block_film",
+        timestep_input="continuous_noise_level_sigma",
+        timestep_outer_activation="silu",
+        timestep_mlp_output_initialization="pytorch_default_nonzero",
+        per_layer_modulation="linear_hidden_to_shift_and_scale",
+        per_layer_modulation_initialization="exact_zero_weight_and_bias",
+        hidden_size=hidden_size,
+        layer_count=layer_count,
+        conditioning_parameter_manifest=manifest,
+        official_udlm_reference_revision=OFFICIAL_UDLM_REFERENCE_REVISION,
+        official_architecture_difference=(
+            "minimal_post_block_BERT_FiLM_not_official_DiT_six_vector_adaLN_gating"
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -520,7 +862,14 @@ class GenMol(L.LightningModule):
         super().__init__()
         self.save_hyperparameters()
         self.config = config
+        optim_config = self.config.get("optim")
+        self._optimizer_scheduler_spec = (
+            optimizer_scheduler_spec(optim_config)
+            if optim_config is not None
+            else None
+        )
         self._udlm_prior_metadata: UDLMPriorMetadata | None = None
+        self._udlm_conditioning_metadata: UDLMConditioningMetadata | None = None
         # set up tokenizer
         self.tokenizer = get_tokenizer()
         self.mask_index = self.tokenizer.mask_token_id
@@ -537,12 +886,23 @@ class GenMol(L.LightningModule):
         backbone_config = BertConfig.from_dict(dict(self.config.model))
         if self.diffusion_type == 'udlm':
             udlm_config = self.config.training.get('udlm', {})
+            zero_init_conditioning = udlm_config.get(
+                'zero_init_conditioning', True
+            )
+            if type(zero_init_conditioning) is not bool:
+                raise ValueError(
+                    "training.udlm.zero_init_conditioning must be a boolean"
+                )
             self.backbone = TimeConditionedBertForMaskedLM(
                 backbone_config,
                 time_embedding_size=int(udlm_config.get('time_embedding_size', 256)),
-                zero_init_conditioning=bool(
-                    udlm_config.get('zero_init_conditioning', True)
+                zero_init_conditioning=zero_init_conditioning,
+                conditioning_variant=str(
+                    udlm_config.get('conditioning_variant', ADDITIVE_CONDITIONING)
                 ),
+            )
+            self._udlm_conditioning_metadata = _build_udlm_conditioning_metadata(
+                self.backbone
             )
         else:
             self.backbone = BertForMaskedLM(backbone_config)
@@ -597,6 +957,34 @@ class GenMol(L.LightningModule):
         """Read-only process identity; its returned record is itself frozen."""
 
         return self._udlm_prior_metadata
+
+    @property
+    def optimizer_scheduler_spec(self) -> OptimizerSchedulerSpec | None:
+        """Return the immutable schedule identity, if optimization was configured."""
+
+        return self._optimizer_scheduler_spec
+
+    @property
+    def udlm_conditioning_metadata(self) -> UDLMConditioningMetadata | None:
+        """Return the frozen identity for a non-legacy UDLM conditioner."""
+
+        return self._udlm_conditioning_metadata
+
+    def _validate_runtime_udlm_conditioning_identity(self) -> None:
+        """Ensure config, live modules, and immutable conditioner identity agree."""
+
+        metadata = self.udlm_conditioning_metadata
+        if self.diffusion_type != "udlm":
+            if metadata is not None:
+                raise RuntimeError(
+                    "UDLM conditioning metadata is attached to a non-UDLM model"
+                )
+            return
+        observed = _build_udlm_conditioning_metadata(self.backbone)
+        if observed != metadata:
+            raise RuntimeError(
+                "live UDLM conditioning topology disagrees with its metadata"
+            )
 
     def _validate_runtime_udlm_prior_identity(self) -> None:
         """Ensure the immutable record still identifies the live process."""
@@ -736,14 +1124,15 @@ class GenMol(L.LightningModule):
         """Validate categorical checkpoint metadata before tensors are loaded."""
 
         metadata = self.udlm_prior_metadata
+        checkpoint_declares_metadata = UDLM_PRIOR_CHECKPOINT_KEY in checkpoint
         checkpoint_metadata = checkpoint.get(UDLM_PRIOR_CHECKPOINT_KEY)
         if metadata is None:
-            if checkpoint_metadata is not None:
+            if checkpoint_declares_metadata:
                 raise ValueError("non-UDLM checkpoint unexpectedly declares UDLM prior metadata")
             return
         categorical = type(self.mdlm) is ContinuousCategoricalDiffusion
         if not categorical:
-            if checkpoint_metadata is not None:
+            if checkpoint_declares_metadata:
                 raise ValueError(
                     "release_uniform checkpoint must not declare categorical prior metadata"
                 )
@@ -753,7 +1142,7 @@ class GenMol(L.LightningModule):
                 "categorical UDLM checkpoint is missing immutable prior metadata"
             )
         expected_metadata = metadata.to_dict()
-        if dict(checkpoint_metadata) != expected_metadata:
+        if not _exact_nested_data_equal(dict(checkpoint_metadata), expected_metadata):
             raise ValueError(
                 "categorical UDLM checkpoint prior metadata does not match the "
                 "configured process and pinned artifact"
@@ -763,13 +1152,68 @@ class GenMol(L.LightningModule):
             raise ValueError("categorical UDLM checkpoint state_dict must be a mapping")
         self._validate_udlm_prior_state_dict(state_dict)
 
+    def _validate_udlm_conditioning_state_dict(
+        self, state_dict: Mapping[str, object]
+    ) -> None:
+        """Reject cross-topology state loads even when callers request non-strict."""
+
+        expected = {
+            name for name in self.state_dict() if is_conditioning_parameter_name(name)
+        }
+        observed = {
+            name for name in state_dict if is_conditioning_parameter_name(name)
+        }
+        if observed != expected:
+            missing = sorted(expected - observed)
+            unexpected = sorted(observed - expected)
+            raise ValueError(
+                "checkpoint conditioning state disagrees with the configured "
+                f"topology: missing={missing}, unexpected={unexpected}"
+            )
+
+    def _validate_udlm_conditioning_checkpoint(
+        self, checkpoint: Mapping[str, object]
+    ) -> None:
+        """Validate A1 topology metadata before Lightning loads its tensors."""
+
+        self._validate_runtime_udlm_conditioning_identity()
+        checkpoint_declares_metadata = (
+            UDLM_CONDITIONING_CHECKPOINT_KEY in checkpoint
+        )
+        checkpoint_metadata = checkpoint.get(UDLM_CONDITIONING_CHECKPOINT_KEY)
+        metadata = self.udlm_conditioning_metadata
+        if metadata is None:
+            if checkpoint_declares_metadata:
+                raise ValueError(
+                    "legacy/additive checkpoint unexpectedly declares FiLM metadata"
+                )
+        else:
+            if not isinstance(checkpoint_metadata, Mapping):
+                raise ValueError(
+                    "FiLM checkpoint is missing immutable conditioning metadata"
+                )
+            if not _exact_nested_data_equal(
+                dict(checkpoint_metadata), metadata.to_dict()
+            ):
+                raise ValueError(
+                    "checkpoint conditioning metadata does not match the "
+                    "configured topology"
+                )
+        state_dict = checkpoint.get("state_dict")
+        if not isinstance(state_dict, Mapping):
+            raise ValueError("checkpoint state_dict must be a mapping")
+        self._validate_udlm_conditioning_state_dict(state_dict)
+
     def load_state_dict(self, state_dict, strict=True, assign=False):
         """Load weights only when their process prior matches this model."""
 
         self._validate_runtime_udlm_prior_identity()
+        self._validate_runtime_udlm_conditioning_identity()
         self._validate_udlm_prior_state_dict(state_dict)
+        self._validate_udlm_conditioning_state_dict(state_dict)
         result = super().load_state_dict(state_dict, strict=strict, assign=assign)
         self._validate_runtime_udlm_prior_identity()
+        self._validate_runtime_udlm_conditioning_identity()
         return result
 
     def initialize_from_mdlm_checkpoint(
@@ -808,7 +1252,9 @@ class GenMol(L.LightningModule):
 
         load_result = self.backbone.load_state_dict(backbone_state, strict=False)
         expected_missing = {
-            key for key in self.backbone.state_dict() if key.startswith('time_conditioner.')
+            key
+            for key in self.backbone.state_dict()
+            if is_conditioning_parameter_name(key)
         }
         if set(load_result.missing_keys) != expected_missing or load_result.unexpected_keys:
             raise ValueError(
@@ -819,9 +1265,14 @@ class GenMol(L.LightningModule):
 
         weights = 'raw'
         base_parameters = [
-            parameter
+            (name, parameter)
             for name, parameter in self.backbone.named_parameters()
-            if not name.startswith('time_conditioner.')
+            if not is_conditioning_parameter_name(name)
+        ]
+        conditioning_parameters = [
+            (name, parameter)
+            for name, parameter in self.backbone.named_parameters()
+            if is_conditioning_parameter_name(name)
         ]
         if use_ema:
             ema_state = checkpoint.get('ema')
@@ -833,8 +1284,22 @@ class GenMol(L.LightningModule):
                     'MDLM EMA parameter count does not match the BERT backbone: '
                     f'{len(shadow_parameters)} != {len(base_parameters)}'
                 )
+            for (name, parameter), shadow in zip(
+                base_parameters, shadow_parameters, strict=True
+            ):
+                if (
+                    not isinstance(shadow, torch.Tensor)
+                    or shadow.shape != parameter.shape
+                    or shadow.dtype != parameter.dtype
+                ):
+                    raise ValueError(
+                        "MDLM EMA tensor is incompatible with target backbone "
+                        f"parameter {name}"
+                    )
             with torch.no_grad():
-                for parameter, shadow in zip(base_parameters, shadow_parameters):
+                for (_name, parameter), shadow in zip(
+                    base_parameters, shadow_parameters, strict=True
+                ):
                     parameter.copy_(shadow)
             weights = 'ema'
 
@@ -843,7 +1308,7 @@ class GenMol(L.LightningModule):
                 self.backbone.parameters(),
                 decay=self.config.training.ema,
             )
-        return {
+        report = {
             'source_path': str(checkpoint_path),
             'source_resolved_path': source_identity.resolved_path,
             'source_sha256': source_identity.sha256,
@@ -853,19 +1318,31 @@ class GenMol(L.LightningModule):
             'weights': weights,
             'parameter_tensors': len(base_parameters),
         }
+        if self.udlm_conditioning_metadata is not None:
+            report['conditioning_variant'] = self.backbone.conditioning_variant
+            report['conditioning_parameter_tensors'] = len(
+                conditioning_parameters
+            )
+        return report
 
     def on_load_checkpoint(self, checkpoint):
         self._validate_runtime_udlm_prior_identity()
         self._validate_udlm_prior_checkpoint(checkpoint)
+        self._validate_udlm_conditioning_checkpoint(checkpoint)
         if self.ema:
             self.ema.load_state_dict(checkpoint['ema'])
         self.fast_forward_epochs, self.fast_forward_batches = fast_forward_info(checkpoint)
         
     def on_save_checkpoint(self, checkpoint):
         self._validate_runtime_udlm_prior_identity()
+        self._validate_runtime_udlm_conditioning_identity()
         if type(self.mdlm) is ContinuousCategoricalDiffusion:
             checkpoint[UDLM_PRIOR_CHECKPOINT_KEY] = (
                 self.udlm_prior_metadata.to_dict()
+            )
+        if self.udlm_conditioning_metadata is not None:
+            checkpoint[UDLM_CONDITIONING_CHECKPOINT_KEY] = (
+                self.udlm_conditioning_metadata.to_dict()
             )
         if self.ema:
             checkpoint['ema'] = self.ema.state_dict()
@@ -879,17 +1356,19 @@ class GenMol(L.LightningModule):
             checkpoint['sampler']['random_state'] = None
 
     def configure_optimizers(self):
+        scheduler_spec = self.optimizer_scheduler_spec
+        if scheduler_spec is None:
+            raise RuntimeError(
+                "cannot configure optimization without an optim configuration"
+            )
         optimizer = torch.optim.AdamW(
             self.backbone.parameters(),
-            lr=self.config.optim.lr,
+            lr=scheduler_spec.peak_lr,
             betas=(self.config.optim.beta1, self.config.optim.beta2),
             eps=self.config.optim.eps,
             weight_decay=self.config.optim.weight_decay)
 
-        scheduler = hydra.utils.instantiate(
-            {'_target_': 'transformers.get_constant_schedule_with_warmup',
-             'num_warmup_steps': 2500},
-             optimizer=optimizer)
+        scheduler = build_optimizer_scheduler(optimizer, scheduler_spec)
         scheduler_dict = {
             'scheduler': scheduler,
             'interval': 'step',

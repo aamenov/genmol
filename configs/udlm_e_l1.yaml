@@ -1,0 +1,21 @@
+defaults:
+  - udlm_categorical
+  - _self_
+
+# Prospective E-only optimizer-schedule bundle treatment. This config is not
+# yet authorized by the reviewed GPU launcher and does not represent an
+# executed experiment. Relative to E-L0, E-L1 changes the optimizer-step LR
+# path as one registered bundle: 50-update warmup, half-cosine decay over a
+# 1,000-update horizon (including warmup), and a clamped 3e-6 decay floor.
+training:
+  udlm:
+    conditioning_variant: additive
+    zero_init_conditioning: true
+
+optim:
+  lr: 3e-4
+  scheduler:
+    name: half_cosine_with_linear_warmup_and_floor
+    warmup_updates: 50
+    horizon_updates: 1000
+    decay_floor_lr: 3e-6

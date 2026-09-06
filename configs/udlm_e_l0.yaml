@@ -1,0 +1,19 @@
+defaults:
+  - udlm_categorical
+  - _self_
+
+# Prospective E-only optimizer-schedule bundle control. This config is not yet
+# authorized by the reviewed GPU launcher and does not represent an executed
+# experiment. E-L0 retains the additive conditioner and released GenMol
+# constant schedule with its 2,500-update linear warmup.
+training:
+  udlm:
+    conditioning_variant: additive
+    zero_init_conditioning: true
+
+optim:
+  scheduler:
+    name: constant_with_linear_warmup
+    warmup_updates: 2500
+    horizon_updates: null
+    decay_floor_lr: null

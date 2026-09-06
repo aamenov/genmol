@@ -1,0 +1,11 @@
+defaults:
+  - udlm_e_l1
+  - _self_
+
+# Prospective 500-update conditioning-screen control under an L1 scheduler
+# decision. This is a fresh MDLM-EMA warm-start, not a continuation.
+training:
+  reseed_after_model_initialization: true
+  udlm:
+    conditioning_variant: additive
+    zero_init_conditioning: true

@@ -158,25 +158,39 @@ Combining clean logits would not equal the UDLM paper's D-CFG rule.
    plumbing check only. The current constant schedule warms up for 2,500 steps;
    with peak learning rate $3\times10^{-4}$, its learning rate is only about
    $1.2\times10^{-6}$ by update 10. Ten steps therefore cannot rank methods.
-4. **Future registered scheduler screen:** on E only, seed 17, compare 100
-   updates of E-L0 (the current additive conditioner and constant schedule with
-   2,500-step warmup) against E-L1 (the same model/process with cosine horizon
-   1,000, warmup 50, peak learning rate $3\times10^{-4}$, and minimum learning
-   rate $3\times10^{-6}$). On the fixed denoising panel at
-   $t\in\{0.1,0.5,0.9\}$, select E-L1 only if its mean loss is at least 2% lower,
-   at least two of the three time bins improve, and no bin is more than 2%
-   worse. Otherwise retain E-L0. These config names describe a prospective
-   registered comparison; they do not claim the variants or results already
-   exist.
-5. **Future registered conditioning screen:** on E only, seed 17, train 500
-   updates with the selected scheduler. Compare E-A0 (additive conditioning)
-   with E-A1 (post-timestep-MLP SiLU plus zero-initialized per-layer
-   FiLM/AdaLN-style modulation). A1 must exactly preserve the warm-start BERT
-   output at initialization. Select A1 only if mean fixed-panel loss is at least
-   2% lower, no $t\in\{0.1,0.5,0.9\}$ bin is more than 2% worse, clean-token
-   accuracy is nondecreasing, and the new modulation parameters receive finite,
-   nonzero gradients. Ties or any failed condition retain A0. This too is a
-   prospective plan, not an implemented-result claim.
+4. **Implemented but not yet registered or authorized scheduler screen:** on E
+   only, seed 17, compare 100 updates of E-L0 (the current additive conditioner
+   and constant schedule with 2,500-update warmup) against E-L1 (the same
+   model/process with a 1,000-update half-cosine horizon, warmup 50, peak
+   learning rate $3\times10^{-4}$, and clamped floor $3\times10^{-6}$). E-L1 is
+   one optimizer-schedule bundle, not an isolated test of cosine curvature: over
+   the first 100 optimizer updates its cumulative learning-rate exposure is
+   approximately 37.57 times E-L0's. On the fixed denoising panel at
+   $t\in\{0.1,0.5,0.9\}$, select E-L1 only if its pooled content-token loss is
+   at least 2% lower, at least two of the three time bins improve, and no bin is
+   more than 2% worse. A complete valid screen that misses a threshold retains
+   E-L0; missing, malformed, or unmatched evidence yields no winner. The code
+   and CPU tests exist, but the exact arm registry and selection record are not
+   frozen, the launcher does not yet authorize these arms, and no GPU screen has
+   run.
+5. **Implemented but not yet registered or authorized conditioning screen:** on
+   E only, seed 17, train 500 updates with the selected scheduler. Both E-A0 and
+   E-A1 start independently from the same verified MDLM-EMA checkpoint; neither
+   continues a 100-update scheduler-screen checkpoint. Both reseed the training
+   RNG after model construction and warm-start loading so A1's extra parameter
+   initialization does not shift the corruption/dropout stream. A0 retains the
+   zero-output additive conditioner. A1 normally initializes the timestep MLP,
+   applies an outer SiLU, and sends the result to one zero-initialized
+   $H\to2H$ FiLM projection after each BERT layer. Select A1 only if it exactly
+   preserves warm-start logits before training, pooled fixed-panel content-token
+   loss is at least 2% lower, no $t\in\{0.1,0.5,0.9\}$ bin is more than 2% worse,
+   clean-token accuracy is nondecreasing, every layer's FiLM group has finite
+   nonzero gradients on the first backward, and the timestep MLP has finite
+   nonzero gradients after the first **nonzero-learning-rate** FiLM update
+   (backward three under either registered schedule, because optimizer update
+   one uses learning rate zero). A complete valid screen that misses a selection
+   condition retains A0; malformed or incomplete evidence yields no winner.
+   This is implemented experimental plumbing, not an executed result.
 6. Train matched R/S/E controls for 1,000 updates each with the selected
    scheduler and architecture. First decode 32 requests with generation seed
    1100 as an ineligible health diagnostic. Candidate eligibility still
@@ -194,6 +208,112 @@ Combining clean logits would not equal the UDLM paper's D-CFG rule.
    final seeds, once each in their predeclared directories at 128 NFE. Update
    the benchmark PDF only after the raw-row reporter and registered superiority
    gate both validate the result.
+
+### What the prospective L1 and A1 arms change
+
+For optimizer-update index $k\in\{0,\ldots,99\}$, peak learning rate
+$\eta=3\times10^{-4}$, L0 warmup $w_0=2500$, L1 warmup $w_1=50$, L1 horizon
+$h=1000$, and floor $\eta_{\min}=3\times10^{-6}$, the learning-rate paths are
+
+$$
+\eta_{L0}(k)=\eta\frac{k}{w_0},
+$$
+
+and
+
+$$
+\eta_{L1}(k)=
+\begin{cases}
+\eta k/w_1, & 0\le k<w_1,\\
+\eta_{\min}+(\eta-\eta_{\min})
+\frac{1+\cos\!\left(\pi(k-w_1)/(h-w_1)\right)}{2}, & w_1\le k\le h.
+\end{cases}
+$$
+
+Here $k$ counts optimizer updates, not microbatches. Consequently,
+$\sum_{k=0}^{99}\eta_{L0}(k)=5.94\times10^{-4}$ and
+$\sum_{k=0}^{99}\eta_{L1}(k)=0.022317219370972547$, giving a ratio
+$37.571076\ldots$. This sum is a transparent exposure diagnostic, not an
+equivalent number of AdamW steps or a bound on parameter displacement. Because
+warmup length, early learning rates, later half-cosine decay, and floor are one
+bundle, any observed L1 improvement must be attributed to that bundle.
+
+Let $S_{a,j}$ be the summed content-token loss and $N_{a,j}$ its integer token
+denominator for arm $a$ and time bin $j$. Define
+$\ell_{a,j}=S_{a,j}/N_{a,j}$ and pooled
+$L_a=(\sum_j S_{a,j})/(\sum_j N_{a,j})$. The screen compares these fractions by
+exact cross-products: L1 needs $L_{L1}\le0.98L_{L0}$, strict improvement in at
+least two $\ell_{a,j}$ values, and $\ell_{L1,j}\le1.02\ell_{L0,j}$ in every bin.
+For a concrete equal-denominator example, $N_{a,j}=100$, L0 sums
+$(1000,600,200)$, and L1 sums $(970,570,202)$ give bin means
+$(10,6,2)$ versus $(9.7,5.7,2.02)$: pooled loss improves about 3.2%, two bins
+strictly improve, and the last regresses only 1%.
+
+For A1, let batch size be $B$, sequence length $S$, BERT hidden width $H$, layer
+index $l\in\{1,\ldots,L\}$, per-example UDLM noise vector
+$\sigma\in\mathbb R^B$, normally initialized timestep MLP
+$g:\mathbb R\to\mathbb R^H$, timestep
+embedding $c=\operatorname{SiLU}(g(\sigma))\in\mathbb R^{B\times H}$, and the
+ordinary post-LayerNorm output of BERT layer $l$ be
+$y_l\in\mathbb R^{B\times S\times H}$. Each new projection computes
+
+$$
+[\beta_l,\gamma_l]=W_lc+b_l\in\mathbb R^{B\times2H},\qquad
+h_l=(1+\gamma_l[:,\mathrm{None},:])\odot y_l+
+\beta_l[:,\mathrm{None},:].
+$$
+
+$\beta_l$ is the shift, $\gamma_l$ the scale residual, $W_l$ and $b_l$ the
+trainable projection with $W_l\in\mathbb R^{2H\times H}$ and
+$b_l\in\mathbb R^{2H}$, and $\odot$ elementwise multiplication. The explicit
+encoder loop passes $h_l$ into stock BERT layer $l+1$ (and the final $h_L$ to
+the classifier); it uses neither hooks nor mutable forward state. Both $W_l$
+and $b_l$ start at zero, so $h_l=y_l$ exactly for every $\sigma$ and the MDLM
+warm-start logits are unchanged. The timestep MLP $g$ must *not* also have a
+zero output: a nonzero $c$ lets each $W_l$ receive a gradient on backward one.
+Since every $W_l$ is zero then, the gradient into $g$ is zero on backward one
+by construction. Both registered schedules use learning-rate index zero on
+optimizer update one, so that zero-rate step leaves $W_l=0$ and backward two
+also gives zero gradient to $g$. Optimizer update two has positive learning rate
+and changes $W_l$; the next backward (backward three) can make $g$'s gradient
+nonzero. The gate is therefore phrased as "after the first nonzero-rate FiLM
+update," rather than assuming that the first optimizer call changes weights.
+
+For example, with $B=2$, $S=4$, $H=24$, and $L=2$, $c$ has shape `[2, 24]`,
+each projection produces `[2, 48]`, each shift and scale has shape `[2, 24]`,
+and broadcasting `[2, 1, 24]` over the four positions preserves a hidden tensor
+of shape `[2, 4, 24]`. In the production model, $H=768$ and $L=12$; each
+projection has weight shape `[1536, 768]` and bias shape `[1536]`, for
+14,174,208 FiLM parameters. Together with the 787,968-parameter timestep MLP,
+A1 has 14,962,176 conditioning parameters. Its explicit MDLM-EMA initializer
+loads the same 202 base BERT tensors as A0, excludes four timestep and 24 FiLM
+parameter tensors, then creates 230 fresh EMA shadows. A0 retains its legacy
+state-key set; A1 checkpoints carry a structural conditioning manifest and must
+not load as A0 or vice versa.
+
+This topology is inspired by, but is not identical to, released UDLM. Released
+GenMol's BERT has no time input. Official UDLM uses a rotary, pre-LayerNorm DiT
+whose normally initialized timestep MLP is followed by an outer SiLU; every DiT
+block emits two shift/scale/gate triplets and its output layer has another
+shift/scale pair. A1 instead preserves GenMol's absolute-position, post-LayerNorm
+BERT and applies only one shift/scale pair after each layer, with no residual
+gate. It is a warm-start-compatible hypothesis, not a paper result.
+
+Checkpoint: why must both 500-update arms reload the same MDLM EMA and reseed
+after initialization? Expected reasoning: continuing a scheduler-screen model
+would give one arm extra data exposure, while construction of A1 consumes RNG
+for extra parameters; a fresh common checkpoint plus post-init reseed removes
+those two avoidable confounds. Why is L1 a bundle rather than a clean cosine
+ablation? Expected reasoning: its 50-update warmup changes the first-100-update
+learning-rate sum by about 37.57 times, long before much cosine decay occurs.
+Why are zero FiLM projections compatible with useful first-step gradients?
+Expected reasoning: they make the forward map the identity, but the normally
+initialized timestep MLP supplies nonzero $c$, so projection gradients can be
+nonzero. Why does the timestep MLP wait until backward three under these
+schedules? Expected reasoning: on backward one its upstream Jacobian contains
+zero $W_l$; optimizer update one also has zero learning rate, so backward two
+sees zero $W_l$ again. Optimizer update two is the first positive-rate update,
+allowing backward three to propagate through nonzero FiLM weights.
 
 The warm-start route is an operational sample-efficiency comparison: it uses
 the MDLM checkpoint's previous data exposure. A method-only claim additionally

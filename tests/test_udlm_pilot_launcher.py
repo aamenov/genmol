@@ -655,6 +655,26 @@ def test_matched_panel_digest_masks_only_registered_treatment_and_run_path(
     assert changed_digest != panel_digests[0]
 
 
+@pytest.mark.parametrize("seed", [-1, launcher.MAX_TRAINING_SEED + 1, True])
+def test_matched_panel_rejects_seed_outside_exact_lightning_range(seed):
+    with pytest.raises(ValueError, match="training controls are invalid"):
+        launcher.build_matched_panel_spec(
+            source_revision="a" * 40,
+            checkpoint=None,
+            checkpoint_sha256=None,
+            gpu_count=1,
+            max_steps=10,
+            global_batch_size=16,
+            micro_batch_size=2,
+            num_workers=1,
+            seed=seed,
+            exclude_special_tokens=False,
+            max_utilization_percent=10,
+            min_free_memory_mib=30_000,
+            common_resolved_config_sha256="b" * 64,
+        )
+
+
 def test_dry_run_is_nonmutating_and_never_probes_gpus_or_tmux(
     monkeypatch, tmp_path, capsys
 ):
@@ -715,7 +735,7 @@ def test_dry_run_is_nonmutating_and_never_probes_gpus_or_tmux(
 
     preview = launcher.json.loads(capsys.readouterr().out)
     assert preview["status"] == "dry_run_preflight_completed_no_launch"
-    assert preview["filesystem_mutation_performed"] is False
+    assert preview["project_launch_artifact_mutation_performed"] is False
     assert preview["gpu_probe_performed"] is False
     assert not (repository_root / "output").exists()
 

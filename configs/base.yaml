@@ -23,6 +23,14 @@ optim:
   beta1: 0.9
   beta2: 0.999
   eps: 1e-8
+  # This explicit block preserves the released GenMol schedule. Checkpoints
+  # created before the block existed receive the same values as a strict
+  # backward-compatible fallback in model.py.
+  scheduler:
+    name: constant_with_linear_warmup
+    warmup_updates: 2500
+    horizon_updates: null
+    decay_floor_lr: null
 
 trainer:
   _target_: lightning.Trainer
@@ -86,6 +94,10 @@ training:
   # runs may leave it null; stable before/after descriptor checks still apply.
   init_from_mdlm_checkpoint_sha256: null
   init_from_mdlm_ema: True
+  # Architecture screens opt in to a second launch-bound seed after model
+  # construction/warm-start so extra A1 parameters cannot shift the shared
+  # dropout, time-sampling, or corruption RNG streams.
+  reseed_after_model_initialization: False
   udlm:
     # The released UDLM uses all vocabulary entries. Excluding tokenizer
     # control symbols is a separate molecule-specific ablation.
@@ -109,6 +121,10 @@ training:
     # 32/64-step values are speed ablations and must be labeled as such.
     sampling_steps: 128
     time_embedding_size: 256
+    # Additive is the reviewed A0 path and preserves all existing UDLM state
+    # keys. The prospective film_adaln A1 arm is a separately registered BERT
+    # adaptation and requires zero_init_conditioning=false.
+    conditioning_variant: additive
     zero_init_conditioning: True
 
 callback:

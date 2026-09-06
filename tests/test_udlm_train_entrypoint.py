@@ -54,6 +54,83 @@ def test_warm_start_is_used_only_without_a_resume_checkpoint():
     assert checkpoint_startup_mode(None, None) == "scratch"
 
 
+def test_post_initialization_reseed_is_launch_bound_and_explicit(monkeypatch):
+    config = OmegaConf.create(
+        {
+            "seed": 17,
+            "training": {"reseed_after_model_initialization": True},
+        }
+    )
+    calls = []
+    monkeypatch.setattr(
+        train_entrypoint.L,
+        "seed_everything",
+        lambda seed, workers: (calls.append((seed, workers)), seed)[1],
+    )
+
+    monkeypatch.setattr(train_entrypoint, "_PILOT_CONTRACT", {})
+    record = train_entrypoint._reseed_training_rng_after_model_initialization(
+        config, "warm_start"
+    )
+    assert calls == [(17, True)]
+    assert record == {
+        "policy": "reseed_all_training_rng_streams_after_model_and_warm_start",
+        "seed": 17,
+        "purpose": "isolate_training_randomness_from_architecture_constructor_draws",
+        "applied_before_dataloader_and_trainer_construction": True,
+    }
+
+    with pytest.raises(RuntimeError, match="checkpoint resume"):
+        train_entrypoint._reseed_training_rng_after_model_initialization(
+            config, "resume"
+        )
+    monkeypatch.setattr(train_entrypoint, "_PILOT_CONTRACT", None)
+    with pytest.raises(RuntimeError, match="launch-bound pilot"):
+        train_entrypoint._reseed_training_rng_after_model_initialization(
+            config, "scratch"
+        )
+
+
+def test_post_initialization_reseed_default_is_noop_and_rejects_nonboolean():
+    config = OmegaConf.create({"seed": 17, "training": {}})
+    assert (
+        train_entrypoint._reseed_training_rng_after_model_initialization(
+            config, "warm_start"
+        )
+        is None
+    )
+    config.training.reseed_after_model_initialization = "true"
+    with pytest.raises(RuntimeError, match="must be a boolean"):
+        train_entrypoint._reseed_training_rng_after_model_initialization(
+            config, "warm_start"
+        )
+
+
+def test_post_initialization_reseed_rejects_seed_coercion_and_out_of_range(
+    monkeypatch,
+):
+    config = OmegaConf.create(
+        {
+            "seed": train_entrypoint._MAX_TRAINING_SEED + 1,
+            "training": {"reseed_after_model_initialization": True},
+        }
+    )
+    monkeypatch.setattr(train_entrypoint, "_PILOT_CONTRACT", {})
+    with pytest.raises(RuntimeError, match="must be at most"):
+        train_entrypoint._reseed_training_rng_after_model_initialization(
+            config, "warm_start"
+        )
+
+    config.seed = 17
+    monkeypatch.setattr(
+        train_entrypoint.L, "seed_everything", lambda _seed, workers: 0
+    )
+    with pytest.raises(RuntimeError, match="did not apply the exact"):
+        train_entrypoint._reseed_training_rng_after_model_initialization(
+            config, "warm_start"
+        )
+
+
 def test_manual_training_preserves_absent_pilot_contract(monkeypatch):
     for key in train_entrypoint._PILOT_ENVIRONMENT_KEYS:
         monkeypatch.delenv(key, raising=False)
@@ -467,6 +544,7 @@ def _completion_fixture(tmp_path, monkeypatch):
             num_updates=10,
         ),
         _validate_udlm_prior_checkpoint=lambda checkpoint: None,
+        _validate_udlm_conditioning_checkpoint=lambda checkpoint: None,
     )
     warm_start = {
         "source_path": "/project/mdlm.ckpt",
@@ -635,6 +713,32 @@ def test_pilot_training_accounting_rejects_type_or_config_mismatch(
             model,
             trainer.train_dataloader,
         )
+
+
+def test_pilot_parameter_accounting_separates_film_from_base_backbone():
+    class FilmLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.film_modulation = torch.nn.Linear(2, 4)
+
+    class Backbone(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.base_weight = torch.nn.Parameter(torch.ones(3))
+            self.time_conditioner = torch.nn.Linear(2, 1, bias=False)
+            self.layer = torch.nn.ModuleList([FilmLayer()])
+
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.backbone = Backbone()
+
+    assert train_entrypoint._pilot_trainable_parameter_counts(Model()) == {
+        "base_backbone": 3,
+        "time_conditioner": 2,
+        "film_modulation": 12,
+        "total": 17,
+    }
 
 
 def test_pilot_training_accounting_rejects_trainable_parameters_outside_backbone(

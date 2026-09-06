@@ -45,6 +45,7 @@ _PILOT_ENVIRONMENT_KEYS = {
 }
 _RUNTIME_CONFIG_SCHEMA_VERSION = 2
 _TRAINING_SUMMARY_SCHEMA_VERSION = 3
+_MAX_TRAINING_SEED = 2**32 - 1
 _HOSTED_STREAM_RANK_PARTITION_POLICY = (
     "huggingface_split_dataset_by_node_disjoint_rank_streams"
 )
@@ -497,6 +498,7 @@ import hydra
 import lightning as L
 import omegaconf
 import torch
+from genmol.backbone import is_conditioning_parameter_name
 from genmol.model import GenMol
 from genmol.utils.checkpoint_io import verified_checkpoint_file
 from genmol.utils.utils_data import get_dataloader, get_last_checkpoint
@@ -604,6 +606,15 @@ def _exact_nonnegative_integer(value, label):
     return value
 
 
+def _exact_training_seed(value, label):
+    seed = _exact_nonnegative_integer(value, label)
+    if seed > _MAX_TRAINING_SEED:
+        raise RuntimeError(
+            f"{label} must be at most {_MAX_TRAINING_SEED} for NumPy/Lightning"
+        )
+    return seed
+
+
 def _pilot_trainable_parameter_counts(model):
     """Count the exact trainable split represented by the live pilot model."""
 
@@ -632,12 +643,15 @@ def _pilot_trainable_parameter_counts(model):
 
     base_backbone = 0
     time_conditioner = 0
+    film_modulation = 0
     for name, parameter in backbone_parameters.values():
         count = parameter.numel()
         if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
             raise RuntimeError(f"pilot trainable parameter has invalid size: {name}")
         if name.startswith("time_conditioner."):
             time_conditioner += count
+        elif is_conditioning_parameter_name(name):
+            film_modulation += count
         else:
             base_backbone += count
     if base_backbone <= 0:
@@ -645,13 +659,16 @@ def _pilot_trainable_parameter_counts(model):
     if time_conditioner <= 0:
         raise RuntimeError("pilot backbone has no trainable time_conditioner")
     total = sum(parameter.numel() for _name, parameter in model_parameters.values())
-    if total != base_backbone + time_conditioner:
+    if total != base_backbone + time_conditioner + film_modulation:
         raise RuntimeError("pilot trainable parameter counts do not add up")
-    return {
+    result = {
         "base_backbone": base_backbone,
         "time_conditioner": time_conditioner,
-        "total": total,
     }
+    if film_modulation:
+        result["film_modulation"] = film_modulation
+    result["total"] = total
+    return result
 
 
 def _pilot_training_accounting(config, trainer, model, train_dataloader):
@@ -659,7 +676,7 @@ def _pilot_training_accounting(config, trainer, model, train_dataloader):
 
     if _PILOT_CONTRACT is None:
         return None
-    training_seed = _exact_nonnegative_integer(
+    training_seed = _exact_training_seed(
         config.get('seed', 1), "pilot training seed"
     )
     optimizer_updates = _exact_positive_integer(
@@ -873,11 +890,46 @@ def checkpoint_startup_mode(resume_checkpoint, initialization_checkpoint):
     return 'scratch'
 
 
+def _reseed_training_rng_after_model_initialization(config, startup_mode):
+    """Make architecture-screen training randomness independent of init draws."""
+
+    enabled = config.training.get('reseed_after_model_initialization', False)
+    if type(enabled) is not bool:
+        raise RuntimeError(
+            "training.reseed_after_model_initialization must be a boolean"
+        )
+    if not enabled:
+        return None
+    if _PILOT_CONTRACT is None:
+        raise RuntimeError(
+            "post-initialization reseeding is restricted to a launch-bound pilot"
+        )
+    if startup_mode not in {'warm_start', 'scratch'}:
+        raise RuntimeError(
+            "post-initialization reseeding cannot be combined with checkpoint resume"
+        )
+    seed = _exact_training_seed(
+        config.get('seed', 1), "post-initialization training seed"
+    )
+    applied_seed = L.seed_everything(seed, workers=True)
+    if type(applied_seed) is not int or applied_seed != seed:
+        raise RuntimeError(
+            "Lightning did not apply the exact post-initialization training seed"
+        )
+    return {
+        "policy": "reseed_all_training_rng_streams_after_model_and_warm_start",
+        "seed": seed,
+        "purpose": "isolate_training_randomness_from_architecture_constructor_draws",
+        "applied_before_dataloader_and_trainer_construction": True,
+    }
+
+
 def _validate_and_record_pilot_config(config):
     if _PILOT_CONTRACT is None:
         return None
     completion_contract = _validate_pilot_completion_config(config)
     _pilot_callbacks(config)
+    _exact_training_seed(config.get('seed', 1), "pilot training seed")
     expected_revision = _PILOT_CONTRACT[
         "GENMOL_TRAIN_EXPECTED_SOURCE_REVISION"
     ]
@@ -1150,6 +1202,14 @@ def _audit_pilot_checkpoint(path, *, expected_steps, model):
     if not callable(prior_validator):
         raise RuntimeError("pilot model has no UDLM checkpoint identity validator")
     prior_validator(checkpoint)
+    conditioning_validator = getattr(
+        model, "_validate_udlm_conditioning_checkpoint", None
+    )
+    if not callable(conditioning_validator):
+        raise RuntimeError(
+            "pilot model has no UDLM conditioning checkpoint identity validator"
+        )
+    conditioning_validator(checkpoint)
     live_match = _validate_checkpoint_matches_live_model(checkpoint_state, model)
     live_ema_match = _validate_checkpoint_ema_matches_live(
         checkpoint_shadows, model
@@ -1208,6 +1268,7 @@ def _write_pilot_training_summary(
     startup_mode,
     warm_start_report,
     train_dataloader=None,
+    training_rng_policy=None,
 ):
     """Publish the sole rank-zero certificate that a pilot completed."""
 
@@ -1305,6 +1366,13 @@ def _write_pilot_training_summary(
         config, startup_mode, warm_start_report
     )
 
+    startup_record = {
+        "mode": startup_mode,
+        "verified_mdlm_warm_start_report": retained_warm_start,
+    }
+    if training_rng_policy is not None:
+        startup_record["training_rng_policy"] = training_rng_policy
+
     summary = {
         "schema_version": _TRAINING_SUMMARY_SCHEMA_VERSION,
         "status": "completed",
@@ -1339,10 +1407,7 @@ def _write_pilot_training_summary(
             "raw_model": raw_tensors,
             "ema": ema_tensors,
         },
-        "startup": {
-            "mode": startup_mode,
-            "verified_mdlm_warm_start_report": retained_warm_start,
-        },
+        "startup": startup_record,
     }
     if summary["schema_version"] != _PILOT_CONTRACT["summary_schema_version"]:
         raise RuntimeError("pilot training summary schema disagrees with launch")
@@ -1400,6 +1465,10 @@ def train(config):
             f'Resuming {ckpt_path}; the configured MDLM initialization is '
             'a one-time provenance field and will not be reapplied.'
         )
+
+    training_rng_policy = _reseed_training_rng_after_model_initialization(
+        config, startup_mode
+    )
     
     train_dataloader = None
     if _PILOT_CONTRACT is None:
@@ -1430,6 +1499,7 @@ def train(config):
         startup_mode=startup_mode,
         warm_start_report=warm_start_report,
         train_dataloader=train_dataloader,
+        training_rng_policy=training_rng_policy,
     )
     
 

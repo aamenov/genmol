@@ -12,7 +12,12 @@ from omegaconf import OmegaConf
 from transformers import BertForMaskedLM
 
 import genmol.model as model_module
-from genmol.backbone import TimeConditionedBertForMaskedLM
+from genmol.backbone import (
+    ADDITIVE_CONDITIONING,
+    FILM_ADALN_CONDITIONING,
+    TimeConditionedBertForMaskedLM,
+    is_conditioning_parameter_name,
+)
 from genmol.diffusion import (
     ContinuousCategoricalDiffusion,
     ContinuousUniformDiffusion,
@@ -34,17 +39,21 @@ def _config(
     exclude_special=False,
     prior_variant=None,
     empirical_uniform_mix=0.01,
+    conditioning_variant=None,
+    zero_init_conditioning=True,
 ):
     udlm = {
         "exclude_special_tokens": exclude_special,
         "noise_eps": 1e-3,
         "time_embedding_size": 8,
-        "zero_init_conditioning": True,
+        "zero_init_conditioning": zero_init_conditioning,
     }
     if prior_variant is not None:
         udlm["prior_variant"] = prior_variant
     if empirical_uniform_mix is not None:
         udlm["empirical_uniform_mix"] = empirical_uniform_mix
+    if conditioning_variant is not None:
+        udlm["conditioning_variant"] = conditioning_variant
     training = {
         "ema": 0.0,
         "antithetic_sampling": True,
@@ -178,6 +187,68 @@ def test_explicit_release_uniform_has_strict_old_udlm_state_keys():
     result = explicit_model.load_state_dict(old_config_model.state_dict(), strict=True)
     assert result.missing_keys == []
     assert result.unexpected_keys == []
+
+
+def test_missing_conditioning_selector_is_strict_additive_compatibility_default():
+    torch.manual_seed(17)
+    legacy = model_module.GenMol(_config(diffusion="udlm"))
+    torch.manual_seed(17)
+    explicit = model_module.GenMol(
+        _config(
+            diffusion="udlm",
+            conditioning_variant=ADDITIVE_CONDITIONING,
+        )
+    )
+
+    assert legacy.udlm_conditioning_metadata is None
+    assert explicit.udlm_conditioning_metadata is None
+    assert legacy.state_dict().keys() == explicit.state_dict().keys()
+    for name, value in legacy.state_dict().items():
+        assert torch.equal(value, explicit.state_dict()[name])
+
+
+def test_evaluation_only_config_without_optim_still_constructs():
+    config = _config(diffusion="udlm")
+    del config.optim
+
+    model = model_module.GenMol(config)
+
+    assert model.optimizer_scheduler_spec is None
+    with pytest.raises(RuntimeError, match="without an optim configuration"):
+        model.configure_optimizers()
+
+
+def test_film_conditioning_has_frozen_topology_metadata_and_exact_key_manifest():
+    model = model_module.GenMol(
+        _config(
+            diffusion="udlm",
+            prior_variant="schedule_uniform",
+            conditioning_variant=FILM_ADALN_CONDITIONING,
+            zero_init_conditioning=False,
+        )
+    )
+    metadata = model.udlm_conditioning_metadata
+    manifest = {
+        name: tuple(shape)
+        for name, shape in metadata.conditioning_parameter_manifest
+    }
+    conditioning_parameters = {
+        name: tuple(parameter.shape)
+        for name, parameter in model.backbone.named_parameters()
+        if is_conditioning_parameter_name(name)
+    }
+
+    assert metadata.variant == FILM_ADALN_CONDITIONING
+    assert metadata.architecture == "bert_post_block_film"
+    assert metadata.hidden_size == 24
+    assert metadata.layer_count == 2
+    assert metadata.official_udlm_reference_revision == (
+        model_module.OFFICIAL_UDLM_REFERENCE_REVISION
+    )
+    assert manifest == conditioning_parameters
+    assert len(manifest) == 8
+    with pytest.raises(FrozenInstanceError):
+        metadata.variant = ADDITIVE_CONDITIONING
 
 
 def test_schedule_uniform_uses_categorical_process_with_exact_uniform_prior():
@@ -371,6 +442,11 @@ def test_categorical_checkpoint_persists_and_validates_exact_prior_metadata(
     with pytest.raises(ValueError, match="metadata does not match"):
         restored.on_load_checkpoint(wrong_metadata)
 
+    wrong_type = copy.deepcopy(checkpoint)
+    wrong_type[model_module.UDLM_PRIOR_CHECKPOINT_KEY]["schema_version"] = True
+    with pytest.raises(ValueError, match="metadata does not match"):
+        restored.on_load_checkpoint(wrong_type)
+
     missing_metadata = copy.deepcopy(checkpoint)
     del missing_metadata[model_module.UDLM_PRIOR_CHECKPOINT_KEY]
     with pytest.raises(ValueError, match="missing immutable prior metadata"):
@@ -384,8 +460,78 @@ def test_release_uniform_checkpoint_hook_keeps_legacy_top_level_schema(monkeypat
     checkpoint = _run_checkpoint_save_hook(monkeypatch, model)
 
     assert model_module.UDLM_PRIOR_CHECKPOINT_KEY not in checkpoint
+    assert model_module.UDLM_CONDITIONING_CHECKPOINT_KEY not in checkpoint
     monkeypatch.setattr(model_module, "fast_forward_info", lambda _checkpoint: (0, 0))
     model.on_load_checkpoint(checkpoint)
+
+    null_prior = copy.deepcopy(checkpoint)
+    null_prior[model_module.UDLM_PRIOR_CHECKPOINT_KEY] = None
+    with pytest.raises(ValueError, match="must not declare categorical"):
+        model.on_load_checkpoint(null_prior)
+
+    null_conditioning = copy.deepcopy(checkpoint)
+    null_conditioning[model_module.UDLM_CONDITIONING_CHECKPOINT_KEY] = None
+    with pytest.raises(ValueError, match="unexpectedly declares FiLM"):
+        model.on_load_checkpoint(null_conditioning)
+
+
+def test_film_checkpoint_persists_exact_metadata_and_rejects_cross_topology(
+    monkeypatch,
+):
+    config = _config(
+        diffusion="udlm",
+        prior_variant="schedule_uniform",
+        conditioning_variant=FILM_ADALN_CONDITIONING,
+        zero_init_conditioning=False,
+    )
+    source = model_module.GenMol(config)
+    checkpoint = _run_checkpoint_save_hook(monkeypatch, source)
+    conditioning_record = checkpoint[
+        model_module.UDLM_CONDITIONING_CHECKPOINT_KEY
+    ]
+    assert conditioning_record == source.udlm_conditioning_metadata.to_dict()
+    json.dumps(conditioning_record)
+
+    restored = model_module.GenMol(config)
+    monkeypatch.setattr(model_module, "fast_forward_info", lambda _checkpoint: (0, 0))
+    restored.on_load_checkpoint(checkpoint)
+    result = restored.load_state_dict(checkpoint["state_dict"], strict=True)
+    assert result.missing_keys == []
+    assert result.unexpected_keys == []
+
+    missing = copy.deepcopy(checkpoint)
+    del missing[model_module.UDLM_CONDITIONING_CHECKPOINT_KEY]
+    with pytest.raises(ValueError, match="missing immutable conditioning"):
+        restored.on_load_checkpoint(missing)
+
+    changed = copy.deepcopy(checkpoint)
+    changed[model_module.UDLM_CONDITIONING_CHECKPOINT_KEY]["architecture"] = (
+        "different"
+    )
+    with pytest.raises(ValueError, match="conditioning metadata"):
+        restored.on_load_checkpoint(changed)
+
+    wrong_schema_type = copy.deepcopy(checkpoint)
+    wrong_schema_type[model_module.UDLM_CONDITIONING_CHECKPOINT_KEY][
+        "schema_version"
+    ] = True
+    with pytest.raises(ValueError, match="conditioning metadata"):
+        restored.on_load_checkpoint(wrong_schema_type)
+
+    wrong_layer_count_type = copy.deepcopy(checkpoint)
+    wrong_layer_count_type[model_module.UDLM_CONDITIONING_CHECKPOINT_KEY][
+        "layer_count"
+    ] = float(source.udlm_conditioning_metadata.layer_count)
+    with pytest.raises(ValueError, match="conditioning metadata"):
+        restored.on_load_checkpoint(wrong_layer_count_type)
+
+    additive = model_module.GenMol(
+        _config(diffusion="udlm", prior_variant="schedule_uniform")
+    )
+    with pytest.raises(ValueError, match="conditioning state"):
+        additive.load_state_dict(checkpoint["state_dict"], strict=False)
+    with pytest.raises(ValueError, match="unexpectedly declares FiLM"):
+        additive.on_load_checkpoint(checkpoint)
 
 
 def test_categorical_state_cannot_overwrite_a_different_configured_prior(
@@ -768,10 +914,79 @@ def test_udlm_warm_start_uses_mdlm_ema_and_resets_new_ema(tmp_path):
     assert report["source_size_bytes"] == checkpoint_path.stat().st_size
     assert report["expected_source_sha256"] == checkpoint_sha256
     assert report["byte_identity_verified_before_and_after_load"] is True
+    assert "conditioning_variant" not in report
+    assert "conditioning_parameter_tensors" not in report
     assert torch.allclose(base_parameters[0], source.ema.shadow_params[0])
     assert len(target.ema.shadow_params) == len(list(target.backbone.parameters()))
     assert torch.allclose(target.ema.shadow_params[0], base_parameters[0])
     assert torch.count_nonzero(target.backbone.time_conditioner.mlp[-1].weight) == 0
+
+
+def test_film_warm_start_preserves_exact_mdlm_logits_and_ema_order(tmp_path):
+    torch.manual_seed(71)
+    source_config = _config()
+    source_config.training.ema = 0.9
+    source = model_module.GenMol(source_config)
+    checkpoint_path = tmp_path / "mdlm-film-source.ckpt"
+    torch.save(
+        {"state_dict": source.state_dict(), "ema": source.ema.state_dict()},
+        checkpoint_path,
+    )
+    checkpoint_sha256 = hashlib.sha256(checkpoint_path.read_bytes()).hexdigest()
+
+    target_config = _config(
+        diffusion="udlm",
+        prior_variant="schedule_uniform",
+        conditioning_variant=FILM_ADALN_CONDITIONING,
+        zero_init_conditioning=False,
+    )
+    target_config.training.ema = 0.9
+    target = model_module.GenMol(target_config)
+    report = target.initialize_from_mdlm_checkpoint(
+        checkpoint_path,
+        use_ema=True,
+        expected_sha256=checkpoint_sha256,
+    )
+    base_parameters = [
+        parameter
+        for name, parameter in target.backbone.named_parameters()
+        if not is_conditioning_parameter_name(name)
+    ]
+    conditioning_parameters = [
+        parameter
+        for name, parameter in target.backbone.named_parameters()
+        if is_conditioning_parameter_name(name)
+    ]
+
+    assert report["parameter_tensors"] == len(source.ema.shadow_params)
+    assert report["conditioning_variant"] == FILM_ADALN_CONDITIONING
+    assert report["conditioning_parameter_tensors"] == 8
+    assert len(base_parameters) == len(source.ema.shadow_params)
+    assert len(conditioning_parameters) == 8
+    assert len(target.ema.shadow_params) == len(base_parameters) + 8
+    for target_parameter, source_shadow in zip(
+        base_parameters, source.ema.shadow_params, strict=True
+    ):
+        assert torch.equal(target_parameter, source_shadow)
+
+    input_ids = torch.tensor([[1, 5, 8, 2], [1, 6, 7, 2]])
+    attention_mask = torch.ones_like(input_ids)
+    source.backbone.eval()
+    target.backbone.eval()
+    with torch.no_grad():
+        expected = source.backbone(input_ids, attention_mask).logits
+        low_noise = target.backbone(
+            input_ids,
+            attention_mask,
+            noise_level=torch.tensor([0.1, 0.2]),
+        ).logits
+        high_noise = target.backbone(
+            input_ids,
+            attention_mask,
+            noise_level=torch.tensor([2.0, 3.0]),
+        ).logits
+    assert torch.equal(low_noise, expected)
+    assert torch.equal(high_noise, expected)
 
 
 def test_udlm_warm_start_wrong_digest_does_not_mutate_parameters(tmp_path):

@@ -1,0 +1,12 @@
+defaults:
+  - udlm_e_l0
+  - _self_
+
+# Prospective 500-update conditioning-screen control under an L0 scheduler
+# decision. Both conditioning arms start independently from the same verified
+# MDLM EMA checkpoint; neither continues a scheduler-screen checkpoint.
+training:
+  reseed_after_model_initialization: true
+  udlm:
+    conditioning_variant: additive
+    zero_init_conditioning: true

@@ -36,6 +36,7 @@ PILOT_EXIT_STATUS_SCHEMA_VERSION = 3
 LAUNCH_MANIFEST_SCHEMA_VERSION = 1
 MATCHED_PANEL_SCHEMA_VERSION = 1
 TRAINING_JOB_LOCK_SCHEMA_VERSION = 1
+MAX_TRAINING_SEED = 2**32 - 1
 TRAINING_VARIANTS = {
     "udlm": {
         "config_name": "udlm",
@@ -631,6 +632,7 @@ def build_matched_panel_spec(
         or type(num_workers) is not int
         or num_workers < 0
         or type(seed) is not int
+        or not 0 <= seed <= MAX_TRAINING_SEED
         or type(exclude_special_tokens) is not bool
     ):
         raise ValueError("matched-panel training controls are invalid")
@@ -1598,7 +1600,7 @@ def main():
         preview = {
             "schema_version": 1,
             "status": "dry_run_preflight_completed_no_launch",
-            "filesystem_mutation_performed": False,
+            "project_launch_artifact_mutation_performed": False,
             "gpu_probe_performed": False,
             "tmux_operation_performed": False,
             "source_revision": git_sha,

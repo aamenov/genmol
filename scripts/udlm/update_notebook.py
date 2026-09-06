@@ -1157,29 +1157,128 @@ current constant schedule has 2,500 linear-warmup
 updates, so at peak learning rate $3\times10^{-4}$ its value by update 10 is
 only approximately $(10/2500)(3\times10^{-4})=1.2\times10^{-6}$.
 
-**Future registered optimization screens.** These names describe a prospective
-plan; no config or result is claimed to exist yet. On E only with training seed
-17, E-L0 keeps the current additive conditioner and 2,500-update constant
-warmup. E-L1 changes only the scheduler to cosine horizon 1,000, warmup 50,
-peak $3\times10^{-4}$, and minimum $3\times10^{-6}$, and both train for 100
-updates. Let $\ell_{a,j}>0$ be fixed-panel denoising loss for alternative $a$
-at noise-time bin $t_j\in\{0.1,0.5,0.9\}$, and let
-$\bar\ell_a=\tfrac13\sum_{j=1}^3\ell_{a,j}$. Select L1 only if
-$1-\bar\ell_{L1}/\bar\ell_{L0}\ge0.02$, at least two of three individual losses
-decrease, and every per-bin ratio
-$\ell_{L1,j}/\ell_{L0,j}-1\le0.02$; otherwise retain L0. For example, L0 losses
-$(10,6,2)$ and L1 losses $(9.7,5.7,2.02)$ improve the mean by about 3.2%,
-improve two bins, and worsen the last by only 1%, so L1 passes.
+**Implemented CPU plumbing, not an authorized experiment.** The scheduler and
+conditioning variants below now have configuration, model, checkpoint, and CPU
+test support. Their exact comparison registry and selection record are not yet
+frozen, the reviewed launcher does not authorize these new arms, and no GPU
+screen has run. Thus every number below is a mathematical or synthetic example,
+not a training result.
 
-Next, still on E and seed 17, train 500 updates with the selected scheduler.
-E-A0 uses additive conditioning; E-A1 adds a post-timestep-MLP SiLU and
-zero-initialized per-layer FiLM/AdaLN-style modulation. A1 must preserve the
-warm-start BERT output exactly at initialization. Select A1 only if its mean
-fixed-panel loss improves by at least 2%, no time bin worsens by more than 2%,
-clean-token accuracy is nondecreasing, and every new modulation group receives
-finite, nonzero gradients; a tie or failed condition retains A0. This screen is
-motivated by official UDLM's per-block AdaLN, but the BERT adaptation is our
-planned architecture experiment rather than released code.
+**Paper correspondence and motivation.** UDLM's denoiser predicts
+$x_\theta(z_t,t)$, so it needs the noise time (implemented here through total
+noise $\sigma(t)$). The UDLM paper and official code motivate strong per-block
+time conditioning; they do not establish that the following BERT adapter or
+learning-rate path improves molecules. The small screens separately ask whether
+the existing empirical-prior arm E is starved by GenMol's long warmup and
+whether per-layer time modulation is more expressive than one additive vector.
+
+**L0/L1 mathematics and confound boundary.** Let optimizer-update index
+$k\in\{0,\ldots,99\}$, peak learning rate $\eta=3\times10^{-4}$, L0 warmup
+$w_0=2500$, L1 warmup $w_1=50$, L1 horizon $h=1000$, and L1 floor
+$\eta_{\min}=3\times10^{-6}$. L0 uses
+$\eta_{L0}(k)=\eta k/w_0$. L1 uses $\eta k/w_1$ for $k<w_1$ and
+
+$$
+\eta_{L1}(k)=\eta_{\min}+(\eta-\eta_{\min})
+\frac{1+\cos\!\left(\pi(k-w_1)/(h-w_1)\right)}{2}
+$$
+
+for $w_1\le k\le h$, then clamps at $\eta_{\min}$. Here $k$ counts optimizer
+updates, not microbatches. Across the 100 used indices,
+$\sum_k\eta_{L0}(k)=5.94\times10^{-4}$ whereas
+$\sum_k\eta_{L1}(k)=0.022317219370972547$; L1 therefore supplies
+$37.571076\ldots$ times the cumulative learning-rate exposure. This sum is not
+an equivalent AdamW step count or parameter-distance bound. E-L1 must be called
+an **optimizer-schedule bundle**—shorter warmup, early exposure, later
+half-cosine shape, and floor—not an isolated cosine-curvature ablation.
+
+Both E-L0 and E-L1 use training seed 17, additive A0 conditioning, and 100
+updates. Let $S_{a,j}$ be summed content-token loss and $N_{a,j}$ its integer
+token denominator for arm $a$ at noise-time bin
+$t_j\in\{0.1,0.5,0.9\}$. Define $\ell_{a,j}=S_{a,j}/N_{a,j}$ and pooled
+$L_a=(\sum_jS_{a,j})/(\sum_jN_{a,j})$. Select L1 only if
+$L_{L1}\le0.98L_{L0}$, at least two of three bin losses strictly decrease,
+and every $\ell_{L1,j}\le1.02\ell_{L0,j}$. The verifier uses exact integer
+cross-products rather than rounded ratios. For an equal-denominator example,
+$N_{a,j}=100$, L0 sums $(1000,600,200)$ and L1 sums $(970,570,202)$ produce
+means $(10,6,2)$ and $(9.7,5.7,2.02)$: pooled loss improves about 3.2%, two bins
+improve, and the last worsens only 1%. A complete valid screen that misses a
+threshold retains L0; missing, malformed, or unmatched evidence yields no
+winner rather than a silent fallback.
+
+**A0/A1 mathematics, shapes, and invariants.** With the selected scheduler,
+both 500-update E arms start independently from the same verified MDLM-EMA
+checkpoint; neither continues a scheduler-screen checkpoint. Let batch size be
+$B$, sequence length $S$, hidden width $H$, BERT layer index
+$l\in\{1,\ldots,L\}$, per-example total noise
+$\sigma\in\mathbb R^B$, and $y_l\in\mathbb R^{B\times S\times H}$ be layer
+$l$'s ordinary post-LayerNorm output. A0 keeps the zero-output additive
+timestep adapter. A1 normally initializes the timestep MLP
+$g:\mathbb R\to\mathbb R^H$, applies the official outer activation
+$c=\operatorname{SiLU}(g(\sigma))\in\mathbb R^{B\times H}$, and computes one
+zero-initialized projection per layer:
+
+$$
+[\beta_l,\gamma_l]=W_lc+b_l\in\mathbb R^{B\times2H},\qquad
+h_l=(1+\gamma_l[:,\mathrm{None},:])\odot y_l+
+\beta_l[:,\mathrm{None},:].
+$$
+
+$\beta_l,\gamma_l\in\mathbb R^{B\times H}$ are a shift and residual scale,
+$W_l\in\mathbb R^{2H\times H}$ and $b_l\in\mathbb R^{2H}$ are trainable
+parameters, and $\odot$ is elementwise multiplication. An explicit encoder loop
+passes $h_l$ to stock BERT layer $l+1$ and sends final $h_L$ to the classifier;
+it uses no hooks or mutable forward state. At initialization $W_l=b_l=0$, so
+every $h_l=y_l$ exactly for every $\sigma$, the Jacobian with respect to $y_l$
+is the identity, and MDLM warm-start logits and base gradients are unchanged.
+
+**Concrete tensor example and checkpoint behavior.** For $B=2$, $S=4$, $H=24$,
+and $L=2$, $c$ has shape `[2, 24]`; each projection emits `[2, 48]`, splits into
+two `[2, 24]` tensors, broadcasts them as `[2, 1, 24]`, and preserves hidden
+shape `[2, 4, 24]`. Production uses $H=768$ and $L=12$: each FiLM weight is
+`[1536, 768]`, each bias `[1536]`, and all 12 projections contain 14,174,208
+parameters. With the 787,968-parameter timestep MLP, A1 has 14,962,176
+conditioning parameters. The explicit warm-start loader still maps the same 202
+MDLM EMA base tensors, excludes four timestep plus 24 FiLM parameter tensors,
+and creates 230 fresh EMA shadows. A0 retains its legacy state-key set; A1 saves
+an exact conditioning manifest, and cross-topology checkpoint loads fail closed.
+
+**Gradient staging and fair RNG initialization.** Zeroing both the timestep MLP
+output and the FiLM projections would give $c=0$ and permanently zero FiLM
+weight gradients, so A1 rejects that dead combination. With normally initialized
+$g$, each FiLM group can receive finite nonzero gradients on backward one.
+Because $W_l=0$ then, the chain rule gives zero gradient into $g$ on backward
+one. Both registered schedules use learning-rate index zero on optimizer update
+one, so that zero-rate step leaves $W_l=0$ and backward two also gives zero
+gradient to $g$. Optimizer update two has positive learning rate and changes
+$W_l$; backward three can then give $g$ a finite nonzero gradient. The gate says
+"after the first nonzero-learning-rate FiLM update" rather than assuming the
+first optimizer call changes weights. Both A0 and A1 reseed all training RNG
+streams to seed 17 *after* construction and MDLM-EMA loading. Otherwise A1's
+extra parameter initialization would consume random draws and shift later
+corruption/dropout randomness even under the same initial seed.
+
+Select A1 only if exact initialization equality, the staged gradient checks,
+pooled content-token fixed-panel loss improves by at least 2%, no time-bin
+regression exceeds 2%, and clean-token accuracy is nondecreasing under an exact
+integer cross-product. A complete valid screen that misses a condition retains
+A0; missing, malformed, or unmatched evidence yields no winner.
+
+**What the code below verifies.** It evaluates both learning-rate formulas on
+the exact update indices 0 through 99, asserts their cumulative sums and ratio,
+records the concrete A1 tensor shapes, derives production FiLM and conditioner
+parameter counts, checks the 202 + 4 + 24 = 230 warm-start/EMA accounting, and
+stores false registry, launcher-authorization, and GPU-execution flags. These
+are executable arithmetic and protocol invariants, not optimizer or GPU results.
+
+**Difference from released implementations.** Released GenMol's BERT has no
+time input. Official UDLM uses a rotary, pre-LayerNorm DiT: its normally
+initialized timestep MLP has an outer SiLU, every block produces two
+shift/scale/gate triplets, and the output layer has another shift/scale pair.
+A1 retains GenMol's absolute-position, post-LayerNorm BERT and applies only one
+shift/scale pair after each stock layer, without residual gates. It is our
+warm-start-compatible architecture hypothesis, not released UDLM and not a
+paper result.
 
 With the selected scheduler and architecture, train matched R/S/E controls for
 1,000 updates each. A 32-request generation at seed 1100 is an ineligible
@@ -1251,9 +1350,10 @@ UDLM prior control. Excluding UNK/CLS/SEP/PAD/MASK is a GenMol-specific ablation
 the committed semantic pilot ledger, immutable MDLM rescore, launch-evidence
 chain, global lease, sequential R/S/E operator protocol, and intersection-union
 publication gate are local reproducibility controls, not features of released
-GenMol or UDLM. Per-layer FiLM/AdaLN is also only a future BERT experiment:
-official UDLM uses per-block modulation in a DiT. Neither smoke result is
-paper-scale.
+GenMol or UDLM. The implemented per-layer FiLM/AdaLN-style plumbing is a
+prospective BERT experiment: official UDLM uses richer per-block modulation in
+a DiT. It has no frozen screen registry, GPU execution, or result. Neither CPU
+smoke result is paper-scale.
 
 **Comprehension checkpoint.** Why does falling toy loss not show that UDLM beats
 GenMol? Expected reasoning: it checks optimization mechanics on 16 memorized
@@ -1274,10 +1374,22 @@ $1.2\times10^{-6}$ by update 10 under the 2,500-step warmup, meaningful learning
 has barely started. Why does the global lease not prove R-to-S-to-E order?
 Expected reasoning: it prevents concurrent jobs, but no per-run artifact binds
 its predecessor receipt, so order still needs operator discipline and post-run
-audit. Why is A1 retained only after its fixed-panel, clean-accuracy, and
-gradient gates all pass? Expected reasoning: stronger conditioning is useful
-only if it learns across noise levels without damaging clean predictions, and
-finite nonzero gradients prove the new path is active.
+audit. Why is L1 an optimizer-schedule bundle rather than a clean cosine
+ablation? Expected reasoning: shortening warmup changes its first-100-update
+cumulative learning-rate exposure by about 37.57 times, so early exposure and
+curve shape cannot be separated. Why must both 500-update arms freshly reload
+the same MDLM EMA and reseed after construction? Expected reasoning: otherwise
+one arm could inherit extra scheduler-screen exposure, and A1's extra parameter
+initialization would shift later stochastic training draws. Why are A1's FiLM
+gradients nonzero on backward one while its timestep-MLP gradients remain zero
+until backward three under either registered schedule? Expected reasoning:
+nonzero $c$ enters zero projection weights directly, but the gradient returning
+to $c$ is multiplied by those zero weights; optimizer update one has zero
+learning rate, and update two is the first that makes them nonzero. Why is A1 retained only after its
+fixed-panel, clean-accuracy, exact-initialization, and staged-gradient gates all
+pass? Expected reasoning: stronger conditioning is useful only if the adapter
+is an exact warm-start no-op, becomes active as designed, learns across noise
+levels, and does not damage clean predictions.
 """,
             f"{STAGE_TAG_PREFIX}-evidence",
         ),
@@ -1328,7 +1440,12 @@ assert stage20_selection_firewall["eligible_nfe"] == 128
 assert stage20_selection_firewall["eligible_metric_branch"] == "released_comparable"
 
 stage20_future_pilot_plan = {{
-    "status": "future_registered_plan_not_executed",
+    "status": "implemented_cpu_plumbing_not_registered_not_authorized_not_executed",
+    "execution_authority": {{
+        "exact_arm_registry_frozen": False,
+        "reviewed_launcher_authorizes_screen_arms": False,
+        "gpu_screen_executed": False,
+    }},
     "health_panel": {{
         "variant_order": ["R_release_uniform", "S_schedule_uniform", "E_empirical_frequency"],
         "optimizer_updates_each": 10,
@@ -1340,37 +1457,63 @@ stage20_future_pilot_plan = {{
         "variant": "E_only",
         "training_seed": 17,
         "optimizer_updates": 100,
+        "fresh_verified_mdlm_ema_start_each_arm": True,
+        "post_initialization_reseed_each_arm": False,
+        "constructor_rng_path_is_identical_between_arms": True,
         "fixed_noise_times": [0.1, 0.5, 0.9],
-        "E_L0": "current_additive_constant_with_2500_step_warmup",
+        "E_L0": {{
+            "conditioning": "additive",
+            "schedule": "constant_with_linear_warmup",
+            "warmup_updates": 2500,
+        }},
         "E_L1": {{
-            "schedule": "cosine",
+            "interpretation": "optimizer_schedule_bundle_not_isolated_cosine_shape",
+            "schedule": "half_cosine_with_linear_warmup_and_floor",
             "horizon_updates": 1000,
             "warmup_updates": 50,
             "peak_learning_rate": 3e-4,
             "minimum_learning_rate": 3e-6,
+            "first_100_cumulative_lr_exposure_ratio_vs_E_L0": 37.571076382108664,
         }},
         "select_E_L1_only_if": {{
-            "mean_fixed_panel_loss_relative_improvement_min": 0.02,
+            "pooled_content_token_loss_relative_improvement_min": 0.02,
             "improved_time_bins_min": 2,
             "per_time_bin_relative_regression_max": 0.02,
+            "comparison_arithmetic": "exact_sum_denominator_cross_products",
         }},
-        "fallback": "E_L0",
+        "complete_valid_threshold_miss": "E_L0",
+        "missing_malformed_or_unmatched_evidence": "incomplete_no_winner",
     }},
     "conditioning_screen": {{
         "variant": "E_only",
         "training_seed": 17,
         "optimizer_updates": 500,
         "scheduler": "winner_of_scheduler_screen",
-        "E_A0": "additive_time_conditioner",
-        "E_A1": "post_mlp_silu_plus_zero_init_per_layer_film_adaln_style",
+        "fresh_verified_mdlm_ema_start_each_arm": True,
+        "scheduler_screen_checkpoint_continuation": False,
+        "post_initialization_reseed_each_arm": True,
+        "E_A0": {{
+            "topology": "zero_output_additive_time_conditioner",
+            "legacy_state_keys_preserved": True,
+        }},
+        "E_A1": {{
+            "topology": "post_mlp_outer_silu_plus_per_layer_post_bert_film",
+            "timestep_mlp_output_initialization": "normal_nonzero",
+            "per_layer_projection": "hidden_to_two_hidden_shift_then_scale",
+            "per_layer_projection_initialization": "zero_weight_and_bias",
+            "official_udlm_exact_architecture": False,
+        }},
         "select_E_A1_only_if": {{
             "exact_warm_start_output_preserved_at_initialization": True,
-            "mean_fixed_panel_loss_relative_improvement_min": 0.02,
+            "pooled_content_token_loss_relative_improvement_min": 0.02,
             "per_time_bin_relative_regression_max": 0.02,
-            "clean_token_accuracy_nondecreasing": True,
-            "new_parameter_gradients_finite_and_nonzero": True,
+            "clean_token_accuracy_nondecreasing_by_integer_cross_product": True,
+            "each_film_group_gradient_finite_nonzero_on_backward_one": True,
+            "timestep_mlp_gradient_finite_nonzero_after_first_nonzero_lr_film_update": True,
+            "earliest_expected_timestep_mlp_nonzero_gradient_backward": 3,
         }},
-        "ties_and_failures": "E_A0",
+        "complete_valid_threshold_miss": "E_A0",
+        "missing_malformed_or_unmatched_evidence": "incomplete_no_winner",
     }},
     "matched_scale_up": {{
         "variant_order": ["R_release_uniform", "S_schedule_uniform", "E_empirical_frequency"],
@@ -1386,21 +1529,114 @@ stage20_future_pilot_plan = {{
 }}
 stage20_lr_at_health_update_10 = 3e-4 * 10 / 2500
 assert stage20_math.isclose(stage20_lr_at_health_update_10, 1.2e-6)
-stage20_scheduler_example_l0 = [10.0, 6.0, 2.0]
-stage20_scheduler_example_l1 = [9.7, 5.7, 2.02]
-stage20_scheduler_example_mean_improvement = 1.0 - (
-    stage20_math.fsum(stage20_scheduler_example_l1)
-    / stage20_math.fsum(stage20_scheduler_example_l0)
+stage20_screen_update_indices = range(100)
+stage20_peak_lr = 3e-4
+stage20_floor_lr = 3e-6
+
+
+def stage20_l0_lr(optimizer_update_index):
+    return stage20_peak_lr * optimizer_update_index / 2500
+
+
+def stage20_l1_lr(optimizer_update_index):
+    if optimizer_update_index < 50:
+        return stage20_peak_lr * optimizer_update_index / 50
+    progress = (optimizer_update_index - 50) / (1000 - 50)
+    cosine = 0.5 * (1.0 + stage20_math.cos(stage20_math.pi * progress))
+    return stage20_floor_lr + (stage20_peak_lr - stage20_floor_lr) * cosine
+
+
+stage20_l0_cumulative_lr = stage20_math.fsum(
+    stage20_l0_lr(index) for index in stage20_screen_update_indices
 )
-stage20_scheduler_example_bin_changes = [
-    candidate / reference - 1.0
-    for reference, candidate in zip(
-        stage20_scheduler_example_l0, stage20_scheduler_example_l1, strict=True
-    )
-]
-assert stage20_scheduler_example_mean_improvement >= 0.02
-assert sum(change < 0 for change in stage20_scheduler_example_bin_changes) >= 2
-assert max(stage20_scheduler_example_bin_changes) <= 0.02
+stage20_l1_cumulative_lr = stage20_math.fsum(
+    stage20_l1_lr(index) for index in stage20_screen_update_indices
+)
+stage20_l1_to_l0_cumulative_lr_ratio = (
+    stage20_l1_cumulative_lr / stage20_l0_cumulative_lr
+)
+assert stage20_math.isclose(stage20_l0_cumulative_lr, 5.94e-4, rel_tol=1e-15)
+assert stage20_math.isclose(
+    stage20_l1_cumulative_lr, 0.022317219370972547, rel_tol=1e-15
+)
+assert stage20_math.isclose(
+    stage20_l1_to_l0_cumulative_lr_ratio,
+    37.571076382108664,
+    rel_tol=1e-15,
+)
+
+stage20_a1_example_shapes = {{
+    "batch": 2,
+    "sequence": 4,
+    "hidden": 24,
+    "layers": 2,
+    "conditioning": [2, 24],
+    "projection_output": [2, 48],
+    "shift": [2, 24],
+    "scale": [2, 24],
+    "broadcast_shift_and_scale": [2, 1, 24],
+    "modulated_hidden": [2, 4, 24],
+}}
+stage20_a1_hidden = 768
+stage20_a1_layers = 12
+stage20_a1_film_parameters_per_layer = (
+    (2 * stage20_a1_hidden) * stage20_a1_hidden + 2 * stage20_a1_hidden
+)
+stage20_a1_film_parameters = (
+    stage20_a1_layers * stage20_a1_film_parameters_per_layer
+)
+stage20_a1_time_mlp_parameters = 787_968
+stage20_a1_conditioning_parameters = (
+    stage20_a1_film_parameters + stage20_a1_time_mlp_parameters
+)
+assert stage20_a1_film_parameters_per_layer == 1_181_184
+assert stage20_a1_film_parameters == 14_174_208
+assert stage20_a1_conditioning_parameters == 14_962_176
+stage20_a1_warm_start_tensor_counts = {{
+    "loaded_mdlm_ema_base": 202,
+    "new_timestep": 4,
+    "new_film": 24,
+    "fresh_ema_shadows": 230,
+}}
+assert (
+    stage20_a1_warm_start_tensor_counts["loaded_mdlm_ema_base"]
+    + stage20_a1_warm_start_tensor_counts["new_timestep"]
+    + stage20_a1_warm_start_tensor_counts["new_film"]
+    == stage20_a1_warm_start_tensor_counts["fresh_ema_shadows"]
+)
+stage20_scheduler_example_l0_sums = [1000, 600, 200]
+stage20_scheduler_example_l1_sums = [970, 570, 202]
+stage20_scheduler_example_denominators = [100, 100, 100]
+stage20_scheduler_example_l0_total = sum(stage20_scheduler_example_l0_sums)
+stage20_scheduler_example_l1_total = sum(stage20_scheduler_example_l1_sums)
+stage20_scheduler_example_denominator = sum(
+    stage20_scheduler_example_denominators
+)
+stage20_scheduler_example_pooled_improvement = 1.0 - (
+    stage20_scheduler_example_l1_total / stage20_scheduler_example_l0_total
+)
+# Exact 2% pooled threshold: L1 <= 98/100 * L0.
+assert (
+    100
+    * stage20_scheduler_example_l1_total
+    * stage20_scheduler_example_denominator
+    <= 98
+    * stage20_scheduler_example_l0_total
+    * stage20_scheduler_example_denominator
+)
+stage20_scheduler_example_strictly_better_bins = 0
+for l0_sum, l1_sum, denominator in zip(
+    stage20_scheduler_example_l0_sums,
+    stage20_scheduler_example_l1_sums,
+    stage20_scheduler_example_denominators,
+    strict=True,
+):
+    if l1_sum * denominator < l0_sum * denominator:
+        stage20_scheduler_example_strictly_better_bins += 1
+    # Exact +2% per-bin ceiling: L1 <= 102/100 * L0.
+    assert 100 * l1_sum * denominator <= 102 * l0_sum * denominator
+assert stage20_scheduler_example_pooled_improvement >= 0.02
+assert stage20_scheduler_example_strictly_better_bins >= 2
 
 stage20_rescore_path = (
     PROJECT_ROOT
@@ -1744,11 +1980,13 @@ stage20_decision_gate_report_rows = [
     ),
     (
         "Registered pilot selector",
-        "Future plan: 10-update R/S/E health; E scheduler screen at 100 updates, "
-        "seed 17; E conditioning screen at 500 updates, seed 17; selected matched "
-        "R/S/E at 1000 updates. Seed 1100 x 32 is ineligible. Selection uses seeds "
-        "1000,1001 x 256 requests at 128 NFE; released-compatible quality then "
-        "diversity then lexical attempt ID.",
+        "Future execution plan; CPU plumbing implemented but screen arms not yet "
+        "registered or launcher-authorized: 10-update R/S/E health; E optimizer-"
+        "schedule-bundle screen at 100 updates, seed 17; fresh MDLM-EMA E "
+        "conditioning arms at 500 updates, seed 17, with post-init reseeding; "
+        "selected matched R/S/E at 1000 updates. Seed 1100 x 32 is ineligible. "
+        "Selection uses seeds 1000,1001 x 256 requests at 128 NFE; released-"
+        "compatible quality then diversity then lexical attempt ID.",
     ),
     (
         "Final evaluation protocol",
@@ -1803,6 +2041,21 @@ stage20_summary = {{
         stage20_superiority_protocol_bytes
     ).hexdigest(),
     "future_pilot_plan": stage20_future_pilot_plan,
+    "prospective_screen_plumbing": {{
+        "status": stage20_future_pilot_plan["status"],
+        "l1_interpretation": "optimizer_schedule_bundle_not_isolated_cosine_shape",
+        "l1_to_l0_cumulative_lr_exposure_ratio_100_updates": (
+            stage20_l1_to_l0_cumulative_lr_ratio
+        ),
+        "a1_example_shapes": stage20_a1_example_shapes,
+        "a1_conditioning_parameters": stage20_a1_conditioning_parameters,
+        "a1_warm_start_tensor_counts": stage20_a1_warm_start_tensor_counts,
+        "fresh_mdlm_ema_start_each_500_update_arm": True,
+        "post_initialization_reseed_each_500_update_arm": True,
+        "exact_arm_registry_frozen": False,
+        "launcher_authorized": False,
+        "gpu_screen_executed": False,
+    }},
     "training_artifact_schemas": stage20_candidate_lock_requirements[
         "accepted_training_artifact_schema_versions"
     ],
@@ -2566,15 +2819,19 @@ released-code, and local bounded results remain separate fields.
         "Final evaluation protocol",''',
             label="registered pilot selector report row",
         )
-        source = _replace_required(
-            source,
+        source = source.replace(
             '''        "device UUID mapping and wall time",
         "MDLM-matched content-only framing control",''',
             '''        "launch-manifest path/hash/schema",
         "global lease",
         "Future plan: 10-update R/S/E health",
         "MDLM-matched content-only framing control",''',
-            label="launch-evidence report assertions",
+        )
+        source = _replace_required(
+            source,
+            '        "Future plan: 10-update R/S/E health",',
+            '        "CPU plumbing implemented but screen arms not yet registered or launcher-authorized",',
+            label="prospective-screen report assertion",
         )
 
     source = _replace_required(
@@ -2782,7 +3039,7 @@ released-code, and local bounded results remain separate fields.
         "initialization checkpoint and raw-or-EMA choice",
         "launch-manifest path/hash/schema",
         "global lease",
-        "Future plan: 10-update R/S/E health",
+        "CPU plumbing implemented but screen arms not yet registered or launcher-authorized",
         "MDLM-matched content-only framing control",
         "continuation-system",
     ):
@@ -3067,6 +3324,13 @@ def _update_completion_gate(notebook: dict) -> None:
   E-only 100-update scheduler screen, an E-only 500-update conditioning screen,
   then selected matched R/S/E runs at 1,000 updates. Seed 1100 x 32 requests is
   ineligible; only seeds 1000/1001 x 256 requests at 128 NFE may select.
+- CPU plumbing exists for the two prospective screens, but their exact arm
+  registry is not frozen, the reviewed launcher does not authorize them, and
+  no GPU screen has run. L1 is an optimizer-schedule bundle with about 37.57x
+  L0's cumulative learning-rate exposure over updates 0--99, not an isolated
+  cosine-shape ablation. Both 500-update A0/A1 arms must independently reload
+  the same MDLM EMA and reseed after initialization; A1 is the outer-SiLU,
+  zero-FiLM warm-start hypothesis with staged conditioner gradients.
 - The final success gate is three matched 1,000-request seeds with repaired and
   strict metrics, checkpoint/seeds/device/runtime provenance, and thresholds
   recorded in `stage20_success_criteria`.
