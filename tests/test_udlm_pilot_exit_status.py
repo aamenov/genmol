@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from scripts.udlm import launch_train_pilot as launcher
+from scripts.udlm import write_pilot_exit_status as receipt_writer
 
 
 def _canonical_sha256(value):
@@ -21,7 +22,18 @@ def _canonical_sha256(value):
     return hashlib.sha256(encoded).hexdigest()
 
 
-RESOLVED_TRAINING_CONFIG = {"seed": 7}
+RESOLVED_TRAINING_CONFIG = {
+    "data": "safe",
+    "seed": 7,
+    "training": {"ema": 0.9999},
+    "loader": {"global_batch_size": 8, "batch_size": 2},
+    "trainer": {
+        "devices": 1,
+        "num_nodes": 1,
+        "max_steps": 10,
+        "accumulate_grad_batches": 4,
+    },
+}
 TRAINING_ARGV = ["/repo/scripts/train.py", "seed=7"]
 EXPECTED_CONFIG_SHA256 = _canonical_sha256(RESOLVED_TRAINING_CONFIG)
 EXPECTED_ARGV_SHA256 = _canonical_sha256(TRAINING_ARGV)
@@ -105,7 +117,7 @@ def _valid_summary(paths, revision):
     if not paths["checkpoint"].exists():
         paths["checkpoint"].write_bytes(b"stable checkpoint fixture\n")
     completion_contract = {
-        "summary_schema_version": 1,
+        "summary_schema_version": launcher.TRAINING_SUMMARY_SCHEMA_VERSION,
         "summary_path": str(paths["summary"]),
         "final_checkpoint_path": str(paths["checkpoint"]),
         "expected_max_steps": 10,
@@ -131,7 +143,7 @@ def _valid_summary(paths, revision):
         encoding="utf-8",
     )
     return {
-        "schema_version": 1,
+        "schema_version": launcher.TRAINING_SUMMARY_SCHEMA_VERSION,
         "status": "completed",
         "completed_at_utc": "2026-09-06T12:00:00+00:00",
         "source_revision": revision,
@@ -148,6 +160,23 @@ def _valid_summary(paths, revision):
             "global_rank": 0,
             "global_step": 10,
             "world_size": 1,
+        },
+        "training_accounting": {
+            "training_seed": 7,
+            "optimizer_updates": 10,
+            "world_size": 1,
+            "micro_batch_size_per_rank": 2,
+            "accumulate_grad_batches": 4,
+            "effective_global_examples_per_optimizer_step": 8,
+            "total_requested_example_exposures": 80,
+            "hosted_stream_rank_partition_policy": (
+                "huggingface_split_dataset_by_node_disjoint_rank_streams"
+            ),
+            "trainable_parameter_counts": {
+                "base_backbone": 3,
+                "time_conditioner": 2,
+                "total": 5,
+            },
         },
         "training_health": {
             "scope": "rank-zero counters",
@@ -166,6 +195,11 @@ def _valid_summary(paths, revision):
                 "global_step": 10,
                 "raw_model": _finite_record(),
                 "ema": _finite_record(),
+                "ema_metadata": {
+                    "shadow_parameter_count": 2,
+                    "decay": 0.9999,
+                    "num_updates": 10,
+                },
                 "optimizer": _finite_record(),
                 "all_checkpoint_tensors": _finite_record(tensors=6, elements=12),
                 "udlm_process_identity_verified": True,
@@ -223,7 +257,7 @@ def _shell_command(
         expected_source_revision=revision,
         expected_config_sha256=EXPECTED_CONFIG_SHA256,
         expected_argv_sha256=EXPECTED_ARGV_SHA256,
-        expected_summary_schema_version=1,
+        expected_summary_schema_version=launcher.TRAINING_SUMMARY_SCHEMA_VERSION,
         expected_max_steps=10,
         expected_world_size=1,
         expected_final_checkpoint_path=paths["checkpoint"],
@@ -247,6 +281,9 @@ def test_successful_pipeline_writes_launch_bound_receipt(receipt_repository):
     _write_summary(paths, revision)
     paths["log"].parent.mkdir(parents=True)
     summary_sha256 = hashlib.sha256(paths["summary"].read_bytes()).hexdigest()
+    expected_accounting = json.loads(paths["summary"].read_text(encoding="utf-8"))[
+        "training_accounting"
+    ]
 
     result = _execute_shell(
         repository,
@@ -255,18 +292,21 @@ def test_successful_pipeline_writes_launch_bound_receipt(receipt_repository):
 
     assert result.returncode == 0, result.stderr
     receipt = json.loads(paths["receipt"].read_text(encoding="utf-8"))
-    assert receipt["schema_version"] == 1
+    assert receipt["schema_version"] == receipt_writer.EXIT_STATUS_SCHEMA_VERSION == 2
     assert receipt["status"] == "completed"
     assert receipt["process_exit_status"] == 0
     assert receipt["pipeline"]["training"]["shell_exit_status"] == 0
     assert receipt["pipeline"]["tee"]["shell_exit_status"] == 0
     assert receipt["training_summary"]["valid_and_launch_bound"] is True
     assert receipt["training_summary"]["artifact"]["sha256"] == summary_sha256
+    assert receipt["training_summary"]["validated_bindings"][
+        "training_accounting"
+    ] == expected_accounting
     assert receipt["runtime_config"]["matches_training_summary_snapshot"] is True
     assert receipt["final_checkpoint"]["matches_training_summary_snapshot"] is True
     assert receipt["source_at_receipt"]["verified"] is True
     assert receipt["expected_contract"] == {
-        "training_summary_schema_version": 1,
+        "training_summary_schema_version": launcher.TRAINING_SUMMARY_SCHEMA_VERSION,
         "source_revision": revision,
         "resolved_training_config_sha256": EXPECTED_CONFIG_SHA256,
         "training_argv_sha256": EXPECTED_ARGV_SHA256,
@@ -412,6 +452,44 @@ def test_required_health_semantic_runtime_and_startup_evidence_cannot_be_forged(
             0,
             "gradient tensor observation count",
         ),
+        (("training_accounting",), None, "training accounting"),
+        (
+            ("training_accounting", "optimizer_updates"),
+            True,
+            "accounting optimizer updates",
+        ),
+        (
+            (
+                "training_accounting",
+                "effective_global_examples_per_optimizer_step",
+            ),
+            7,
+            "effective global examples do not equal",
+        ),
+        (
+            ("training_accounting", "total_requested_example_exposures"),
+            79,
+            "total requested example exposures do not equal",
+        ),
+        (
+            ("training_accounting", "hosted_stream_rank_partition_policy"),
+            "unpartitioned_repeated_stream",
+            "hosted-stream rank partition policy",
+        ),
+        (
+            ("training_accounting", "trainable_parameter_counts", "total"),
+            6,
+            "trainable parameter counts do not add up",
+        ),
+        (
+            (
+                "training_accounting",
+                "trainable_parameter_counts",
+                "time_conditioner",
+            ),
+            None,
+            "trainable parameter counts keys are invalid",
+        ),
         (
             ("tensor_finiteness", "ema", "floating_tensor_count"),
             0,
@@ -426,6 +504,16 @@ def test_required_health_semantic_runtime_and_startup_evidence_cannot_be_forged(
             ("final_checkpoint", "semantic_audit", "optimizer", "all_finite"),
             False,
             "serialized checkpoint optimizer all-finite flag",
+        ),
+        (
+            ("final_checkpoint", "semantic_audit", "ema_metadata", "num_updates"),
+            9,
+            "checkpoint EMA update count",
+        ),
+        (
+            ("final_checkpoint", "semantic_audit", "ema_metadata", "decay"),
+            0.9,
+            "EMA decay disagrees with resolved config",
         ),
         (
             ("final_checkpoint", "semantic_audit", "live_model_match", "tensor_count"),
@@ -535,6 +623,61 @@ def test_runtime_record_must_semantically_match_the_launch(receipt_repository):
         "runtime config source revision"
         in receipt["training_summary"]["validation_error"]
     )
+
+
+def test_training_accounting_must_match_resolved_runtime_config(
+    receipt_repository,
+):
+    repository, revision = receipt_repository
+    paths = _paths(repository)
+    summary = _valid_summary(paths, revision)
+    mismatched_config = json.loads(json.dumps(RESOLVED_TRAINING_CONFIG))
+    mismatched_config["loader"]["batch_size"] = 3
+
+    with pytest.raises(
+        ValueError, match="accounting micro-batch size disagrees with resolved config"
+    ):
+        receipt_writer.validate_training_summary(
+            summary,
+            summary_path=paths["summary"],
+            expected_schema_version=receipt_writer.TRAINING_SUMMARY_SCHEMA_VERSION,
+            expected_source_revision=revision,
+            expected_config_sha256=EXPECTED_CONFIG_SHA256,
+            expected_argv_sha256=EXPECTED_ARGV_SHA256,
+            expected_max_steps=10,
+            expected_world_size=1,
+            expected_final_checkpoint_path=paths["checkpoint"],
+            expected_initialization_checkpoint_sha256=(
+                EXPECTED_WARM_START_SHA256
+            ),
+            resolved_training_config=mismatched_config,
+        )
+
+
+def test_receipt_writer_rejects_legacy_training_summary_schema(receipt_repository):
+    repository, revision = receipt_repository
+    paths = _paths(repository)
+    summary = _valid_summary(paths, revision)
+    summary["schema_version"] = 1
+
+    with pytest.raises(
+        ValueError, match="unsupported training summary schema version 1; expected 2"
+    ):
+        receipt_writer.validate_training_summary(
+            summary,
+            summary_path=paths["summary"],
+            expected_schema_version=1,
+            expected_source_revision=revision,
+            expected_config_sha256=EXPECTED_CONFIG_SHA256,
+            expected_argv_sha256=EXPECTED_ARGV_SHA256,
+            expected_max_steps=10,
+            expected_world_size=1,
+            expected_final_checkpoint_path=paths["checkpoint"],
+            expected_initialization_checkpoint_sha256=(
+                EXPECTED_WARM_START_SHA256
+            ),
+            resolved_training_config=RESOLVED_TRAINING_CONFIG,
+        )
 
 
 def test_dirty_source_at_receipt_cannot_complete(receipt_repository):

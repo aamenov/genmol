@@ -374,7 +374,7 @@ def test_child_command_sanitizes_python_and_binds_source_argv_config(
     )
     assert environment["PYTHONHASHSEED"] == "7"
     assert environment["GENMOL_TRAIN_SUMMARY_PATH"] == str(summary_path)
-    assert environment["GENMOL_TRAIN_EXPECTED_SUMMARY_SCHEMA_VERSION"] == "1"
+    assert environment["GENMOL_TRAIN_EXPECTED_SUMMARY_SCHEMA_VERSION"] == "2"
     assert environment["GENMOL_TRAIN_EXPECTED_FINAL_CHECKPOINT_PATH"] == str(
         checkpoint_path
     )
@@ -412,7 +412,7 @@ def test_tmux_command_captures_both_pipeline_statuses_for_receipt(
         expected_source_revision="a" * 40,
         expected_config_sha256="b" * 64,
         expected_argv_sha256="c" * 64,
-        expected_summary_schema_version=1,
+        expected_summary_schema_version=launcher.TRAINING_SUMMARY_SCHEMA_VERSION,
         expected_max_steps=10,
         expected_world_size=2,
         expected_final_checkpoint_path=(
@@ -425,6 +425,30 @@ def test_tmux_command_captures_both_pipeline_statuses_for_receipt(
     assert 'tee_status="${pipeline_status[1]}"' in shell_command
     assert "write_pilot_exit_status.py" in shell_command
     assert str(receipt_path) in shell_command
+
+
+def test_tmux_command_rejects_legacy_training_summary_schema(monkeypatch, tmp_path):
+    monkeypatch.setattr(launcher, "REPOSITORY_ROOT", tmp_path)
+    with pytest.raises(ValueError, match="unexpected training summary schema version"):
+        launcher.build_tmux_shell_command(
+            ["bash", "-c", "exit 0"],
+            log_path=tmp_path / "output/logs/pilot.log",
+            training_summary_path=(
+                tmp_path / "output/udlm/pilot/training_summary.json"
+            ),
+            exit_receipt_path=(
+                tmp_path / "output/udlm/pilot/pilot_exit_status.json"
+            ),
+            expected_source_revision="a" * 40,
+            expected_config_sha256="b" * 64,
+            expected_argv_sha256="c" * 64,
+            expected_summary_schema_version=1,
+            expected_max_steps=10,
+            expected_world_size=1,
+            expected_final_checkpoint_path=(
+                tmp_path / "output/udlm/pilot/checkpoints/10.ckpt"
+            ),
+        )
 
 
 def test_exit_receipt_path_must_be_new_and_inside_repository(monkeypatch, tmp_path):
@@ -593,12 +617,12 @@ def test_main_keeps_final_uuid_probe_adjacent_to_tmux_spawn(monkeypatch, tmp_pat
                 repository_root / "output/udlm/ordering/checkpoints/1.ckpt"
             )
             assert manifest["training_summary_path"] == str(summary_path)
-            assert manifest["training_summary_schema_version"] == 1
+            assert manifest["training_summary_schema_version"] == 2
             receipt_path = (
                 repository_root / "output/udlm/ordering/pilot_exit_status.json"
             )
             assert manifest["pilot_exit_status_path"] == str(receipt_path)
-            assert manifest["pilot_exit_status_schema_version"] == 1
+            assert manifest["pilot_exit_status_schema_version"] == 2
             assert manifest["expected_final_checkpoint_path"] == str(checkpoint_path)
             assert manifest["completion_contract"] == {
                 "status_at_launch": "pending",
@@ -626,7 +650,7 @@ def test_main_keeps_final_uuid_probe_adjacent_to_tmux_spawn(monkeypatch, tmp_pat
                 manifest["child_environment"][
                     "GENMOL_TRAIN_EXPECTED_SUMMARY_SCHEMA_VERSION"
                 ]
-                == "1"
+                == "2"
             )
             return subprocess.CompletedProcess(command, 0)
         raise AssertionError(f"unexpected subprocess: {command}")

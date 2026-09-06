@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import copy
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,6 +17,48 @@ from scripts.exps.denovo import benchmark, report
 class DenovoReportTests(unittest.TestCase):
     def _workspace(self) -> tempfile.TemporaryDirectory[str]:
         return tempfile.TemporaryDirectory(dir=report.REPOSITORY_ROOT)
+
+    def test_stable_regular_file_reader_rejects_symlink(self):
+        with self._workspace() as directory:
+            root = Path(directory)
+            target = root / "target.json"
+            target.write_text('{"version": 1}', encoding="utf-8")
+            link = root / "input.json"
+            link.symlink_to(target)
+
+            with self.assertRaisesRegex(
+                report.ReportValidationError,
+                "not a regular file",
+            ):
+                report._stable_regular_file_bytes(link, label="test input")
+
+    def test_stable_regular_file_reader_rejects_path_replacement(self):
+        with self._workspace() as directory:
+            root = Path(directory)
+            input_path = root / "input.json"
+            replacement = root / "replacement.json"
+            input_path.write_bytes(b"a" * 32)
+            replacement.write_bytes(b"b" * 32)
+            original_read = os.read
+            replaced = False
+
+            def replacing_read(descriptor: int, count: int) -> bytes:
+                nonlocal replaced
+                payload = original_read(descriptor, count)
+                if payload and not replaced:
+                    os.replace(replacement, input_path)
+                    replaced = True
+                return payload
+
+            with mock.patch.object(report.os, "read", side_effect=replacing_read):
+                with self.assertRaisesRegex(
+                    report.ReportValidationError,
+                    "changed while being read",
+                ):
+                    report._stable_regular_file_bytes(
+                        input_path,
+                        label="test input",
+                    )
 
     def _write_report_bundle(self, payload: dict, **kwargs):
         expected_revision = payload["seed_runs"][0]["git"]["commit"]
@@ -754,6 +797,15 @@ class DenovoReportTests(unittest.TestCase):
                     "exclude_special_tokens": False,
                     "prior_variant": prior_variant,
                     "prior_metadata_sha256": prior_digest,
+                    "inference_weights": {
+                        "source": "ema",
+                        "ema_applied": True,
+                        "ema": {
+                            "shadow_parameter_count": 202,
+                            "decay": 0.995,
+                            "num_updates": 100,
+                        },
+                    },
                 }
             )
             run_label = report.benchmark_run_label(100, checkpoint_sha, seed)
@@ -771,6 +823,7 @@ class DenovoReportTests(unittest.TestCase):
             self._three_runs(runs)
             payload = report.collect_report(runs)
 
+            self.assertEqual(payload["schema_version"], 6)
             self.assertEqual(
                 payload["required_protocol"]["total_requested_samples"], 3_000
             )
@@ -803,6 +856,32 @@ class DenovoReportTests(unittest.TestCase):
             self.assertIn(
                 "pinned fragment-score", payload["metric_definitions"]["quality"]
             )
+            self.assertEqual(
+                payload["inference_weights"],
+                report.EXPECTED_MDLM_INFERENCE_WEIGHTS,
+            )
+            self.assertTrue(
+                all(
+                    run["inference_weights"]
+                    == report.EXPECTED_MDLM_INFERENCE_WEIGHTS
+                    for run in payload["seed_runs"]
+                )
+            )
+
+    def test_collect_rejects_pre_inference_weights_run_schema(self):
+        with self._workspace() as directory:
+            runs = Path(directory) / "runs"
+            self._three_runs(runs)
+            summary_path = runs / "seed_0" / "summary.json"
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            summary["schema_version"] = 6
+            summary_path.write_text(json.dumps(summary), encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                report.ReportValidationError,
+                "schema_version=6; expected 7",
+            ):
+                report.collect_report(runs)
 
     def test_missing_or_wrong_sa_metric_provenance_is_rejected(self):
         with self._workspace() as directory:
@@ -852,6 +931,18 @@ class DenovoReportTests(unittest.TestCase):
             self.assertEqual(payload["generation_protocol"]["nfe"], 32)
             self.assertFalse(
                 payload["generation_protocol"]["randomness_used_by_sampler"]
+            )
+            self.assertEqual(
+                payload["inference_weights"],
+                {
+                    "source": "ema",
+                    "ema_applied": True,
+                    "ema": {
+                        "shadow_parameter_count": 202,
+                        "decay": 0.995,
+                        "num_updates": 100,
+                    },
+                },
             )
             self.assertEqual(
                 payload["generation_protocol"]["nfe_by_seed"],
@@ -1015,6 +1106,23 @@ class DenovoReportTests(unittest.TestCase):
             )
             self.assertGreaterEqual(validation["page_count"], 3)
 
+    def test_bundle_rejects_pre_inference_provenance_report_schema(self):
+        with self._workspace() as directory:
+            runs = Path(directory) / "runs"
+            self._three_runs(runs)
+            payload = report.collect_report(runs)
+            payload["schema_version"] = 5
+
+            with self.assertRaisesRegex(
+                report.ReportValidationError,
+                "schema_version=5; expected 6",
+            ):
+                report.write_report_bundle(
+                    payload,
+                    output_dir=Path(directory) / "aggregate",
+                    pdf_path=Path(directory) / "report.pdf",
+                )
+
     def test_report_generator_provenance_binds_clean_pushed_source(self):
         expected_revision = "4" * 40
         source_path = Path(report.__file__).resolve()
@@ -1162,6 +1270,53 @@ class DenovoReportTests(unittest.TestCase):
             summary_path.write_text(json.dumps(summary), encoding="utf-8")
             with self.assertRaisesRegex(
                 report.ReportValidationError, "python_hash_seed"
+            ):
+                report.collect_report(runs)
+
+    def test_raw_inference_weights_are_rejected(self):
+        with self._workspace() as directory:
+            runs = Path(directory) / "runs"
+            self._three_runs(runs)
+            summary_path = runs / "seed_2" / "summary.json"
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            summary["run"]["generation_protocol"]["inference_weights"] = {
+                "source": "raw_model",
+                "ema_applied": False,
+                "ema": None,
+            }
+            summary_path.write_text(json.dumps(summary), encoding="utf-8")
+            with self.assertRaisesRegex(
+                report.ReportValidationError, "EMA inference weights were required"
+            ):
+                report.collect_report(runs)
+
+    def test_mdlm_requires_exact_audited_ema_metadata(self):
+        with self._workspace() as directory:
+            runs = Path(directory) / "runs"
+            self._three_runs(runs)
+            summary_path = runs / "seed_0" / "summary.json"
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            summary["run"]["generation_protocol"]["inference_weights"]["ema"][
+                "shadow_parameter_count"
+            ] = 201
+            summary_path.write_text(json.dumps(summary), encoding="utf-8")
+            with self.assertRaisesRegex(
+                report.ReportValidationError, "audited 50k MDLM EMA state"
+            ):
+                report.collect_report(runs)
+
+    def test_udlm_requires_positive_ema_update_count(self):
+        with self._workspace() as directory:
+            runs = Path(directory) / "runs"
+            self._three_udlm_runs(runs)
+            summary_path = runs / "seed_1" / "summary.json"
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            summary["run"]["generation_protocol"]["inference_weights"]["ema"][
+                "num_updates"
+            ] = 0
+            summary_path.write_text(json.dumps(summary), encoding="utf-8")
+            with self.assertRaisesRegex(
+                report.ReportValidationError, "positive update count"
             ):
                 report.collect_report(runs)
 

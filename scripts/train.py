@@ -16,6 +16,7 @@
 
 import hashlib
 import json
+import math
 import os
 import re
 import stat
@@ -39,7 +40,10 @@ _PILOT_ENVIRONMENT_KEYS = {
     "GENMOL_TRAIN_EXPECTED_MAX_STEPS",
     "GENMOL_TRAIN_EXPECTED_WORLD_SIZE",
 }
-_TRAINING_SUMMARY_SCHEMA_VERSION = 1
+_TRAINING_SUMMARY_SCHEMA_VERSION = 2
+_HOSTED_STREAM_RANK_PARTITION_POLICY = (
+    "huggingface_split_dataset_by_node_disjoint_rank_streams"
+)
 _CONTROLLED_PYTHON_ENVIRONMENT = {
     "PYTHONPATH": os.pathsep.join(
         [str(_REPOSITORY_ROOT / "src"), str(_REPOSITORY_ROOT)]
@@ -344,6 +348,7 @@ import lightning as L
 import omegaconf
 import torch
 from genmol.model import GenMol
+from genmol.utils.checkpoint_io import verified_checkpoint_file
 from genmol.utils.utils_data import get_dataloader, get_last_checkpoint
 
 omegaconf.OmegaConf.register_new_resolver('cwd', os.getcwd)
@@ -441,6 +446,169 @@ def _exact_positive_integer(value, label):
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise RuntimeError(f"{label} must be a positive integer")
     return value
+
+
+def _exact_nonnegative_integer(value, label):
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise RuntimeError(f"{label} must be a nonnegative integer")
+    return value
+
+
+def _pilot_trainable_parameter_counts(model):
+    """Count the exact trainable split represented by the live pilot model."""
+
+    backbone = getattr(model, "backbone", None)
+    if backbone is None or not callable(getattr(backbone, "named_parameters", None)):
+        raise RuntimeError("pilot model has no countable backbone parameters")
+    if not callable(getattr(model, "named_parameters", None)):
+        raise RuntimeError("pilot model has no countable trainable parameters")
+
+    model_parameters = {
+        id(parameter): (name, parameter)
+        for name, parameter in model.named_parameters()
+        if parameter.requires_grad
+    }
+    backbone_parameters = {
+        id(parameter): (name, parameter)
+        for name, parameter in backbone.named_parameters()
+        if parameter.requires_grad
+    }
+    if not model_parameters:
+        raise RuntimeError("pilot model has no trainable parameters")
+    if set(model_parameters) != set(backbone_parameters):
+        raise RuntimeError(
+            "pilot trainable parameters are not exactly the backbone parameters"
+        )
+
+    base_backbone = 0
+    time_conditioner = 0
+    for name, parameter in backbone_parameters.values():
+        count = parameter.numel()
+        if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+            raise RuntimeError(f"pilot trainable parameter has invalid size: {name}")
+        if name.startswith("time_conditioner."):
+            time_conditioner += count
+        else:
+            base_backbone += count
+    if base_backbone <= 0:
+        raise RuntimeError("pilot backbone has no base trainable parameters")
+    if time_conditioner <= 0:
+        raise RuntimeError("pilot backbone has no trainable time_conditioner")
+    total = sum(parameter.numel() for _name, parameter in model_parameters.values())
+    if total != base_backbone + time_conditioner:
+        raise RuntimeError("pilot trainable parameter counts do not add up")
+    return {
+        "base_backbone": base_backbone,
+        "time_conditioner": time_conditioner,
+        "total": total,
+    }
+
+
+def _pilot_training_accounting(config, trainer, model, train_dataloader):
+    """Derive the requested-example and parameter receipt at completion."""
+
+    if _PILOT_CONTRACT is None:
+        return None
+    training_seed = _exact_nonnegative_integer(
+        config.get('seed', 1), "pilot training seed"
+    )
+    optimizer_updates = _exact_positive_integer(
+        getattr(trainer, 'global_step', None), "pilot optimizer updates"
+    )
+    configured_updates = _exact_positive_integer(
+        config.trainer.get('max_steps'), "pilot configured optimizer updates"
+    )
+    runtime_max_steps = _exact_positive_integer(
+        getattr(trainer, 'max_steps', None), "pilot runtime max steps"
+    )
+    expected_updates = _PILOT_CONTRACT["expected_max_steps"]
+    if not (
+        optimizer_updates
+        == configured_updates
+        == runtime_max_steps
+        == expected_updates
+    ):
+        raise RuntimeError(
+            "pilot optimizer updates disagree across completion, runtime, config, "
+            "and launch contract"
+        )
+
+    world_size = _exact_positive_integer(
+        getattr(trainer, 'world_size', None), "pilot accounting world size"
+    )
+    configured_devices = _exact_positive_integer(
+        config.trainer.get('devices'), "pilot configured devices"
+    )
+    configured_nodes = _exact_positive_integer(
+        config.trainer.get('num_nodes'), "pilot configured nodes"
+    )
+    runtime_nodes = _exact_positive_integer(
+        getattr(trainer, 'num_nodes', None), "pilot runtime nodes"
+    )
+    expected_world_size = _PILOT_CONTRACT["expected_world_size"]
+    if (
+        configured_nodes != 1
+        or runtime_nodes != configured_nodes
+        or configured_devices * configured_nodes != world_size
+        or world_size != expected_world_size
+    ):
+        raise RuntimeError(
+            "pilot accounting world size disagrees across runtime, config, and "
+            "launch contract"
+        )
+
+    if train_dataloader is None:
+        train_dataloader = getattr(trainer, 'train_dataloader', None)
+    micro_batch_size = _exact_positive_integer(
+        config.loader.get('batch_size'), "pilot micro-batch size per rank"
+    )
+    runtime_micro_batch_size = _exact_positive_integer(
+        getattr(train_dataloader, 'batch_size', None),
+        "pilot runtime micro-batch size per rank",
+    )
+    if runtime_micro_batch_size != micro_batch_size:
+        raise RuntimeError(
+            "pilot runtime micro-batch size disagrees with the resolved config"
+        )
+    accumulation = _exact_positive_integer(
+        config.trainer.get('accumulate_grad_batches'),
+        "pilot configured gradient accumulation",
+    )
+    runtime_accumulation = _exact_positive_integer(
+        getattr(trainer, 'accumulate_grad_batches', None),
+        "pilot runtime gradient accumulation",
+    )
+    if runtime_accumulation != accumulation:
+        raise RuntimeError(
+            "pilot runtime gradient accumulation disagrees with the resolved config"
+        )
+    effective_global_examples = micro_batch_size * world_size * accumulation
+    configured_global_batch = _exact_positive_integer(
+        config.loader.get('global_batch_size'), "pilot configured global batch size"
+    )
+    if configured_global_batch != effective_global_examples:
+        raise RuntimeError(
+            "pilot configured global batch size does not equal micro-batch per rank "
+            "times world size times accumulation"
+        )
+    if config.get('data') != 'safe':
+        raise RuntimeError("pilot accounting requires the hosted SAFE training stream")
+
+    return {
+        "training_seed": training_seed,
+        "optimizer_updates": optimizer_updates,
+        "world_size": world_size,
+        "micro_batch_size_per_rank": micro_batch_size,
+        "accumulate_grad_batches": accumulation,
+        "effective_global_examples_per_optimizer_step": effective_global_examples,
+        "total_requested_example_exposures": (
+            effective_global_examples * optimizer_updates
+        ),
+        "hosted_stream_rank_partition_policy": (
+            _HOSTED_STREAM_RANK_PARTITION_POLICY
+        ),
+        "trainable_parameter_counts": _pilot_trainable_parameter_counts(model),
+    }
 
 
 def _pilot_streaming_partition(trainer):
@@ -717,16 +885,65 @@ def _validate_checkpoint_ema_matches_live(checkpoint_shadows, model):
     }
 
 
+def _validated_ema_metadata(ema_state, *, label, expected_updates):
+    shadows = ema_state.get("shadow_params")
+    if not isinstance(shadows, (list, tuple)) or not shadows:
+        raise RuntimeError(f"{label} has no EMA shadow tensors")
+    decay = ema_state.get("decay")
+    if isinstance(decay, bool) or not isinstance(decay, (int, float)):
+        raise RuntimeError(f"{label} EMA decay is not a real scalar")
+    decay = float(decay)
+    if not math.isfinite(decay) or not 0.0 < decay < 1.0:
+        raise RuntimeError(f"{label} EMA decay must be finite and in (0, 1)")
+    num_updates = ema_state.get("num_updates")
+    if type(num_updates) is not int or num_updates != expected_updates:
+        raise RuntimeError(
+            f"{label} EMA update count {num_updates!r}; expected {expected_updates}"
+        )
+    return {
+        "shadow_parameter_count": len(shadows),
+        "decay": decay,
+        "num_updates": num_updates,
+    }
+
+
 def _audit_pilot_checkpoint(path, *, expected_steps, model):
     """Load and semantically audit the exact stable checkpoint bytes."""
 
+    path = Path(os.path.abspath(os.fspath(path)))
     snapshot_before, _unused = _stable_file_snapshot(path)
     if snapshot_before["size_bytes"] <= 0:
         raise RuntimeError("pilot final checkpoint is empty")
-    try:
-        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
-    except Exception as error:
-        raise RuntimeError("pilot final checkpoint cannot be deserialized") from error
+    with verified_checkpoint_file(
+        path,
+        expected_sha256=snapshot_before["sha256"],
+    ) as (checkpoint_file, checkpoint_identity):
+        identity_snapshot = {
+            "path": str(path),
+            "device": checkpoint_identity.device,
+            "inode": checkpoint_identity.inode,
+            "mode": checkpoint_identity.mode,
+            "link_count": checkpoint_identity.link_count,
+            "size_bytes": checkpoint_identity.size_bytes,
+            "mtime_ns": checkpoint_identity.mtime_ns,
+            "ctime_ns": checkpoint_identity.ctime_ns,
+            "sha256": checkpoint_identity.sha256,
+            "stable_regular_file_verified": True,
+        }
+        if identity_snapshot != snapshot_before:
+            raise RuntimeError(
+                "pilot final checkpoint changed before descriptor-bound loading"
+            )
+        try:
+            checkpoint = torch.load(
+                checkpoint_file,
+                map_location="cpu",
+                weights_only=False,
+            )
+        except Exception as error:
+            raise RuntimeError(
+                "pilot final checkpoint cannot be deserialized"
+            ) from error
     snapshot_after, _unused = _stable_file_snapshot(path)
     if snapshot_after != snapshot_before:
         raise RuntimeError("pilot final checkpoint changed while it was audited")
@@ -761,6 +978,11 @@ def _audit_pilot_checkpoint(path, *, expected_steps, model):
         ),
         label="serialized checkpoint EMA state",
     )
+    ema_metadata = _validated_ema_metadata(
+        ema_state,
+        label="pilot checkpoint",
+        expected_updates=expected_steps,
+    )
     optimizer_states = checkpoint.get("optimizer_states")
     if not isinstance(optimizer_states, list) or not optimizer_states:
         raise RuntimeError("pilot checkpoint has no optimizer state")
@@ -780,11 +1002,24 @@ def _audit_pilot_checkpoint(path, *, expected_steps, model):
     live_ema_match = _validate_checkpoint_ema_matches_live(
         checkpoint_shadows, model
     )
+    live_ema = getattr(model, "ema", None)
+    live_ema_metadata = _validated_ema_metadata(
+        {
+            "shadow_params": getattr(live_ema, "shadow_params", None),
+            "decay": getattr(live_ema, "decay", None),
+            "num_updates": getattr(live_ema, "num_updates", None),
+        },
+        label="pilot live model",
+        expected_updates=expected_steps,
+    )
+    if live_ema_metadata != ema_metadata:
+        raise RuntimeError("pilot checkpoint EMA metadata disagrees with live model")
     return snapshot_before, {
         "deserialized": True,
         "global_step": checkpoint_step,
         "raw_model": raw_tensors,
         "ema": ema_tensors,
+        "ema_metadata": ema_metadata,
         "optimizer": optimizer_tensors,
         "all_checkpoint_tensors": all_tensors,
         "udlm_process_identity_verified": True,
@@ -820,6 +1055,7 @@ def _write_pilot_training_summary(
     preflight_record,
     startup_mode,
     warm_start_report,
+    train_dataloader=None,
 ):
     """Publish the sole rank-zero certificate that a pilot completed."""
 
@@ -832,8 +1068,12 @@ def _write_pilot_training_summary(
         raise RuntimeError("pilot global-zero process reports an invalid global rank")
     expected_steps = _PILOT_CONTRACT["expected_max_steps"]
     expected_world_size = _PILOT_CONTRACT["expected_world_size"]
-    observed_steps = getattr(trainer, 'global_step', None)
-    observed_world_size = getattr(trainer, 'world_size', None)
+    observed_steps = _exact_positive_integer(
+        getattr(trainer, 'global_step', None), "pilot completed global step"
+    )
+    observed_world_size = _exact_positive_integer(
+        getattr(trainer, 'world_size', None), "pilot completed world size"
+    )
     if observed_steps != expected_steps:
         raise RuntimeError(
             f"pilot stopped at global step {observed_steps!r}; expected {expected_steps}"
@@ -896,6 +1136,9 @@ def _write_pilot_training_summary(
         ((f"shadow_params[{index}]", tensor) for index, tensor in enumerate(shadows)),
         label="EMA state",
     )
+    training_accounting = _pilot_training_accounting(
+        config, trainer, model, train_dataloader
+    )
     checkpoint_snapshot, checkpoint_audit = _audit_pilot_checkpoint(
         _PILOT_CONTRACT["final_checkpoint_path"],
         expected_steps=expected_steps,
@@ -928,6 +1171,7 @@ def _write_pilot_training_summary(
             "global_step": observed_steps,
             "world_size": observed_world_size,
         },
+        "training_accounting": training_accounting,
         "training_health": training_health,
         "final_checkpoint": {
             **checkpoint_snapshot,
@@ -1025,6 +1269,7 @@ def train(config):
         preflight_record=pilot_preflight,
         startup_mode=startup_mode,
         warm_start_report=warm_start_report,
+        train_dataloader=train_dataloader,
     )
     
 

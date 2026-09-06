@@ -15,11 +15,13 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import io
 import json
 import math
 import os
 import re
 import statistics
+import stat
 import sys
 import tempfile
 from collections.abc import Mapping, Sequence
@@ -36,6 +38,7 @@ if str(REPOSITORY_ROOT) not in sys.path:
 # Importing the schema constants does not import any GPU or chemistry package.
 # Keeping one source of truth makes schema drift fail immediately.
 from scripts.exps.denovo.benchmark import (  # noqa: E402
+    AUDITED_BENCHMARK_REQUIRES_EMA,
     METRIC_INPUT_SCHEMA_VERSION,
     RAW_SAMPLE_FIELDS,
     RAW_SAMPLES_FILENAME,
@@ -56,12 +59,13 @@ from scripts.exps.denovo.benchmark import (  # noqa: E402
     benchmark_run_label,
     require_clean_pushed_source,
     tracked_source_file_provenance,
+    validate_inference_weights,
     validate_udlm_prior_metadata_record,
     validate_sampling_config,
 )
 
 
-REPORT_SCHEMA_VERSION = 5
+REPORT_SCHEMA_VERSION = 6
 EXPECTED_SEEDS = (0, 1, 2)
 EXPECTED_SAMPLES_PER_SEED = 1_000
 EXPECTED_GLOBAL_STEP = 50_000
@@ -79,6 +83,16 @@ PAPER_V1_SAMPLING_CONFIG = {
     "exclude_special_tokens": None,
     "prior_variant": None,
     "prior_metadata_sha256": None,
+}
+EXPECTED_MDLM_EMA_METADATA = {
+    "shadow_parameter_count": 202,
+    "decay": 0.9999,
+    "num_updates": 50_000,
+}
+EXPECTED_MDLM_INFERENCE_WEIGHTS = {
+    "source": "ema",
+    "ema_applied": True,
+    "ema": dict(EXPECTED_MDLM_EMA_METADATA),
 }
 EXPECTED_GENERATION_PROTOCOL = {
     "diffusion_type": "mdlm",
@@ -100,6 +114,7 @@ EXPECTED_GENERATION_PROTOCOL = {
     "released_safe_fix": True,
     "released_largest_component": "maximum SMILES string length",
     "strict_safe_fix": False,
+    "inference_weights": EXPECTED_MDLM_INFERENCE_WEIGHTS,
 }
 AGGREGATE_JSON_FILENAME = "aggregate.json"
 AGGREGATE_CSV_FILENAME = "aggregate.csv"
@@ -146,9 +161,11 @@ TRAINING_CONTEXT = {
         "size_bytes": EXPECTED_CHECKPOINT_SIZE_BYTES,
         "global_step": EXPECTED_GLOBAL_STEP,
         "ema": {
-            "finite_shadow_tensors": 202,
-            "num_updates": 50_000,
-            "decay": 0.9999,
+            "finite_shadow_tensors": EXPECTED_MDLM_EMA_METADATA[
+                "shadow_parameter_count"
+            ],
+            "num_updates": EXPECTED_MDLM_EMA_METADATA["num_updates"],
+            "decay": EXPECTED_MDLM_EMA_METADATA["decay"],
         },
     },
     "architecture": {
@@ -214,6 +231,65 @@ def _sha256_file(path: Path, chunk_size: int = 8 * 1024 * 1024) -> str:
         for chunk in iter(lambda: handle.read(chunk_size), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _stable_regular_file_bytes(path: Path, *, label: str) -> bytes:
+    """Retain one regular file's bytes while rejecting swaps and symlinks."""
+
+    try:
+        before_path = path.stat(follow_symlinks=False)
+    except OSError as error:
+        raise ReportValidationError(f"{label} is unavailable: {path}") from error
+    if not stat.S_ISREG(before_path.st_mode):
+        raise ReportValidationError(f"{label} is not a regular file: {path}")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise ReportValidationError(f"cannot safely open {label}: {path}") from error
+    chunks: list[bytes] = []
+    try:
+        before_fd = os.fstat(descriptor)
+        identity = (
+            before_fd.st_dev,
+            before_fd.st_ino,
+            before_fd.st_mode,
+            before_fd.st_size,
+            before_fd.st_mtime_ns,
+            before_fd.st_ctime_ns,
+        )
+        if not stat.S_ISREG(before_fd.st_mode) or (
+            before_path.st_dev,
+            before_path.st_ino,
+            before_path.st_mode,
+            before_path.st_size,
+            before_path.st_mtime_ns,
+            before_path.st_ctime_ns,
+        ) != identity:
+            raise ReportValidationError(f"{label} changed before open: {path}")
+        while True:
+            chunk = os.read(descriptor, 8 * 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        after_fd = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    try:
+        after_path = path.stat(follow_symlinks=False)
+    except OSError as error:
+        raise ReportValidationError(f"{label} disappeared while being read") from error
+    for observed in (after_fd, after_path):
+        if (
+            observed.st_dev,
+            observed.st_ino,
+            observed.st_mode,
+            observed.st_size,
+            observed.st_mtime_ns,
+            observed.st_ctime_ns,
+        ) != identity:
+            raise ReportValidationError(f"{label} changed while being read: {path}")
+    return b"".join(chunks)
 
 
 def _sha256_json(value: Any) -> str:
@@ -432,8 +508,13 @@ def discover_run_directories(runs_dir: Path) -> dict[int, Path]:
     return by_seed
 
 
-def _load_csv(path: Path) -> list[dict[str, str]]:
-    with path.open("r", encoding="utf-8", newline="") as handle:
+def _load_csv(path: Path) -> tuple[list[dict[str, str]], bytes]:
+    payload = _stable_regular_file_bytes(path, label="raw sample CSV")
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ReportValidationError(f"{path} is not UTF-8") from error
+    with io.StringIO(text, newline="") as handle:
         reader = csv.DictReader(handle)
         if tuple(reader.fieldnames or ()) != tuple(RAW_SAMPLE_FIELDS):
             raise ReportValidationError(
@@ -461,7 +542,7 @@ def _load_csv(path: Path) -> list[dict[str, str]]:
                 f"{path}: sample_index must be the ordered range 0..999; "
                 f"row {expected_index + 2} contains {record['sample_index']!r}"
             )
-    return records
+    return records, payload
 
 
 def _validate_branch_rows(
@@ -1610,12 +1691,21 @@ def _validate_generation_protocol(
     sampling: Mapping[str, Any],
     *,
     context: str,
-) -> None:
+) -> dict[str, Any]:
     expected_keys = set(EXPECTED_GENERATION_PROTOCOL)
     if set(protocol) != expected_keys:
         raise ReportValidationError(
             f"{context} fields must be exactly {sorted(expected_keys)}"
         )
+    try:
+        inference_weights = validate_inference_weights(
+            protocol.get("inference_weights"),
+            require_ema=AUDITED_BENCHMARK_REQUIRES_EMA,
+        )
+    except ValueError as exc:
+        raise ReportValidationError(
+            f"{context}.inference_weights is invalid: {exc}"
+        ) from exc
     diffusion_type = sampling["diffusion_type"]
     if protocol.get("diffusion_type") != diffusion_type:
         raise ReportValidationError(f"{context}.diffusion_type disagrees with config")
@@ -1665,6 +1755,12 @@ def _validate_generation_protocol(
                 f"{context} must record that UDLM ignores randomness"
             )
     else:
+        if inference_weights != EXPECTED_MDLM_INFERENCE_WEIGHTS:
+            raise ReportValidationError(
+                f"{context}.inference_weights does not match the audited 50k MDLM "
+                f"EMA state: expected {EXPECTED_MDLM_INFERENCE_WEIGHTS}, found "
+                f"{inference_weights}"
+            )
         if (
             protocol.get("num_steps") is not None
             or protocol.get("inference_eps") is not None
@@ -1694,6 +1790,7 @@ def _validate_generation_protocol(
             raise ReportValidationError(
                 f"{context}.{key}={protocol.get(key)!r}; expected {expected!r}"
             )
+    return inference_weights
 
 
 def _validate_summary_and_rows(
@@ -1702,8 +1799,13 @@ def _validate_summary_and_rows(
 ) -> dict[str, Any]:
     summary_path = run_dir / SUMMARY_FILENAME
     samples_path = run_dir / RAW_SAMPLES_FILENAME
+    summary_payload = _stable_regular_file_bytes(
+        summary_path, label="benchmark summary JSON"
+    )
     try:
-        summary_value = json.loads(summary_path.read_text(encoding="utf-8"))
+        summary_value = json.loads(summary_payload.decode("utf-8"))
+    except UnicodeDecodeError as exc:
+        raise ReportValidationError(f"summary is not UTF-8: {summary_path}") from exc
     except json.JSONDecodeError as exc:
         raise ReportValidationError(f"invalid JSON: {summary_path}") from exc
     summary = dict(_mapping(summary_value, str(summary_path)))
@@ -1983,7 +2085,7 @@ def _validate_summary_and_rows(
                 raise ReportValidationError(
                     f"categorical checkpoint/config prior identity is invalid: {exc}"
                 ) from exc
-    _validate_generation_protocol(
+    inference_weights = _validate_generation_protocol(
         generation_protocol,
         sampling,
         context=f"{summary_path}: run.generation_protocol",
@@ -2025,8 +2127,8 @@ def _validate_summary_and_rows(
             "evaluated checkpoint, 1000 samples, and logical cuda:0"
         )
 
-    records = _load_csv(samples_path)
-    raw_sha256 = _sha256_file(samples_path)
+    records, raw_payload = _load_csv(samples_path)
+    raw_sha256 = hashlib.sha256(raw_payload).hexdigest()
     artifacts = _mapping(summary["artifacts"], f"{summary_path}: artifacts")
     raw_artifact = _mapping(
         _required(artifacts, "raw_samples_csv", "artifacts"),
@@ -2246,7 +2348,7 @@ def _validate_summary_and_rows(
         "completed_at_utc": run["completed_at_utc"],
         "run_dir": str(run_dir.resolve()),
         "summary_path": str(summary_path.resolve()),
-        "summary_sha256": _sha256_file(summary_path),
+        "summary_sha256": hashlib.sha256(summary_payload).hexdigest(),
         "raw_samples_path": str(samples_path.resolve()),
         "raw_samples_sha256": raw_sha256,
         "summary": summary,
@@ -2262,6 +2364,7 @@ def _validate_summary_and_rows(
         "runner_sha256": runner_sha,
         "environment_signature": environment_signature,
         "launch_provenance": launch_provenance,
+        "inference_weights": inference_weights,
         "tokenizer": tokenizer,
         "implementation_inputs": {
             name: dict(_mapping(value, f"implementation_inputs.{name}"))
@@ -2339,6 +2442,10 @@ def _common_identity(
             raise ReportValidationError(
                 "metric-input artifact or TDC implementation fingerprints differ "
                 "across seeds; aggregation is forbidden"
+            )
+        if run["inference_weights"] != first["inference_weights"]:
+            raise ReportValidationError(
+                "inference-weight provenance differs across seeds; aggregation is forbidden"
             )
         if run["tokenizer"] != first["tokenizer"]:
             raise ReportValidationError(
@@ -2569,6 +2676,7 @@ def collect_report(runs_dir: Path) -> dict[str, Any]:
                     "runner_sha256": run["runner_sha256"],
                 },
                 "launch_provenance": run["launch_provenance"],
+                "inference_weights": run["inference_weights"],
             }
         )
 
@@ -2765,6 +2873,7 @@ def collect_report(runs_dir: Path) -> dict[str, Any]:
                 for run in runs
             ],
         },
+        "inference_weights": runs[0]["inference_weights"],
         "runner_sha256": runs[0]["runner_sha256"],
         "implementation_inputs": runs[0]["implementation_inputs"],
         "metric_inputs": runs[0]["metric_inputs"],
@@ -3290,6 +3399,8 @@ def render_pdf(payload: Mapping[str, Any], pdf_path: Path) -> None:
 
     checkpoint = payload["checkpoint"]
     comparison = payload["comparison_to_published_genmol_v1"]
+    inference_weights = payload["inference_weights"]
+    inference_ema = inference_weights["ema"]
     story: list[Any] = [
         Spacer(1, 11 * mm),
         Paragraph("AUDITABLE 3 x 1,000 DE NOVO EVALUATION", styles["kicker"]),
@@ -3550,6 +3661,13 @@ def render_pdf(payload: Mapping[str, Any], pdf_path: Path) -> None:
         ["SHA-256", checkpoint["sha256"]],
         ["Size", f"{checkpoint['size_bytes']:,} bytes"],
         ["Global step", f"{checkpoint['global_step']:,}"],
+        [
+            "Inference weights",
+            "EMA copied into the backbone before inference; "
+            f"{inference_ema['shadow_parameter_count']} validated shadow tensors; "
+            f"{inference_ema['num_updates']:,} updates; "
+            f"decay {inference_ema['decay']}",
+        ],
         [
             "Diffusion backend",
             checkpoint["diffusion_type"].upper(),
@@ -4026,6 +4144,11 @@ def write_report_bundle(
     pdf_path: Path,
     overwrite: bool = False,
 ) -> dict[str, Path]:
+    if payload.get("schema_version") != REPORT_SCHEMA_VERSION:
+        raise ReportValidationError(
+            "report payload schema_version="
+            f"{payload.get('schema_version')!r}; expected {REPORT_SCHEMA_VERSION}"
+        )
     expected_source_revision = _report_source_revision(payload)
     report_generator = _report_generator_provenance(expected_source_revision)
     payload["report_generator"] = report_generator

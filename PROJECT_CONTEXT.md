@@ -1,6 +1,6 @@
 # GenMol v2 project context
 
-Snapshot: 2026-09-06 05:29 Asia/Dubai. Recheck dynamic state, especially Git
+Snapshot: 2026-09-06 06:05 Asia/Dubai. Recheck dynamic state, especially Git
 status, logs, tmux sessions, and GPU occupancy, before acting.
 
 ## Active objective and safe workspace
@@ -12,13 +12,14 @@ status, logs, tmux sessions, and GPU occupancy, before acting.
   `/home/aidar.alimbayev/Documents/genmolv2/run_sources/udlm_genmol_worktree`
   on branch `codex/udlm-genmol`, not in the dirty main checkout. Preserve all
   unrelated and uncommitted work.
-- The clean pushed implementation revision that produced the prior-geometry
-  evidence is
-  `6b312750bcc8861d8ff423f959e44764d121c3b1`; before the prior-geometry
-  artifact and this documentation update were added, `HEAD` and
-  `origin/codex/udlm-genmol` were equal and the source worktree was clean. This
-  revision contains the hardened pilot-completion contract and the
-  prior-geometry audit implementation.
+- The current clean pushed pilot-source revision is
+  `a4120fd552bcc7dd56f4cc52c75ff36e4bf97a2f`; before this documentation
+  update, `HEAD` and `origin/codex/udlm-genmol` were equal and the source
+  worktree was clean. It contains the hardened completion contract plus the
+  pilot-only distributed-stream repair and scheduler isolation. The immutable
+  prior-geometry evidence remains correctly bound to its producing revision
+  `6b312750bcc8861d8ff423f959e44764d121c3b1`; do not relabel that artifact as
+  having been produced by the later source revision.
 - The matched categorical CPU panel was produced from pushed source revision
   `a9bb67c445da8cb3d4f7b6017c05f9b77896bf9b` and subsequently committed as
   `4cdfd90a6b3f633eac6bf8364bf405b279469063` without changing those source
@@ -115,11 +116,20 @@ summary, and source bindings. Missing, malformed, mismatched, or nonzero-status
 evidence makes the launcher fail. These pilot-only guards leave ordinary
 release/manual training defaults unchanged.
 
-At source revision `6b312750bcc8861d8ff423f959e44764d121c3b1`, the
-exact-worktree full test suite passed `487` tests with `10` dependency warnings,
-and `git diff --check` was clean. Independent compatibility review found no
-P0/P1 blocker in the
-Lightning 2.5.1 callback and checkpoint ordering. Remaining boundaries are the
+At source revision `a4120fd552bcc7dd56f4cc52c75ff36e4bf97a2f`, the
+exact-worktree full test suite passed `505` tests with `11` dependency warnings,
+and `git diff --check` was clean. The repaired pilot constructs the Trainer
+before its hosted dataloader, validates an exact single-node global rank and
+world size in every process, and uses Hugging Face node splitting so DDP
+ranks receive disjoint iterable-stream rows. One-rank and non-pilot calls retain
+the original dataset identity and released/manual behavior.
+
+Pilot DDP also passes an explicit Lightning `LightningEnvironment` to the
+strategy. It therefore self-spawns the selected local processes even if the
+shell inherits `SLURM_*`, LSF, JSM, or similar scheduler variables; generic
+distributed rank variables are separately removed from the launcher's child
+environment. Non-pilot training leaves `cluster_environment=None`, preserving
+Lightning's ordinary scheduler autodetection. Remaining boundaries are the
 trusted virtual-environment `.pth` files, a local upstream ref that is compared
 but not implicitly fetched, the host I/O cost of the post-fit checkpoint audit,
 and the unavoidable small interval between the final GPU probe and process
@@ -191,8 +201,10 @@ UDLM-over-GenMol superiority claim.
 ## GPU status and required next pilot
 
 No UDLM GPU job has been launched, and no GPU inventory or utilization probe
-has yet been run for the pending pilot. No stale snapshot should be treated as
-authorization or availability evidence.
+has yet been run for the pending pilot. No probe or job occurred while producing
+or reviewing revision `a4120fd552bcc7dd56f4cc52c75ff36e4bf97a2f` or this
+documentation update; its stream demonstration and validation are CPU-only.
+No stale snapshot should be treated as authorization or availability evidence.
 
 Before the first GPU launch, the user must select only the GPU count: one or
 two. Recommend **one GPU** for the first matched 10-step engineering gate; the
@@ -222,15 +234,25 @@ deviations from the papers and released code. Commit and push reviewed source
 and configurations before launching; do not let preliminary checkpoints or
 single stochastic runs become headline comparisons.
 
-## Immediate handoff sequence
+## Completed handoff items and immediate next sequence
 
-1. Validate, commit, and push the immutable prior-geometry artifact together
-   with this handoff and the Stage 20.7 notebook teaching update.
-2. Ask the user whether the first pilot should use one or two GPUs; recommend
+Completed prior items:
+
+- The immutable prior-geometry artifact, Stage 20.7 teaching update, and prior
+  context handoff were validated, committed, and pushed in `b049888`.
+- The pilot-only hosted-stream partition, strict rank contract, inherited
+  scheduler isolation, and their CPU tests were reviewed, committed, and pushed
+  in `a4120fd`.
+- The exact-worktree suite and diff check completed at that source revision:
+  `505 passed`, `11 warnings`, and a clean `git diff --check`.
+
+Remaining sequence:
+
+1. Ask the user whether the first pilot should use one or two GPUs; recommend
    one GPU for this first matched health gate.
-3. Only after that choice, perform the first fresh GPU inventory and exact-UUID
+2. Only after that choice, perform the first fresh GPU inventory and exact-UUID
    re-probe, then launch the matched 10-step `R/S/E` engineering pilot.
-4. Review its logs and artifacts before authorizing the next small training and
+3. Review its logs and artifacts before authorizing the next small training and
    32-sample stage.
-5. Update the final PDF only after the required controlled experiments and
+4. Update the final PDF only after the required controlled experiments and
    ablations exist; keep all caveats and paper comparisons explicit.

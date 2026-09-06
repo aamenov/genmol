@@ -1,0 +1,118 @@
+{
+  "schema_version": 1,
+  "protocol_id": "genmol_udlm_de_novo_superiority_v1",
+  "status": "frozen_before_gpu_pilots",
+  "primary_claim": "A locked UDLM checkpoint and sampling configuration beats the audited local GenMol MDLM checkpoint on the released-compatible de-novo metric gate.",
+  "baseline": {
+    "manifest_relative_path": "experiments/udlm/baselines/mdlm_50000.json",
+    "manifest_sha256": "6da46fc615dedbcca436da087a2c1e9145f5d110036e0c15bb431ded3c2e5539",
+    "checkpoint_sha256": "8d00aa47b02f64bf39ff6b0b2e786f213587366fc2c3d29712a00f3f84108dd6",
+    "metric_branch": "released_comparable",
+    "status": "audited_local_control_not_exact_paper_reproduction"
+  },
+  "final_operating_point": {
+    "candidate_diffusion_type": "udlm",
+    "generation_seeds": [
+      0,
+      1,
+      2
+    ],
+    "requested_samples_per_seed": 1000,
+    "seed_count": 3,
+    "total_requested_samples": 3000,
+    "nfe": 128,
+    "nfe_definition": "one full backbone forward evaluation per reverse step",
+    "inference_weights": "ema",
+    "metric_branch": "released_comparable",
+    "strict_diagnostic_branch_required": true
+  },
+  "selection_firewall": {
+    "pilot_seed_minimum_inclusive": 1000,
+    "final_seeds_forbidden_during_selection": true,
+    "candidate_ledger_required": true,
+    "candidate_ledger_must_disclose_all_pilot_attempts": true,
+    "candidate_lock_must_be_a_git_blob_at_benchmark_revision": true,
+    "candidate_must_be_selected_without_final_seed_results": true,
+    "selection_rule": "maximize_mean_released_quality_then_mean_released_diversity_then_lexicographically_smallest_attempt_id",
+    "checkpoint_selection_rule": "last_completed_optimizer_step",
+    "eligible_pilot_generation_seeds": [
+      1000,
+      1001
+    ],
+    "eligible_requested_samples_per_seed": 256,
+    "eligible_nfe": 128,
+    "eligible_metric_branch": "released_comparable",
+    "nonregistered_completed_pilots_are_disclosed_but_ineligible": true,
+    "final_attempts_per_seed": 1,
+    "final_retry_policy": "No selection, tuning, deletion, replacement, or retry based on a final-seed outcome; infrastructure failures remain disclosed and make the registered three-seed claim incomplete until separately adjudicated."
+  },
+  "point_estimate_gates": {
+    "validity": {
+      "comparison": "candidate_mean_greater_than_or_equal_to_baseline_mean",
+      "threshold": 1.0
+    },
+    "uniqueness": {
+      "comparison": "candidate_mean_greater_than_or_equal_to_baseline_mean",
+      "threshold": 0.9986666666666667
+    },
+    "quality": {
+      "comparison": "candidate_mean_strictly_greater_than_baseline_mean",
+      "threshold": 0.858
+    },
+    "diversity": {
+      "comparison": "candidate_mean_minus_baseline_mean_greater_than_or_equal_to_margin",
+      "margin": -0.005,
+      "threshold": 0.8180213192558725
+    }
+  },
+  "uncertainty_gates": {
+    "confidence_level_one_sided": 0.95,
+    "normal_quantile": 1.6448536269514722,
+    "validity": {
+      "method": "newcombe_wilson_method_10_independent_proportions",
+      "inputs": "pooled valid counts over pooled requested counts",
+      "candidate_minus_baseline_lower_bound_strictly_greater_than": -0.005
+    },
+    "uniqueness": {
+      "method": "welch_t_independent_seed_level_estimates",
+      "inputs": "three seed-level uniqueness fractions per method",
+      "candidate_minus_baseline_lower_bound_strictly_greater_than": -0.005
+    },
+    "quality": {
+      "method": "welch_t_independent_seed_level_estimates",
+      "inputs": "three seed-level quality fractions per method",
+      "candidate_minus_baseline_lower_bound_strictly_greater_than": 0.0
+    },
+    "diversity": {
+      "method": "welch_t_independent_seed_level_estimates",
+      "inputs": "three seed-level diversity scores per method",
+      "candidate_minus_baseline_lower_bound_strictly_greater_than": -0.005
+    },
+    "multiple_metric_decision": "intersection_union_all_four_point_gates_and_all_four_interval_gates_must_pass",
+    "forbidden_method": "row bootstrap that re-deduplicates resampled molecule identities"
+  },
+  "candidate_lock_requirements": {
+    "training_summary_and_successful_exit_receipt_hashes_required": true,
+    "runtime_config_resolved_config_and_training_argv_hashes_required": true,
+    "checkpoint_hash_size_step_and_ema_required": true,
+    "initialization_mode_and_checkpoint_hash_required": true,
+    "training_seed_updates_data_exposure_and_parameter_counts_required": true,
+    "sampling_config_and_config_hash_required": true,
+    "benchmark_runner_and_sampler_source_hashes_with_runtime_ema_application_required": true,
+    "full_implementation_and_metric_input_map_hashes_required": true,
+    "gate_and_report_source_hashes_plus_scipy_version_required": true,
+    "exact_final_output_directory_per_seed_required": true,
+    "candidate_ledger_hash_and_selection_rule_required": true,
+    "benchmark_revision_must_contain_exact_lock_and_ledger_blobs": true
+  },
+  "decision": {
+    "pass_condition": "Every point-estimate gate and every one-sided uncertainty gate passes for the one pre-locked candidate.",
+    "failure_condition": "Any failed or unverifiable gate, provenance binding, final operating-point requirement, or selection-firewall requirement prevents the superiority claim."
+  },
+  "claim_boundaries": {
+    "warm_start": "Passing supports only a locked operational MDLM-to-UDLM continuation-system claim on these molecular metrics. It does not isolate diffusion-method causality and is not an inference-speed claim.",
+    "scratch": "Passing supports a locked single-training-trajectory checkpoint comparison. One training seed does not establish population-level diffusion-method superiority.",
+    "method_only_requirement": "A causal method claim additionally requires a from-scratch matched training panel or an equal-extra-update MDLM continuation control under a separately frozen protocol.",
+    "uncertainty_limitation": "Welch intervals use only three generation seeds per method and condition on each locked checkpoint; they do not measure training-seed uncertainty."
+  }
+}

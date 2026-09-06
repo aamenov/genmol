@@ -23,6 +23,7 @@ import importlib
 import importlib.metadata
 import json
 import math
+import numbers
 import os
 import pickle
 import platform
@@ -47,11 +48,18 @@ for import_root in (REPO_ROOT, REPO_SRC):
         sys.path.remove(str(import_root))
     sys.path.insert(0, str(import_root))
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 TOKENIZER_REQUESTED_IDENTIFIER = "datamol-io/safe-gpt"
 RAW_SAMPLES_FILENAME = "raw_samples.csv"
 SUMMARY_FILENAME = "summary.json"
 LOCK_FILENAME = ".benchmark.lock"
+
+INFERENCE_WEIGHTS_FIELDS = frozenset({"source", "ema_applied", "ema"})
+EMA_INFERENCE_METADATA_FIELDS = frozenset(
+    {"shadow_parameter_count", "decay", "num_updates"}
+)
+INFERENCE_WEIGHT_SOURCES = frozenset({"ema", "raw_model"})
+AUDITED_BENCHMARK_REQUIRES_EMA = True
 
 UDLM_PRIOR_CHECKPOINT_KEY = "udlm_prior_metadata"
 UDLM_PRIOR_VARIANTS = frozenset(
@@ -225,6 +233,103 @@ RAW_SAMPLE_FIELDS = (
 
 class BenchmarkConfigurationError(ValueError):
     """Raised before model loading when a requested run is not well formed."""
+
+
+def validate_inference_weights(
+    value: Any,
+    *,
+    require_ema: bool = False,
+) -> dict[str, Any]:
+    """Validate and defensively copy a sampler inference-weight receipt."""
+    if not isinstance(value, Mapping):
+        raise BenchmarkConfigurationError("inference_weights must be a mapping")
+    if set(value) != INFERENCE_WEIGHTS_FIELDS:
+        raise BenchmarkConfigurationError(
+            "inference_weights fields must be exactly "
+            f"{sorted(INFERENCE_WEIGHTS_FIELDS)}"
+        )
+
+    source = value["source"]
+    ema_applied = value["ema_applied"]
+    ema_value = value["ema"]
+    if source not in INFERENCE_WEIGHT_SOURCES:
+        raise BenchmarkConfigurationError(
+            "inference_weights.source must be 'ema' or 'raw_model'"
+        )
+    if not isinstance(ema_applied, bool):
+        raise BenchmarkConfigurationError(
+            "inference_weights.ema_applied must be a boolean"
+        )
+
+    if source == "raw_model":
+        if ema_applied or ema_value is not None:
+            raise BenchmarkConfigurationError(
+                "raw_model inference weights require ema_applied=false and ema=null"
+            )
+        if require_ema:
+            raise BenchmarkConfigurationError(
+                "EMA inference weights were required, but raw model weights were selected"
+            )
+        return {"source": source, "ema_applied": False, "ema": None}
+
+    if ema_applied is not True or not isinstance(ema_value, Mapping):
+        raise BenchmarkConfigurationError(
+            "EMA inference weights require ema_applied=true and EMA metadata"
+        )
+    if set(ema_value) != EMA_INFERENCE_METADATA_FIELDS:
+        raise BenchmarkConfigurationError(
+            "inference_weights.ema fields must be exactly "
+            f"{sorted(EMA_INFERENCE_METADATA_FIELDS)}"
+        )
+
+    shadow_count = ema_value["shadow_parameter_count"]
+    if (
+        isinstance(shadow_count, bool)
+        or not isinstance(shadow_count, numbers.Integral)
+        or shadow_count <= 0
+    ):
+        raise BenchmarkConfigurationError(
+            "inference_weights.ema.shadow_parameter_count must be a positive integer"
+        )
+    decay = ema_value["decay"]
+    if isinstance(decay, bool) or not isinstance(decay, numbers.Real):
+        raise BenchmarkConfigurationError(
+            "inference_weights.ema.decay must be a real number"
+        )
+    decay = float(decay)
+    if not math.isfinite(decay) or not 0.0 <= decay <= 1.0:
+        raise BenchmarkConfigurationError(
+            "inference_weights.ema.decay must be finite and in [0, 1]"
+        )
+    num_updates = ema_value["num_updates"]
+    if num_updates is not None:
+        if (
+            isinstance(num_updates, bool)
+            or not isinstance(num_updates, numbers.Integral)
+            or num_updates < 0
+        ):
+            raise BenchmarkConfigurationError(
+                "inference_weights.ema.num_updates must be a non-negative integer or null"
+            )
+        num_updates = int(num_updates)
+    if require_ema and (num_updates is None or num_updates <= 0):
+        raise BenchmarkConfigurationError(
+            "required EMA inference weights must have a positive update count"
+        )
+    if require_ema and not 0.0 < decay < 1.0:
+        raise BenchmarkConfigurationError(
+            "required EMA inference weights must have decay strictly between 0 and 1"
+        )
+
+    return {
+        "source": "ema",
+        "ema_applied": True,
+        "ema": {
+            "shadow_parameter_count": int(shadow_count),
+            "decay": decay,
+            "num_updates": num_updates,
+        },
+    }
 
 
 @dataclass(frozen=True)
@@ -2546,6 +2651,11 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             str(checkpoint_path),
             expected_checkpoint_sha256=checkpoint_info["sha256"],
             length_distribution=implementation_snapshot.length_distribution,
+            require_ema=AUDITED_BENCHMARK_REQUIRES_EMA,
+        )
+        inference_weights = validate_inference_weights(
+            sampler.inference_weights,
+            require_ema=AUDITED_BENCHMARK_REQUIRES_EMA,
         )
         sampler.model.to(args.device)
         sampler.mdlm.to_device(sampler.model.device)
@@ -2639,6 +2749,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                     "released_safe_fix": True,
                     "released_largest_component": "maximum SMILES string length",
                     "strict_safe_fix": False,
+                    "inference_weights": inference_weights,
                 },
                 "command": [sys.executable, *sys.argv],
                 "seed_configuration": seed_info,

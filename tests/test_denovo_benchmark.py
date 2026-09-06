@@ -6,10 +6,15 @@ import json
 import pickle
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from scripts.exps.denovo import benchmark
+
+
+def test_benchmark_summary_schema_includes_mandatory_inference_weights() -> None:
+    assert benchmark.SCHEMA_VERSION == 7
 
 
 def _tiny_sa_artifact(root: Path) -> tuple[Path, str, int]:
@@ -1068,6 +1073,120 @@ def test_tokenizer_provenance_hashes_effective_vocabulary() -> None:
     assert provenance["resolved_commit_hash"] == "abc123"
     assert len(provenance["vocabulary_sha256"]) == 64
     assert len(provenance["backend_json_sha256"]) == 64
+
+
+def test_inference_weight_receipt_validation_and_required_ema() -> None:
+    assert benchmark.AUDITED_BENCHMARK_REQUIRES_EMA is True
+    ema_receipt = {
+        "source": "ema",
+        "ema_applied": True,
+        "ema": {
+            "shadow_parameter_count": 2,
+            "decay": 0.999,
+            "num_updates": 17,
+        },
+    }
+
+    validated = benchmark.validate_inference_weights(ema_receipt, require_ema=True)
+    assert validated == ema_receipt
+    assert validated is not ema_receipt
+    assert validated["ema"] is not ema_receipt["ema"]
+
+    raw_receipt = {"source": "raw_model", "ema_applied": False, "ema": None}
+    assert benchmark.validate_inference_weights(raw_receipt) == raw_receipt
+    with pytest.raises(benchmark.BenchmarkConfigurationError, match="were required"):
+        benchmark.validate_inference_weights(raw_receipt, require_ema=True)
+
+    zero_update = {
+        **ema_receipt,
+        "ema": {**ema_receipt["ema"], "num_updates": 0},
+    }
+    with pytest.raises(benchmark.BenchmarkConfigurationError, match="positive update"):
+        benchmark.validate_inference_weights(zero_update, require_ema=True)
+
+
+def test_sampler_load_copies_and_freezes_validated_ema(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    torch = pytest.importorskip("torch")
+    from genmol import sampler as sampler_module
+    from genmol.utils.ema import ExponentialMovingAverage
+
+    checkpoint_path = tmp_path / "synthetic.ckpt"
+    checkpoint_path.write_bytes(b"synthetic checkpoint bytes")
+    backbone = torch.nn.Linear(3, 2)
+    with torch.no_grad():
+        for parameter in backbone.parameters():
+            parameter.fill_(-1.0)
+    ema = ExponentialMovingAverage(backbone.parameters(), decay=0.9)
+    with torch.no_grad():
+        for shadow in ema.shadow_params:
+            shadow.fill_(2.0)
+    ema.num_updates = 11
+    model = SimpleNamespace(backbone=backbone, ema=ema)
+    monkeypatch.setattr(
+        sampler_module.GenMol,
+        "load_from_checkpoint",
+        staticmethod(lambda _checkpoint_file: model),
+    )
+
+    loaded = sampler_module.load_model_from_path(
+        checkpoint_path,
+        require_ema=True,
+    )
+    for parameter in loaded.backbone.parameters():
+        assert torch.equal(parameter, torch.full_like(parameter, 2.0))
+    assert loaded.inference_weights == {
+        "source": "ema",
+        "ema_applied": True,
+        "ema": {
+            "shadow_parameter_count": 2,
+            "decay": 0.9,
+            "num_updates": 11,
+        },
+    }
+    with pytest.raises(TypeError):
+        loaded.inference_weights["source"] = "raw_model"
+    with pytest.raises(TypeError):
+        loaded.inference_weights["ema"]["decay"] = 0.0
+
+    sampler = sampler_module.Sampler.__new__(sampler_module.Sampler)
+    sampler._inference_weights = loaded.inference_weights
+    public_receipt = sampler.inference_weights
+    public_receipt["ema"]["decay"] = 0.1
+    assert sampler.inference_weights["ema"]["decay"] == 0.9
+
+
+def test_sampler_preserves_raw_weights_unless_ema_is_required(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    torch = pytest.importorskip("torch")
+    from genmol import sampler as sampler_module
+
+    checkpoint_path = tmp_path / "synthetic.ckpt"
+    checkpoint_path.write_bytes(b"synthetic checkpoint bytes")
+    model = SimpleNamespace(backbone=torch.nn.Linear(2, 1), ema=None)
+    original = [parameter.detach().clone() for parameter in model.backbone.parameters()]
+    monkeypatch.setattr(
+        sampler_module.GenMol,
+        "load_from_checkpoint",
+        staticmethod(lambda _checkpoint_file: model),
+    )
+
+    loaded = sampler_module.load_model_from_path(checkpoint_path)
+    assert all(
+        torch.equal(before, after)
+        for before, after in zip(original, loaded.backbone.parameters())
+    )
+    assert dict(loaded.inference_weights) == {
+        "source": "raw_model",
+        "ema_applied": False,
+        "ema": None,
+    }
+    with pytest.raises(RuntimeError, match="checkpoint has no EMA"):
+        sampler_module.load_model_from_path(checkpoint_path, require_ema=True)
 
 
 def test_cli_requires_every_run_identity_field() -> None:

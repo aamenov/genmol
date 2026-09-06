@@ -22,8 +22,12 @@ from pathlib import Path
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-EXIT_STATUS_SCHEMA_VERSION = 1
+TRAINING_SUMMARY_SCHEMA_VERSION = 2
+EXIT_STATUS_SCHEMA_VERSION = 2
 INCOMPLETE_EXIT_STATUS = 97
+HOSTED_STREAM_RANK_PARTITION_POLICY = (
+    "huggingface_split_dataset_by_node_disjoint_rank_streams"
+)
 
 
 def _canonical_integer(value: str, *, label: str, minimum: int, maximum: int) -> int:
@@ -259,6 +263,27 @@ def _positive_integer_field(mapping: dict[str, object], key: str, *, label: str)
     return value
 
 
+def _nonnegative_integer_field(
+    mapping: dict[str, object], key: str, *, label: str
+) -> int:
+    value = mapping.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{label} must be a nonnegative integer")
+    return value
+
+
+def _require_exact_keys(
+    mapping: dict[str, object], expected: set[str], *, label: str
+) -> None:
+    observed = set(mapping)
+    if observed != expected:
+        missing = sorted(expected - observed)
+        unexpected = sorted(observed - expected)
+        raise ValueError(
+            f"{label} keys are invalid: missing={missing}, unexpected={unexpected}"
+        )
+
+
 def _sha256_field(mapping: dict[str, object], key: str, *, label: str) -> str:
     value = mapping.get(key)
     if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
@@ -425,9 +450,15 @@ def validate_training_summary(
     expected_world_size: int,
     expected_final_checkpoint_path: Path,
     expected_initialization_checkpoint_sha256: str | None,
+    resolved_training_config: object,
 ) -> dict[str, object]:
     """Validate the completion fields that bind the summary to this launch."""
 
+    if expected_schema_version != TRAINING_SUMMARY_SCHEMA_VERSION:
+        raise ValueError(
+            "unsupported training summary schema version "
+            f"{expected_schema_version!r}; expected {TRAINING_SUMMARY_SCHEMA_VERSION}"
+        )
     if not isinstance(summary, dict):
         raise ValueError("training summary root must be a JSON object")
     _exact_integer(
@@ -546,6 +577,163 @@ def validate_training_summary(
         label="observed world size",
     )
 
+    accounting = _required_mapping(
+        summary.get("training_accounting"), label="training accounting"
+    )
+    _require_exact_keys(
+        accounting,
+        {
+            "training_seed",
+            "optimizer_updates",
+            "world_size",
+            "micro_batch_size_per_rank",
+            "accumulate_grad_batches",
+            "effective_global_examples_per_optimizer_step",
+            "total_requested_example_exposures",
+            "hosted_stream_rank_partition_policy",
+            "trainable_parameter_counts",
+        },
+        label="training accounting",
+    )
+    training_seed = _nonnegative_integer_field(
+        accounting, "training_seed", label="accounting training seed"
+    )
+    optimizer_updates = _positive_integer_field(
+        accounting, "optimizer_updates", label="accounting optimizer updates"
+    )
+    accounting_world_size = _positive_integer_field(
+        accounting, "world_size", label="accounting world size"
+    )
+    micro_batch_size = _positive_integer_field(
+        accounting,
+        "micro_batch_size_per_rank",
+        label="accounting micro-batch size per rank",
+    )
+    accumulation = _positive_integer_field(
+        accounting,
+        "accumulate_grad_batches",
+        label="accounting gradient accumulation",
+    )
+    effective_global_examples = _positive_integer_field(
+        accounting,
+        "effective_global_examples_per_optimizer_step",
+        label="accounting effective global examples per optimizer step",
+    )
+    total_requested_exposures = _positive_integer_field(
+        accounting,
+        "total_requested_example_exposures",
+        label="accounting total requested example exposures",
+    )
+    _exact_integer(
+        optimizer_updates,
+        expected_max_steps,
+        label="accounting optimizer updates",
+    )
+    _exact_integer(
+        accounting_world_size,
+        expected_world_size,
+        label="accounting world size",
+    )
+    if effective_global_examples != (
+        micro_batch_size * accounting_world_size * accumulation
+    ):
+        raise ValueError(
+            "accounting effective global examples do not equal micro-batch per "
+            "rank times world size times accumulation"
+        )
+    if total_requested_exposures != effective_global_examples * optimizer_updates:
+        raise ValueError(
+            "accounting total requested example exposures do not equal effective "
+            "global examples times optimizer updates"
+        )
+    _exact_string(
+        accounting.get("hosted_stream_rank_partition_policy"),
+        HOSTED_STREAM_RANK_PARTITION_POLICY,
+        label="accounting hosted-stream rank partition policy",
+    )
+
+    parameter_counts = _required_mapping(
+        accounting.get("trainable_parameter_counts"),
+        label="accounting trainable parameter counts",
+    )
+    _require_exact_keys(
+        parameter_counts,
+        {"base_backbone", "time_conditioner", "total"},
+        label="accounting trainable parameter counts",
+    )
+    base_backbone = _positive_integer_field(
+        parameter_counts,
+        "base_backbone",
+        label="accounting base-backbone trainable parameter count",
+    )
+    time_conditioner = _positive_integer_field(
+        parameter_counts,
+        "time_conditioner",
+        label="accounting time-conditioner trainable parameter count",
+    )
+    total_trainable = _positive_integer_field(
+        parameter_counts,
+        "total",
+        label="accounting total trainable parameter count",
+    )
+    if total_trainable != base_backbone + time_conditioner:
+        raise ValueError("accounting trainable parameter counts do not add up")
+
+    resolved_config = _required_mapping(
+        resolved_training_config, label="resolved training config for accounting"
+    )
+    configured_seed = _nonnegative_integer_field(
+        resolved_config, "seed", label="configured training seed"
+    )
+    if training_seed != configured_seed:
+        raise ValueError("accounting training seed disagrees with resolved config")
+    if resolved_config.get("data") != "safe":
+        raise ValueError("accounting requires the hosted SAFE training stream")
+    trainer_config = _required_mapping(
+        resolved_config.get("trainer"), label="resolved trainer config"
+    )
+    loader_config = _required_mapping(
+        resolved_config.get("loader"), label="resolved loader config"
+    )
+    configured_updates = _positive_integer_field(
+        trainer_config, "max_steps", label="configured optimizer updates"
+    )
+    configured_devices = _positive_integer_field(
+        trainer_config, "devices", label="configured device count"
+    )
+    configured_nodes = _positive_integer_field(
+        trainer_config, "num_nodes", label="configured node count"
+    )
+    configured_accumulation = _positive_integer_field(
+        trainer_config,
+        "accumulate_grad_batches",
+        label="configured gradient accumulation",
+    )
+    configured_micro_batch = _positive_integer_field(
+        loader_config,
+        "batch_size",
+        label="configured micro-batch size per rank",
+    )
+    configured_global_batch = _positive_integer_field(
+        loader_config,
+        "global_batch_size",
+        label="configured global batch size",
+    )
+    if configured_updates != optimizer_updates:
+        raise ValueError("accounting optimizer updates disagree with resolved config")
+    if configured_nodes != 1:
+        raise ValueError("accounting hosted-stream policy requires one configured node")
+    if configured_devices * configured_nodes != accounting_world_size:
+        raise ValueError("accounting world size disagrees with resolved config")
+    if configured_micro_batch != micro_batch_size:
+        raise ValueError("accounting micro-batch size disagrees with resolved config")
+    if configured_accumulation != accumulation:
+        raise ValueError("accounting accumulation disagrees with resolved config")
+    if configured_global_batch != effective_global_examples:
+        raise ValueError(
+            "accounting effective global examples disagree with resolved global batch"
+        )
+
     health = _required_mapping(
         summary.get("training_health"), label="training health evidence"
     )
@@ -582,6 +770,8 @@ def validate_training_summary(
         raise ValueError("training loss-check count is below completed steps")
     if optimizer_step_checks != expected_max_steps:
         raise ValueError("optimizer-step check count disagrees with completed steps")
+    if optimizer_step_checks != optimizer_updates:
+        raise ValueError("optimizer-step checks disagree with training accounting")
     if gradient_tensors < optimizer_step_checks or gradient_elements < gradient_tensors:
         raise ValueError("training gradient observation counts are inconsistent")
 
@@ -636,7 +826,52 @@ def validate_training_summary(
         "exact_tensor_values",
         label="live-EMA exact-value flag",
     )
-    _positive_integer_field(live_ema, "tensor_count", label="live-EMA tensor count")
+    live_ema_tensor_count = _positive_integer_field(
+        live_ema, "tensor_count", label="live-EMA tensor count"
+    )
+
+    ema_metadata = _required_mapping(
+        semantic.get("ema_metadata"), label="checkpoint EMA metadata"
+    )
+    _require_exact_keys(
+        ema_metadata,
+        {"shadow_parameter_count", "decay", "num_updates"},
+        label="checkpoint EMA metadata",
+    )
+    shadow_parameter_count = _positive_integer_field(
+        ema_metadata,
+        "shadow_parameter_count",
+        label="checkpoint EMA shadow-parameter count",
+    )
+    if shadow_parameter_count != live_ema_tensor_count:
+        raise ValueError("checkpoint EMA metadata count disagrees with live EMA")
+    serialized_ema = _required_mapping(
+        semantic.get("ema"), label="serialized checkpoint EMA"
+    )
+    if serialized_ema.get("floating_tensor_count") != shadow_parameter_count:
+        raise ValueError("checkpoint EMA metadata count disagrees with serialized EMA")
+    decay = ema_metadata.get("decay")
+    if isinstance(decay, bool) or not isinstance(decay, (int, float)):
+        raise ValueError("checkpoint EMA decay must be a real number")
+    decay = float(decay)
+    if not math.isfinite(decay) or not 0.0 < decay < 1.0:
+        raise ValueError("checkpoint EMA decay must be finite and in (0, 1)")
+    _exact_integer(
+        ema_metadata.get("num_updates"),
+        expected_max_steps,
+        label="checkpoint EMA update count",
+    )
+    training_config = _required_mapping(
+        resolved_config.get("training"), label="resolved training configuration"
+    )
+    configured_decay = training_config.get("ema")
+    if (
+        isinstance(configured_decay, bool)
+        or not isinstance(configured_decay, (int, float))
+        or not math.isfinite(float(configured_decay))
+        or float(configured_decay) != decay
+    ):
+        raise ValueError("checkpoint EMA decay disagrees with resolved config")
 
     finiteness = _required_mapping(
         summary.get("tensor_finiteness"), label="live tensor finiteness evidence"
@@ -700,6 +935,8 @@ def validate_training_summary(
         "training_argv_sha256": expected_argv_sha256,
         "observed_global_step": expected_max_steps,
         "observed_world_size": expected_world_size,
+        "training_accounting": dict(accounting),
+        "ema_metadata": dict(ema_metadata),
         "final_checkpoint_path": str(expected_final_checkpoint_path),
         "final_checkpoint_sha256": final_checkpoint["sha256"],
         "startup_mode": startup_mode,
@@ -806,20 +1043,6 @@ def build_exit_receipt(args: argparse.Namespace) -> tuple[dict[str, object], int
         if not payload:
             raise ValueError("training summary is empty")
         parsed = strict_json_loads(payload)
-        bindings = validate_training_summary(
-            parsed,
-            summary_path=summary_path,
-            expected_schema_version=args.expected_summary_schema_version,
-            expected_source_revision=args.expected_source_revision,
-            expected_config_sha256=args.expected_config_sha256,
-            expected_argv_sha256=args.expected_argv_sha256,
-            expected_max_steps=args.expected_max_steps,
-            expected_world_size=args.expected_world_size,
-            expected_final_checkpoint_path=final_checkpoint_path,
-            expected_initialization_checkpoint_sha256=(
-                args.expected_initialization_checkpoint_sha256
-            ),
-        )
         if not isinstance(parsed, dict):
             raise ValueError("training summary root must be a JSON object")
         current_runtime, runtime_payload = stable_file_snapshot(
@@ -836,6 +1059,26 @@ def build_exit_receipt(args: argparse.Namespace) -> tuple[dict[str, object], int
         if not runtime_payload:
             raise ValueError("runtime config is empty")
         parsed_runtime = strict_json_loads(runtime_payload)
+        runtime_mapping = _required_mapping(
+            parsed_runtime, label="runtime config record"
+        )
+        bindings = validate_training_summary(
+            parsed,
+            summary_path=summary_path,
+            expected_schema_version=args.expected_summary_schema_version,
+            expected_source_revision=args.expected_source_revision,
+            expected_config_sha256=args.expected_config_sha256,
+            expected_argv_sha256=args.expected_argv_sha256,
+            expected_max_steps=args.expected_max_steps,
+            expected_world_size=args.expected_world_size,
+            expected_final_checkpoint_path=final_checkpoint_path,
+            expected_initialization_checkpoint_sha256=(
+                args.expected_initialization_checkpoint_sha256
+            ),
+            resolved_training_config=runtime_mapping.get(
+                "resolved_training_config"
+            ),
+        )
         expected_runtime_record_sha256 = parsed["runtime_config"]["record_sha256"]
         _exact_string(
             canonical_json_sha256(parsed_runtime),
@@ -963,8 +1206,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    if args.expected_summary_schema_version != 1:
-        raise ValueError("unsupported training summary schema version")
+    if args.expected_summary_schema_version != TRAINING_SUMMARY_SCHEMA_VERSION:
+        raise ValueError(
+            "unsupported training summary schema version "
+            f"{args.expected_summary_schema_version!r}; expected "
+            f"{TRAINING_SUMMARY_SCHEMA_VERSION}"
+        )
     if args.expected_world_size not in (1, 2):
         raise ValueError("expected world size must be 1 or 2")
     for label, digest in (

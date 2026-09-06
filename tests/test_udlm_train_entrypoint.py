@@ -170,11 +170,14 @@ def test_pilot_config_digest_is_checked_and_recorded_once(tmp_path, monkeypatch)
     checkpoint_dir = tmp_path / "checkpoints"
     config = OmegaConf.create(
         {
+            "data": "safe",
             "seed": 7,
+            "loader": {"global_batch_size": 16, "batch_size": 2},
             "trainer": {
                 "devices": 2,
                 "num_nodes": 1,
                 "max_steps": 10,
+                "accumulate_grad_batches": 4,
                 "detect_anomaly": True,
             },
             "callback": {
@@ -202,7 +205,7 @@ def test_pilot_config_digest_is_checked_and_recorded_once(tmp_path, monkeypatch)
         "GENMOL_TRAIN_RUNTIME_CONFIG_PATH": str(runtime_path),
         "expected_max_steps": 10,
         "expected_world_size": 2,
-        "summary_schema_version": 1,
+        "summary_schema_version": 2,
         "runtime_path": runtime_path,
         "summary_path": summary_path,
         "final_checkpoint_path": final_checkpoint_path,
@@ -244,7 +247,11 @@ def _completion_fixture(tmp_path, monkeypatch):
         {
             "global_step": 10,
             "state_dict": checkpoint_state,
-            "ema": {"shadow_params": checkpoint_ema},
+            "ema": {
+                "shadow_params": checkpoint_ema,
+                "decay": 0.9999,
+                "num_updates": 10,
+            },
             "optimizer_states": [
                 {
                     "state": {
@@ -262,11 +269,14 @@ def _completion_fixture(tmp_path, monkeypatch):
     argv = ["/repo/scripts/train.py", "seed=7"]
     config = OmegaConf.create(
         {
+            "data": "safe",
             "seed": 7,
+            "loader": {"global_batch_size": 16, "batch_size": 2},
             "trainer": {
                 "devices": 2,
                 "num_nodes": 1,
                 "max_steps": 10,
+                "accumulate_grad_batches": 4,
                 "detect_anomaly": True,
             },
             "callback": {
@@ -276,6 +286,7 @@ def _completion_fixture(tmp_path, monkeypatch):
                 "save_top_k": -1,
             },
             "training": {
+                "ema": 0.9999,
                 "pilot_fail_on_nonfinite_loss": True,
                 "init_from_mdlm_checkpoint": "/project/mdlm.ckpt",
                 "init_from_mdlm_checkpoint_sha256": "c" * 64,
@@ -320,11 +331,32 @@ def _completion_fixture(tmp_path, monkeypatch):
         global_rank=0,
         global_step=10,
         world_size=2,
+        num_nodes=1,
+        max_steps=10,
+        accumulate_grad_batches=4,
+        train_dataloader=SimpleNamespace(batch_size=2),
         callbacks=[health_callback],
     )
+    base_parameter = torch.nn.Parameter(torch.ones(3))
+    conditioner_parameter = torch.nn.Parameter(torch.ones(2))
+    backbone = SimpleNamespace(
+        named_parameters=lambda: [
+            ("base_weight", base_parameter),
+            ("time_conditioner.weight", conditioner_parameter),
+        ]
+    )
     model = SimpleNamespace(
+        backbone=backbone,
+        named_parameters=lambda: [
+            ("backbone.base_weight", base_parameter),
+            ("backbone.time_conditioner.weight", conditioner_parameter),
+        ],
         state_dict=lambda: {"weight": torch.tensor([1.0, -2.0])},
-        ema=SimpleNamespace(shadow_params=[torch.tensor([0.5, 3.0])]),
+        ema=SimpleNamespace(
+            shadow_params=[torch.tensor([0.5, 3.0])],
+            decay=0.9999,
+            num_updates=10,
+        ),
         _validate_udlm_prior_checkpoint=lambda checkpoint: None,
     )
     warm_start = {
@@ -401,6 +433,11 @@ def test_pilot_completion_summary_binds_and_verifies_every_artifact(
     assert checkpoint_audit["global_step"] == 10
     assert checkpoint_audit["raw_model"]["all_finite"] is True
     assert checkpoint_audit["ema"]["all_finite"] is True
+    assert checkpoint_audit["ema_metadata"] == {
+        "shadow_parameter_count": 1,
+        "decay": 0.9999,
+        "num_updates": 10,
+    }
     assert checkpoint_audit["optimizer"]["all_finite"] is True
     assert checkpoint_audit["all_checkpoint_tensors"]["all_finite"] is True
     assert checkpoint_audit["udlm_process_identity_verified"] is True
@@ -410,6 +447,23 @@ def test_pilot_completion_summary_binds_and_verifies_every_artifact(
         "global_rank": 0,
         "global_step": 10,
         "world_size": 2,
+    }
+    assert summary["training_accounting"] == {
+        "training_seed": 7,
+        "optimizer_updates": 10,
+        "world_size": 2,
+        "micro_batch_size_per_rank": 2,
+        "accumulate_grad_batches": 4,
+        "effective_global_examples_per_optimizer_step": 16,
+        "total_requested_example_exposures": 160,
+        "hosted_stream_rank_partition_policy": (
+            "huggingface_split_dataset_by_node_disjoint_rank_streams"
+        ),
+        "trainable_parameter_counts": {
+            "base_backbone": 3,
+            "time_conditioner": 2,
+            "total": 5,
+        },
     }
     assert summary["training_health"]["loss_checks"] == 10
     assert summary["training_health"]["optimizer_step_checks"] == 10
@@ -431,6 +485,61 @@ def test_pilot_completion_summary_binds_and_verifies_every_artifact(
             preflight_record=preflight,
             startup_mode="warm_start",
             warm_start_report=warm_start,
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("boolean_seed", "training seed"),
+        ("runtime_micro_batch", "micro-batch size disagrees"),
+        ("runtime_accumulation", "gradient accumulation disagrees"),
+        ("configured_global_batch", "does not equal micro-batch"),
+    ],
+)
+def test_pilot_training_accounting_rejects_type_or_config_mismatch(
+    tmp_path, monkeypatch, mutation, message
+):
+    config, _contract, _preflight, trainer, model, _warm_start = (
+        _completion_fixture(tmp_path, monkeypatch)
+    )
+    if mutation == "boolean_seed":
+        config.seed = True
+    elif mutation == "runtime_micro_batch":
+        trainer.train_dataloader.batch_size = 1
+    elif mutation == "runtime_accumulation":
+        trainer.accumulate_grad_batches = 3
+    elif mutation == "configured_global_batch":
+        config.loader.global_batch_size = 15
+
+    with pytest.raises(RuntimeError, match=message):
+        train_entrypoint._pilot_training_accounting(
+            config,
+            trainer,
+            model,
+            trainer.train_dataloader,
+        )
+
+
+def test_pilot_training_accounting_rejects_trainable_parameters_outside_backbone(
+    tmp_path, monkeypatch
+):
+    config, _contract, _preflight, trainer, model, _warm_start = (
+        _completion_fixture(tmp_path, monkeypatch)
+    )
+    outside_parameter = torch.nn.Parameter(torch.ones(1))
+    original_named_parameters = model.named_parameters
+    model.named_parameters = lambda: [
+        *original_named_parameters(),
+        ("outside_backbone", outside_parameter),
+    ]
+
+    with pytest.raises(RuntimeError, match="not exactly the backbone"):
+        train_entrypoint._pilot_training_accounting(
+            config,
+            trainer,
+            model,
+            trainer.train_dataloader,
         )
 
 
@@ -523,6 +632,44 @@ def test_pilot_completion_rejects_undecodable_checkpoint(tmp_path, monkeypatch):
         )
 
 
+def test_pilot_checkpoint_audit_rejects_path_swap_during_deserialization(
+    tmp_path, monkeypatch
+):
+    _config, contract, _preflight, _trainer, model, _warm_start = (
+        _completion_fixture(tmp_path, monkeypatch)
+    )
+    checkpoint_path = contract["final_checkpoint_path"]
+    displaced_path = tmp_path / "displaced.ckpt"
+    replacement_path = tmp_path / "replacement.ckpt"
+    replacement_path.write_bytes(checkpoint_path.read_bytes())
+    original_torch_load = torch.load
+    swapped = False
+
+    def swap_path_while_loading(checkpoint_file, *args, **kwargs):
+        nonlocal swapped
+        assert hasattr(checkpoint_file, "read")
+        checkpoint_path.rename(displaced_path)
+        replacement_path.rename(checkpoint_path)
+        swapped = True
+        return original_torch_load(checkpoint_file, *args, **kwargs)
+
+    monkeypatch.setattr(
+        train_entrypoint.torch,
+        "load",
+        swap_path_while_loading,
+    )
+    with pytest.raises(
+        RuntimeError,
+        match="identity changed during deserialization",
+    ):
+        train_entrypoint._audit_pilot_checkpoint(
+            checkpoint_path,
+            expected_steps=10,
+            model=model,
+        )
+    assert swapped is True
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
@@ -530,13 +677,30 @@ def test_pilot_completion_rejects_undecodable_checkpoint(tmp_path, monkeypatch):
         ("state_dict", {"weight": torch.tensor([float("nan"), -2.0])}, "non-finite"),
         (
             "ema",
-            {"shadow_params": [torch.tensor([float("inf")])]},
+            {
+                "shadow_params": [torch.tensor([float("inf")])],
+                "decay": 0.9999,
+                "num_updates": 10,
+            },
             "non-finite",
         ),
         (
             "ema",
-            {"shadow_params": [torch.tensor([0.5, 2.5])]},
+            {
+                "shadow_params": [torch.tensor([0.5, 2.5])],
+                "decay": 0.9999,
+                "num_updates": 10,
+            },
             "EMA tensor disagrees",
+        ),
+        (
+            "ema",
+            {
+                "shadow_params": [torch.tensor([0.5, 3.0])],
+                "decay": 0.9999,
+                "num_updates": 9,
+            },
+            "EMA update count",
         ),
         ("optimizer_states", [], "no optimizer state"),
     ],

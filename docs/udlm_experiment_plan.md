@@ -22,8 +22,33 @@ the same oracle-call budget.
 The registered final decision uses one-sided 95% intervals: quality's lower
 bound must exceed the MDLM control, diversity's lower delta bound must exceed
 `-0.005`, and validity/uniqueness deltas must exceed `-0.005`. Means and sample
-standard deviations remain paper-compatible summaries; molecule-level
-bootstrap intervals preserve seed strata and recompute diversity per resample.
+standard deviations remain paper-compatible summaries. Validity uses a pooled
+request-level Newcombe--Wilson method-10 interval for two independent
+proportions. Uniqueness, quality, and diversity use unpaired Welch intervals
+over the three seed-level estimates per method. A molecule-row bootstrap is
+forbidden: re-deduplicating resampled rows manufactures duplicates and does not
+represent the uncertainty of these nonlinear per-run set metrics.
+
+The frozen machine-readable protocol is
+`experiments/udlm/protocols/de_novo_superiority_v1.json`. Its decision is an
+intersection-union gate: all four point requirements and all four interval
+requirements must pass for one candidate that was locked before final seeds
+0, 1, and 2. The lock binds the completed training summary and exit receipt,
+EMA checkpoint, exact EMA shadow-tensor count/decay/update metadata,
+source/config/sampler/runner hashes, all disclosed pilot evidence, exact
+128-NFE sampling configuration, and one predeclared output directory per final
+seed. Training accounting records requested example exposure; it does not
+claim a content-token exposure count. Pilot selection may use only seeds at
+least 1000. The registered comparison that can make a candidate eligible uses
+generation seeds 1000 and 1001, 256 requested samples per seed, 128 NFE, and
+the released-compatible quality and diversity metrics. Smaller 32-sample or
+32/64-NFE runs remain disclosed engineering evidence but cannot enter the
+selection score. The machine-readable winner is the highest mean quality,
+then highest mean diversity, then lexicographically smallest attempt ID.
+Artifacts using benchmark-run schema 6, aggregate-report schema 5, or pilot
+training-summary/exit-receipt schema 1 are rejected: mandatory inference-weight,
+training-accounting, and EMA provenance begin at schemas 7, 6, and 2,
+respectively.
 
 ## Faithful baseline before hypotheses
 
@@ -83,13 +108,20 @@ Combining clean logits would not equal the UDLM paper's D-CFG rule.
 3. One verified-idle GPU, full-size BERT, 10 optimizer steps; check memory,
    throughput, checkpoint save/load, and no NaNs.
 4. Warm-start pilots at 100, 500, then 1,000 steps. Evaluate 32 samples first,
-   then 256 samples at 32/64 reverse steps. Retain a 128-step faithful control.
+   then use 32/64 reverse steps as speed diagnostics. A candidate becomes
+   selection-eligible only after the registered two-seed panel (seeds 1000 and
+   1001, 256 samples each, 128 NFE) is complete. All smaller or mismatched
+   panels remain disclosed but ineligible. Final seeds 0, 1, and 2 are
+   unavailable for tuning or candidate selection.
 5. Advance only a promising candidate to 2,000–5,000 steps. The user requests
    a count of one or two GPUs; immediately before each job, the launcher scans
    the full NVIDIA inventory, dynamically selects genuinely idle physical GPUs,
    re-probes their exact UUIDs, and maps them into the isolated process.
-6. Run three 1,000-sample seeds and update the benchmark PDF only after a pilot
-   clears the quality/diversity gate.
+6. Close and commit the complete pilot ledger, then commit and push one
+   candidate lock. Only that locked revision may run the three 1,000-sample
+   final seeds, once each in their predeclared directories at 128 NFE. Update
+   the benchmark PDF only after the raw-row reporter and registered superiority
+   gate both validate the result.
 
 The warm-start route is an operational sample-efficiency comparison: it uses
 the MDLM checkpoint's previous data exposure. A method-only claim additionally

@@ -20,11 +20,13 @@ os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 import warnings
 warnings.filterwarnings('ignore')
 
-import itertools
+import math
+import numbers
 import pickle
 import torch
 import random
 import safe as sf
+from types import MappingProxyType
 from rdkit import Chem
 from genmol.utils.utils_chem import safe_to_smiles, filter_by_substructure, mix_sequences, Slicer
 from genmol.utils.bracket_safe_converter import BracketSAFEConverter, bracketsafe2safe
@@ -35,16 +37,132 @@ from genmol.model import GenMol
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 
-def load_model_from_path(path, expected_checkpoint_sha256=None):
+def _inference_weights_receipt(source, ema_applied, ema):
+    """Return an immutable receipt for the weights installed in the backbone."""
+    frozen_ema = None if ema is None else MappingProxyType(dict(ema))
+    return MappingProxyType({
+        'source': source,
+        'ema_applied': ema_applied,
+        'ema': frozen_ema,
+    })
+
+
+def _copy_inference_weights_receipt(receipt):
+    """Return a JSON-serializable copy without exposing mutable internal state."""
+    ema = receipt['ema']
+    return {
+        'source': receipt['source'],
+        'ema_applied': receipt['ema_applied'],
+        'ema': None if ema is None else dict(ema),
+    }
+
+
+def _ema_metadata_and_parameters(model):
+    """Validate the EMA state against the trainable backbone parameters."""
+    parameters = list(model.backbone.parameters())
+    trainable_parameters = [
+        parameter for parameter in parameters if parameter.requires_grad
+    ]
+    shadow_parameters = list(model.ema.shadow_params)
+    if not trainable_parameters:
+        raise RuntimeError('Cannot apply EMA: the backbone has no trainable parameters')
+    if len(shadow_parameters) != len(trainable_parameters):
+        raise RuntimeError(
+            'Cannot apply EMA: shadow parameter count '
+            f'{len(shadow_parameters)} does not match trainable backbone parameter '
+            f'count {len(trainable_parameters)}'
+        )
+
+    for index, (shadow, parameter) in enumerate(
+        zip(shadow_parameters, trainable_parameters)
+    ):
+        if not isinstance(shadow, torch.Tensor):
+            raise RuntimeError(
+                f'Cannot apply EMA: shadow parameter {index} is not a tensor'
+            )
+        if shadow.shape != parameter.shape:
+            raise RuntimeError(
+                f'Cannot apply EMA: shadow parameter {index} has shape '
+                f'{tuple(shadow.shape)}, expected {tuple(parameter.shape)}'
+            )
+        if not torch.isfinite(shadow).all().item():
+            raise RuntimeError(
+                f'Cannot apply EMA: shadow parameter {index} contains non-finite values'
+            )
+
+    decay = model.ema.decay
+    if hasattr(decay, 'item'):
+        decay = decay.item()
+    if isinstance(decay, bool) or not isinstance(decay, numbers.Real):
+        raise RuntimeError('Cannot apply EMA: decay is not a real scalar')
+    decay = float(decay)
+    if not math.isfinite(decay) or not 0.0 <= decay <= 1.0:
+        raise RuntimeError('Cannot apply EMA: decay must be finite and in [0, 1]')
+
+    num_updates = model.ema.num_updates
+    if hasattr(num_updates, 'item'):
+        num_updates = num_updates.item()
+    if num_updates is not None:
+        if (
+            isinstance(num_updates, bool)
+            or not isinstance(num_updates, numbers.Integral)
+        ):
+            raise RuntimeError(
+                'Cannot apply EMA: num_updates must be a non-negative integer or null'
+            )
+        num_updates = int(num_updates)
+        if num_updates < 0:
+            raise RuntimeError('Cannot apply EMA: num_updates cannot be negative')
+
+    return parameters, trainable_parameters, shadow_parameters, {
+        'shadow_parameter_count': len(shadow_parameters),
+        'decay': decay,
+        'num_updates': num_updates,
+    }
+
+
+def load_model_from_path(
+    path,
+    expected_checkpoint_sha256=None,
+    *,
+    require_ema=False,
+):
     with verified_checkpoint_file(
         path,
         expected_sha256=expected_checkpoint_sha256,
     ) as (checkpoint_file, _identity):
         model = GenMol.load_from_checkpoint(checkpoint_file)
     model.backbone.eval()
-    if model.ema:
-        model.ema.store(itertools.chain(model.backbone.parameters()))
-        model.ema.copy_to(itertools.chain(model.backbone.parameters()))
+    if model.ema is None:
+        if require_ema:
+            raise RuntimeError(
+                'EMA inference weights were required, but the checkpoint has no EMA state'
+            )
+        receipt = _inference_weights_receipt('raw_model', False, None)
+    else:
+        (
+            parameters,
+            trainable_parameters,
+            shadow_parameters,
+            ema_metadata,
+        ) = _ema_metadata_and_parameters(model)
+        model.ema.store(iter(parameters))
+        model.ema.copy_to(iter(parameters))
+        for index, (shadow, parameter) in enumerate(
+            zip(shadow_parameters, trainable_parameters)
+        ):
+            expected = shadow.detach().to(
+                device=parameter.device,
+                dtype=parameter.dtype,
+            )
+            if not torch.equal(parameter.detach(), expected):
+                raise RuntimeError(
+                    f'EMA copy verification failed for backbone parameter {index}'
+                )
+        receipt = _inference_weights_receipt('ema', True, ema_metadata)
+    # Freeze the load-time fact. Sampler returns defensive plain-dict copies
+    # when callers need JSON serialization.
+    model.inference_weights = receipt
     return model
 
 
@@ -54,8 +172,15 @@ class Sampler:
         path,
         expected_checkpoint_sha256=None,
         length_distribution=None,
+        *,
+        require_ema=False,
     ):
-        self.model = load_model_from_path(path, expected_checkpoint_sha256)
+        self.model = load_model_from_path(
+            path,
+            expected_checkpoint_sha256,
+            require_ema=require_ema,
+        )
+        self._inference_weights = self.model.inference_weights
         self.slicer = Slicer()
         self.dot_index = self.model.tokenizer('.')['input_ids'][1]
         self.pad_index = self.model.tokenizer.pad_token_id
@@ -74,6 +199,11 @@ class Sampler:
             for value in self.length_distribution
         ):
             raise ValueError('length_distribution must be a nonempty integer sequence')
+
+    @property
+    def inference_weights(self):
+        """Describe the backbone weights selected before any inference call."""
+        return _copy_inference_weights_receipt(self._inference_weights)
         
     @torch.no_grad()
     def generate(
