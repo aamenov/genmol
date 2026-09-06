@@ -1,6 +1,6 @@
 # GenMol v2 project context
 
-Snapshot: 2026-09-06 10:35 Asia/Dubai. Recheck dynamic state, especially Git
+Snapshot: 2026-09-06 10:36 Asia/Dubai. Recheck dynamic state, especially Git
 status, logs, tmux sessions, and GPU occupancy, before acting.
 
 ## Active objective and safe workspace
@@ -13,12 +13,11 @@ status, logs, tmux sessions, and GPU occupancy, before acting.
   on branch `codex/udlm-genmol`, not in the dirty main checkout. Preserve all
   unrelated and uncommitted work.
 - The current reviewed implementation revision is clean and pushed at
-  `3be650e3a32a0bb9fd12c7cdc684cb38ec94d953`. It adds strict optimizer-step
+  `694d7e64039561f869841d1e95ea937bfda30cae`. It includes strict optimizer-step
   scheduler identity, prospective E-L0/E-L1 bundles, the warm-start-compatible
   A1 post-BERT FiLM conditioner, exact conditioning checkpoint identity,
-  constructor-RNG isolation plumbing, and their teaching/tests. The newer
-  CPU-only source tranche implements the registry preparer, registry-aware
-  launcher, evidence producers/collector, and independent verifier, but the
+  constructor-RNG isolation, the registry preparer and registry-aware launcher,
+  evidence producers/collector, independent verifier, teaching, and tests. The
   screen arms remain deliberately unauthorized until the user chooses a GPU
   count and the exact registry is frozen. The distinct source revision
   used to produce the immutable current-code MDLM rescore is
@@ -485,9 +484,10 @@ Completed prior items:
 - All six real-checkpoint R/S/E dry-run configurations were then re-resolved at
   `3be650e` for one and two GPUs. Their updated digests are recorded above; no
   project launch artifact, GPU probe, or tmux action occurred.
-- The current CPU-only optimization-screen tranche adds summary/receipt schema
-  4 state and staged-gradient attestations, the frozen FiLM topology and
-  initialization fixture, a strict screen verifier, initialization-audit and
+- Pushed revision `694d7e64039561f869841d1e95ea937bfda30cae` adds
+  summary/receipt schema 4 state and staged-gradient attestations, the frozen
+  FiLM topology, initialization fixture, strict screen verifier,
+  initialization-audit and
   evidence producers, a registry-controlled launcher, and the two-phase
   config/registry preparer. Its broad integration subset passed `270` tests;
   after integration and notebook regeneration the exact worktree full suite
