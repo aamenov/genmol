@@ -1,0 +1,96 @@
+{
+  "callback": {
+    "_target_": "lightning.pytorch.callbacks.ModelCheckpoint",
+    "auto_insert_metric_name": false,
+    "dirpath": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/udlm_genmol_worktree/output/udlm/screens/gpu1_conditioning_e_a0__e_l1/checkpoints",
+    "enable_version_counter": false,
+    "every_n_train_steps": 500,
+    "filename": "{step}",
+    "save_top_k": -1
+  },
+  "data": "safe",
+  "loader": {
+    "batch_size": 2,
+    "global_batch_size": 16,
+    "num_workers": 1,
+    "pin_memory": true
+  },
+  "model": {
+    "attention_probs_dropout_prob": 0.1,
+    "classifier_dropout": null,
+    "hidden_act": "gelu",
+    "hidden_dropout_prob": 0.1,
+    "hidden_size": 768,
+    "initializer_range": 0.02,
+    "intermediate_size": 3072,
+    "layer_norm_eps": 1e-12,
+    "max_position_embeddings": 256,
+    "model_type": "bert",
+    "num_attention_heads": 12,
+    "num_hidden_layers": 12,
+    "pad_token_id": 3,
+    "position_embedding_type": "absolute",
+    "torch_dtype": "float32",
+    "type_vocab_size": 2,
+    "use_cache": true,
+    "vocab_size": 1880
+  },
+  "noise": {
+    "type": "loglinear"
+  },
+  "optim": {
+    "beta1": 0.9,
+    "beta2": 0.999,
+    "eps": 1e-08,
+    "lr": 0.0003,
+    "scheduler": {
+      "decay_floor_lr": 3e-06,
+      "horizon_updates": 1000,
+      "name": "half_cosine_with_linear_warmup_and_floor",
+      "warmup_updates": 50
+    },
+    "weight_decay": 0
+  },
+  "seed": 17,
+  "trainer": {
+    "_target_": "lightning.Trainer",
+    "accelerator": "cuda",
+    "accumulate_grad_batches": 8,
+    "detect_anomaly": true,
+    "devices": 1,
+    "gradient_clip_val": 1.0,
+    "log_every_n_steps": 10,
+    "max_steps": 500,
+    "num_nodes": 1,
+    "precision": "bf16"
+  },
+  "training": {
+    "T": 0,
+    "antithetic_sampling": true,
+    "diffusion": "udlm",
+    "ema": 0.9999,
+    "global_mean_loss": true,
+    "init_from_mdlm_checkpoint": "/home/aidar.alimbayev/Documents/genmolv2/outputs/paper_v1/checkpoints/50000.ckpt",
+    "init_from_mdlm_checkpoint_sha256": "8d00aa47b02f64bf39ff6b0b2e786f213587366fc2c3d29712a00f3f84108dd6",
+    "init_from_mdlm_ema": true,
+    "pilot_fail_on_nonfinite_loss": true,
+    "reseed_after_model_initialization": true,
+    "sampling_eps": 0.001,
+    "udlm": {
+      "conditioning_variant": "additive",
+      "empirical_uniform_mix": 0.0002,
+      "exclude_special_tokens": false,
+      "inference_eps": 1e-05,
+      "noise_eps": 0.001,
+      "prior_variant": "empirical_frequency",
+      "sampling_steps": 128,
+      "time_embedding_size": 256,
+      "zero_init_conditioning": true
+    },
+    "use_bracket_safe": false
+  },
+  "wandb": {
+    "name": null,
+    "project": "genmol"
+  }
+}
