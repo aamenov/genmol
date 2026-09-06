@@ -3,7 +3,8 @@
 The production CLI starts from the three raw benchmark run directories, lets
 the existing de-novo reporter revalidate every row, verifies that the exact
 candidate lock was already committed at the benchmark revision, and writes one
-no-clobber decision record.  It is CPU-only and never loads a model checkpoint.
+no-clobber decision record.  It is CPU-only and stream-hashes, but never
+deserializes, model checkpoints.
 """
 
 from __future__ import annotations
@@ -33,9 +34,18 @@ from scripts.exps.denovo import report as denovo_report  # noqa: E402
 
 
 SCHEMA_VERSION = 1
-PROTOCOL_RELATIVE_PATH = Path("experiments/udlm/protocols/de_novo_superiority_v1.json")
-PROTOCOL_SHA256 = "d734e2771e94b54f3bdb2e86e6da496d855a3eb7a7bd07abbbcdfbf406ab4a20"
+PROTOCOL_RELATIVE_PATH = Path("experiments/udlm/protocols/de_novo_superiority_v2.json")
+PROTOCOL_SHA256 = "f845429dae7ca889c09aad3af7946d20a5a05c189d2a19ec5ad8da7fff075a66"
 PROTOCOL_CANONICAL_SHA256 = (
+    "b3b890ba19368e0caefda7a6ca9b082c9d7c2911ddd92eba1d83d1cf91408396"
+)
+PREVIOUS_PROTOCOL_RELATIVE_PATH = Path(
+    "experiments/udlm/protocols/de_novo_superiority_v1.json"
+)
+PREVIOUS_PROTOCOL_SHA256 = (
+    "d734e2771e94b54f3bdb2e86e6da496d855a3eb7a7bd07abbbcdfbf406ab4a20"
+)
+PREVIOUS_PROTOCOL_CANONICAL_SHA256 = (
     "3b36fc1df19d4fdce4e522b3f9963eb55a9a136575bab361362b114dae25f53d"
 )
 BASELINE_RELATIVE_PATH = Path("experiments/udlm/baselines/mdlm_50000.json")
@@ -49,26 +59,49 @@ BASELINE_RESCORE_SHA256 = (
 BASELINE_RESCORE_CANONICAL_SHA256 = (
     "5aaba90f1ee23a45591eeeb297d0392f36e7ef1ed034263e254f0ecad94c6e96"
 )
+DENOVO_RESCORE_RELATIVE_PATH = Path("scripts/udlm/rescore_denovo_run.py")
+DENOVO_RESCORE_DEPENDENCY_RELATIVE_PATH = Path("scripts/udlm/rescore_mdlm_baseline.py")
+DENOVO_LAUNCHER_RELATIVE_PATH = Path("scripts/exps/denovo/launch_benchmark.py")
+PILOT_EVIDENCE_WRITER_RELATIVE_PATH = Path("scripts/udlm/write_pilot_evidence.py")
 EXPECTED_BASELINE_RESCORE_SOURCE_REVISION = "74482c2742ab5ad15def122c809a6b4e403e94cf"
-EXPECTED_PROTOCOL_ID = "genmol_udlm_de_novo_superiority_v1"
+EXPECTED_PROTOCOL_ID = "genmol_udlm_de_novo_superiority_v2"
 EXPECTED_SEEDS = (0, 1, 2)
 EXPECTED_SAMPLES_PER_SEED = 1_000
 EXPECTED_NFE = 128
 EXPECTED_BASELINE_BENCHMARK_SCHEMA_VERSION = 7
 EXPECTED_BASELINE_REPORT_SCHEMA_VERSION = 6
 EXPECTED_BASELINE_RAW_SAMPLE_FIELD_COUNT = 21
+NUMERIC_RAW_SAMPLE_FIELDS = frozenset(
+    {"strict_qed", "strict_sa", "released_qed", "released_sa"}
+)
 EXPECTED_BASELINE_CHECKPOINT_SHA256 = (
     "8d00aa47b02f64bf39ff6b0b2e786f213587366fc2c3d29712a00f3f84108dd6"
 )
 HEX_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 HEX_GIT_REVISION = re.compile(r"[0-9a-f]{40}\Z")
+RUN_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}\Z")
 METRICS = ("validity", "uniqueness", "quality", "diversity")
-CANDIDATE_LEDGER_SCHEMA_VERSION = 1
-PILOT_EVIDENCE_SCHEMA_VERSION = 1
-LAUNCH_MANIFEST_SCHEMA_VERSION = 1
+CANDIDATE_LEDGER_SCHEMA_VERSION = 2
+CANDIDATE_LOCK_SCHEMA_VERSION = 2
+PILOT_EVIDENCE_SCHEMA_VERSION = 2
+PILOT_FAILURE_RECEIPT_SCHEMA_VERSION = 1
+PILOT_FAILURE_RECEIPT_KIND = "pilot_failure"
+LAUNCH_MANIFEST_SCHEMA_VERSION = 2
 RUNTIME_CONFIG_SCHEMA_VERSION = 2
 TRAINING_SUMMARY_SCHEMA_VERSION = 4
-PILOT_EXIT_STATUS_SCHEMA_VERSION = 4
+PILOT_EXIT_STATUS_SCHEMA_VERSION = 5
+PILOT_EMPIRICAL_UNIFORM_MIX = 0.0002
+PILOT_EMPIRICAL_UNIFORM_MIX_AUDIT = {
+    "relative_path": (
+        "experiments/udlm/prior_geometry/" "floor_selection_train_rows_10001_30000.json"
+    ),
+    "sha256": "02908dafaf589ca9a49e560aa1eab470a18d6bfe616b781164784c489f54a9f1",
+    "source_revision": "6424b323084358ea050ba22d7e13ef8d45962496",
+    "scope": "retrospective_training_only_engineering_selection",
+}
+PILOT_EMPIRICAL_UNIFORM_MIX_AUDIT_CANONICAL_SHA256 = (
+    "2435a36af83e88a1bb1d602e840bb6ae1e2a97963a48abf68606a37e6320694d"
+)
 MAX_SAFE_UTILIZATION_PERCENT = 10
 MIN_SAFE_FREE_MEMORY_MIB = 30_000
 REGISTERED_SELECTION_PILOT_SEEDS = (1000, 1001)
@@ -76,6 +109,7 @@ REGISTERED_SELECTION_SAMPLES_PER_SEED = 256
 REGISTERED_SELECTION_NFE = 128
 REGISTERED_SELECTION_METRIC_BRANCH = "released_comparable"
 NONREGISTERED_OPERATING_POINT_REASON = "engineering_or_nonregistered_operating_point"
+UNDEFINED_SELECTION_METRIC_REASON = "undefined_released_diversity_no_unique_molecules"
 FAILED_PILOT_REASON = "pilot_failed"
 CANDIDATE_SELECTION_RULE = (
     "maximize_mean_released_quality_then_mean_released_diversity_"
@@ -259,6 +293,16 @@ def _timestamp(value: object, label: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _utc_timestamp(value: object, label: str) -> datetime:
+    parsed = _timestamp(value, label)
+    if not isinstance(value, str):  # pragma: no cover - rejected by _timestamp
+        raise GateValidationError(f"{label} must be an ISO-8601 string")
+    original = datetime.fromisoformat(value)
+    if original.utcoffset() != timezone.utc.utcoffset(None):
+        raise GateValidationError(f"{label} must be expressed in UTC")
+    return parsed
+
+
 def _relative_path(value: object, label: str, *, suffix: str) -> Path:
     if not isinstance(value, str) or not value:
         raise GateValidationError(f"{label} must be a repository-relative path")
@@ -360,6 +404,108 @@ def _repository_artifact_bytes(relative_path: Path, *, label: str) -> bytes:
     return _stable_regular_file_bytes(path, label=label)
 
 
+def _stable_artifact_snapshot(
+    path: Path, *, allowed_root: Path, label: str
+) -> dict[str, Any]:
+    """Stream-hash one scoped artifact and retain its stable file identity."""
+
+    root = allowed_root.resolve(strict=True)
+    path = Path(os.path.abspath(path))
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as error:
+        raise GateValidationError(f"{label} is unavailable: {path}") from error
+    if resolved != path or root not in resolved.parents:
+        raise GateValidationError(f"{label} must not escape or traverse symlinks")
+    try:
+        before_path = path.stat(follow_symlinks=False)
+    except OSError as error:
+        raise GateValidationError(f"{label} is unavailable: {path}") from error
+    if not stat.S_ISREG(before_path.st_mode):
+        raise GateValidationError(f"{label} is not a regular file: {path}")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise GateValidationError(f"cannot safely open {label}: {path}") from error
+    digest = hashlib.sha256()
+    try:
+        before_fd = os.fstat(descriptor)
+        identity = (
+            before_fd.st_dev,
+            before_fd.st_ino,
+            before_fd.st_mode,
+            before_fd.st_nlink,
+            before_fd.st_size,
+            before_fd.st_mtime_ns,
+            before_fd.st_ctime_ns,
+        )
+        if (
+            not stat.S_ISREG(before_fd.st_mode)
+            or (
+                before_path.st_dev,
+                before_path.st_ino,
+                before_path.st_mode,
+                before_path.st_nlink,
+                before_path.st_size,
+                before_path.st_mtime_ns,
+                before_path.st_ctime_ns,
+            )
+            != identity
+        ):
+            raise GateValidationError(f"{label} changed before open: {path}")
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+        after_fd = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    after_path = path.stat(follow_symlinks=False)
+    for observed in (after_fd, after_path):
+        if (
+            observed.st_dev,
+            observed.st_ino,
+            observed.st_mode,
+            observed.st_nlink,
+            observed.st_size,
+            observed.st_mtime_ns,
+            observed.st_ctime_ns,
+        ) != identity:
+            raise GateValidationError(f"{label} changed while being read: {path}")
+    return {
+        "path": str(path),
+        "device": int(after_path.st_dev),
+        "inode": int(after_path.st_ino),
+        "mode": int(after_path.st_mode),
+        "link_count": int(after_path.st_nlink),
+        "size_bytes": int(after_path.st_size),
+        "mtime_ns": int(after_path.st_mtime_ns),
+        "ctime_ns": int(after_path.st_ctime_ns),
+        "sha256": digest.hexdigest(),
+        "stable_regular_file_verified": True,
+    }
+
+
+def _repository_artifact_snapshot(relative_path: Path, *, label: str) -> dict[str, Any]:
+    return _stable_artifact_snapshot(
+        REPOSITORY_ROOT / relative_path,
+        allowed_root=REPOSITORY_ROOT,
+        label=label,
+    )
+
+
+def _project_checkpoint_snapshot(path: Path, *, label: str) -> dict[str, Any]:
+    repository_root = Path(os.path.abspath(REPOSITORY_ROOT))
+    project_root = (
+        repository_root.parent.parent
+        if repository_root.parent.name == "run_sources"
+        else repository_root
+    )
+    return _stable_artifact_snapshot(path, allowed_root=project_root, label=label)
+
+
 def load_pinned_json(
     relative_path: Path, expected_sha256: str, *, label: str
 ) -> tuple[Mapping[str, Any], bytes]:
@@ -373,17 +519,125 @@ def load_pinned_json(
     return parsed, payload
 
 
+def validate_empirical_prior_floor_audit() -> dict[str, Any]:
+    """Live-read and validate the exact training-only floor-selection audit."""
+
+    relative_path = Path(PILOT_EMPIRICAL_UNIFORM_MIX_AUDIT["relative_path"])
+    audit, _payload = load_pinned_json(
+        relative_path,
+        PILOT_EMPIRICAL_UNIFORM_MIX_AUDIT["sha256"],
+        label="empirical-prior floor audit",
+    )
+    if (
+        canonical_json_sha256(audit)
+        != PILOT_EMPIRICAL_UNIFORM_MIX_AUDIT_CANONICAL_SHA256
+    ):
+        raise GateValidationError(
+            "empirical-prior floor audit canonical digest is unexpected"
+        )
+    if audit.get("schema_version") != 1:
+        raise GateValidationError(
+            "empirical-prior floor audit schema_version must equal 1"
+        )
+    if audit.get("purpose") != (
+        "CPU-only empirical-UDLM uniform-floor training-data audit"
+    ):
+        raise GateValidationError("empirical-prior floor audit purpose is unexpected")
+    if audit.get("claim_scope") != (
+        "This audit measures unigram fit on ordered SAFE training blocks. It does "
+        "not train a denoiser, generate or score molecules, rank generators, or "
+        "establish that UDLM beats GenMol."
+    ):
+        raise GateValidationError(
+            "empirical-prior floor audit claim scope is unexpected"
+        )
+    if dict(_mapping(audit.get("git"), "empirical-prior floor audit git")) != {
+        "commit": PILOT_EMPIRICAL_UNIFORM_MIX_AUDIT["source_revision"],
+        "dirty": False,
+        "upstream": PILOT_EMPIRICAL_UNIFORM_MIX_AUDIT["source_revision"],
+    }:
+        raise GateValidationError(
+            "empirical-prior floor audit source revision is unexpected"
+        )
+    if dict(
+        _mapping(audit.get("data_use"), "empirical-prior floor audit data use")
+    ) != {
+        "exploratory_rows": [10_001, 20_000],
+        "final_generation_seeds_or_metrics_used": False,
+        "formal_preregistration_before_data_access": False,
+        "prior_estimation_rows": [1, 10_000],
+        "retrospective_replication_rows": [20_001, 30_000],
+        "split": "training",
+    }:
+        raise GateValidationError(
+            "empirical-prior floor audit data-use scope is unexpected"
+        )
+    recommendation = _mapping(
+        audit.get("recommendation"), "empirical-prior floor audit recommendation"
+    )
+    if dict(recommendation) != {
+        "block_optima": [0.00016593802382907556, 0.00019334112119092408],
+        "both_block_optima_within_0_0001_to_0_0003": True,
+        "candidate_minus_current_nll_by_block": [
+            -0.00860566722454914,
+            -0.008485138280406979,
+        ],
+        "candidate_nll_strictly_better_than_current_on_both_blocks": True,
+        "candidate_uniform_mixture_weight": PILOT_EMPIRICAL_UNIFORM_MIX,
+        "current_uniform_mixture_weight": 0.01,
+        "qualification": (
+            "The rule was formalized after exploratory inspection of these "
+            "training blocks. It is suitable only as disclosed pilot "
+            "hyperparameter engineering and is not confirmatory "
+            "molecular-generation evidence."
+        ),
+        "recommended_uniform_mixture_weight": PILOT_EMPIRICAL_UNIFORM_MIX,
+        "selection_rule": (
+            "recommend 0.0002 only when both ordered-block continuous optima lie "
+            "in [0.0001, 0.0003], both blocks contain tokens absent from the "
+            "first-10000 prefix, and 0.0002 has lower unigram NLL than 0.01 on "
+            "both; otherwise retain 0.01"
+        ),
+        "status": "training_only_retrospective_engineering_recommendation",
+    }:
+        raise GateValidationError(
+            "empirical-prior floor audit recommendation is unexpected"
+        )
+    return {
+        "relative_path": relative_path.as_posix(),
+        "raw_sha256": PILOT_EMPIRICAL_UNIFORM_MIX_AUDIT["sha256"],
+        "canonical_sha256": PILOT_EMPIRICAL_UNIFORM_MIX_AUDIT_CANONICAL_SHA256,
+        "source_revision": PILOT_EMPIRICAL_UNIFORM_MIX_AUDIT["source_revision"],
+        "selection_scope": PILOT_EMPIRICAL_UNIFORM_MIX_AUDIT["scope"],
+        "empirical_uniform_mix": PILOT_EMPIRICAL_UNIFORM_MIX,
+    }
+
+
 def validate_protocol(protocol: Mapping[str, Any]) -> None:
     if canonical_json_sha256(protocol) != PROTOCOL_CANONICAL_SHA256:
         raise GateValidationError(
             "superiority protocol content is not the frozen value"
         )
-    if protocol.get("schema_version") != 1:
-        raise GateValidationError("protocol schema_version must equal 1")
+    if protocol.get("schema_version") != 2:
+        raise GateValidationError("protocol schema_version must equal 2")
     if protocol.get("protocol_id") != EXPECTED_PROTOCOL_ID:
         raise GateValidationError("unexpected superiority protocol ID")
     if protocol.get("status") != "frozen_before_gpu_pilots":
         raise GateValidationError("superiority protocol is not frozen")
+    amendment = _mapping(protocol.get("amends"), "protocol.amends")
+    if dict(amendment) != {
+        "relative_path": PREVIOUS_PROTOCOL_RELATIVE_PATH.as_posix(),
+        "raw_sha256": PREVIOUS_PROTOCOL_SHA256,
+        "canonical_sha256": PREVIOUS_PROTOCOL_CANONICAL_SHA256,
+        "reason": (
+            "Replace operator-only R-to-S-to-E ordering with launch-bound, "
+            "receipt-revalidated predecessor evidence and bind the audited "
+            "empirical-prior floor before any GPU pilot."
+        ),
+        "gpu_pilots_executed_before_amendment": False,
+        "scientific_decision_thresholds_changed": False,
+    }:
+        raise GateValidationError("superiority protocol amendment is unexpected")
     baseline = _mapping(protocol.get("baseline"), "protocol.baseline")
     if baseline.get("manifest_relative_path") != BASELINE_RELATIVE_PATH.as_posix():
         raise GateValidationError("protocol baseline path is unexpected")
@@ -500,6 +754,80 @@ def validate_protocol(protocol: Mapping[str, Any]) -> None:
         raise GateValidationError(
             "protocol accepted training artifact schemas are unexpected"
         )
+    if (
+        lock_requirements.get("candidate_lock_schema_version")
+        != CANDIDATE_LOCK_SCHEMA_VERSION
+    ):
+        raise GateValidationError("protocol candidate-lock schema is unexpected")
+    expected_selection_schemas = {
+        "candidate_ledger_schema_version": CANDIDATE_LEDGER_SCHEMA_VERSION,
+        "pilot_evidence_schema_version": PILOT_EVIDENCE_SCHEMA_VERSION,
+        "pilot_failure_receipt_schema_version": PILOT_FAILURE_RECEIPT_SCHEMA_VERSION,
+    }
+    for field, expected in expected_selection_schemas.items():
+        if lock_requirements.get(field) != expected:
+            raise GateValidationError(f"protocol {field} is unexpected")
+    for field in (
+        "matched_r_s_e_registered_order_and_receipt_gated_advancement_machine_enforced",
+        "predecessor_receipt_chain_is_machine_enforced_by_each_per_run_launch_manifest",
+        "predecessor_artifacts_revalidated_unchanged_before_successful_exit_receipt",
+        "predecessor_receipt_must_predate_successor_lock_and_gpu_probe",
+        "terminal_e_successful_exit_receipt_hash_and_full_chain_required",
+        "terminal_e_receipt_must_predate_candidate_lock",
+        "selected_candidate_receipt_must_predate_candidate_lock",
+        "selected_candidate_receipt_must_be_exact_member_of_terminal_r_s_e_chain",
+        "terminal_e_and_selected_candidate_must_share_matched_panel",
+        "candidate_ledger_winner_checkpoint_must_equal_locked_training_checkpoint",
+        "per_seed_success_failure_outcomes_and_partial_failure_retention_required",
+        "completed_pilot_summary_raw_receipt_hashes_required",
+        "completed_pilot_training_receipt_full_validation_required",
+        "pilot_quality_diversity_independently_recomputed_from_raw_model_text",
+        "producer_authored_failure_receipt_command_source_log_and_partial_hashes_required",
+        "pilot_failure_receipt_mode_and_requested_samples_required",
+        "all_pilot_outcomes_must_predate_lock_and_source_revisions_be_ancestors",
+        "selected_pilot_checkpoint_config_sampling_ema_source_metric_and_receipt_identity_must_equal_lock",
+        "final_candidate_qed_sa_diversity_independently_recomputed_from_raw_model_text",
+        "independent_rescore_source_and_dependency_hashes_required",
+        "gate_report_rescore_launcher_writer_source_hashes_plus_scipy_version_required",
+    ):
+        if lock_requirements.get(field) is not True:
+            raise GateValidationError(f"protocol {field} must be true")
+    expected_floor = {
+        "empirical_uniform_mix": PILOT_EMPIRICAL_UNIFORM_MIX,
+        "consumed_only_by_prior_variant": "empirical_frequency",
+        "audit_relative_path": PILOT_EMPIRICAL_UNIFORM_MIX_AUDIT["relative_path"],
+        "audit_raw_sha256": PILOT_EMPIRICAL_UNIFORM_MIX_AUDIT["sha256"],
+        "audit_source_revision": PILOT_EMPIRICAL_UNIFORM_MIX_AUDIT["source_revision"],
+        "selection_scope": PILOT_EMPIRICAL_UNIFORM_MIX_AUDIT["scope"],
+    }
+    if lock_requirements.get("audited_empirical_prior_floor") != expected_floor:
+        raise GateValidationError(
+            "protocol audited empirical-prior floor is unexpected"
+        )
+    validate_empirical_prior_floor_audit()
+    previous_protocol, _previous_payload = load_pinned_json(
+        PREVIOUS_PROTOCOL_RELATIVE_PATH,
+        PREVIOUS_PROTOCOL_SHA256,
+        label="previous superiority protocol",
+    )
+    if canonical_json_sha256(previous_protocol) != PREVIOUS_PROTOCOL_CANONICAL_SHA256:
+        raise GateValidationError(
+            "previous superiority protocol canonical digest is unexpected"
+        )
+    for field in (
+        "primary_claim",
+        "baseline",
+        "final_operating_point",
+        "selection_firewall",
+        "point_estimate_gates",
+        "uncertainty_gates",
+        "decision",
+        "claim_boundaries",
+    ):
+        if protocol.get(field) != previous_protocol.get(field):
+            raise GateValidationError(
+                f"v2 unexpectedly changes scientific protocol field {field}"
+            )
 
 
 def _sample_sd(values: Sequence[float]) -> float:
@@ -1369,8 +1697,11 @@ def validate_candidate_lock(
         },
         "candidate lock",
     )
-    if candidate_lock.get("schema_version") != 1:
-        raise GateValidationError("candidate lock schema_version must equal 1")
+    if candidate_lock.get("schema_version") != CANDIDATE_LOCK_SCHEMA_VERSION:
+        raise GateValidationError(
+            "candidate lock schema_version must equal "
+            f"{CANDIDATE_LOCK_SCHEMA_VERSION}"
+        )
     candidate_id = candidate_lock.get("candidate_id")
     if (
         not isinstance(candidate_id, str)
@@ -1393,6 +1724,7 @@ def validate_candidate_lock(
         selection,
         {
             "candidate_ledger",
+            "terminal_e_exit_receipt",
             "selection_rule",
             "checkpoint_selection_rule",
             "all_pilot_attempts_disclosed",
@@ -1425,6 +1757,24 @@ def validate_candidate_lock(
     )
     if ledger["schema_version"] != CANDIDATE_LEDGER_SCHEMA_VERSION:
         raise GateValidationError("candidate ledger schema version is unsupported")
+    terminal_e_receipt = _artifact_reference(
+        selection.get("terminal_e_exit_receipt"),
+        label="terminal E exit receipt",
+        suffix=".json",
+        require_schema=True,
+    )
+    if terminal_e_receipt["schema_version"] != PILOT_EXIT_STATUS_SCHEMA_VERSION:
+        raise GateValidationError("terminal E exit receipt schema is unsupported")
+    terminal_parts = terminal_e_receipt["relative_path"].parts
+    if (
+        len(terminal_parts) != 4
+        or terminal_parts[:2] != ("output", "udlm")
+        or RUN_NAME_PATTERN.fullmatch(terminal_parts[2]) is None
+        or terminal_parts[3] != "pilot_exit_status.json"
+    ):
+        raise GateValidationError(
+            "terminal E exit receipt must be output/udlm/<run>/pilot_exit_status.json"
+        )
 
     training = _mapping(candidate_lock.get("training"), "candidate training")
     _exact_keys(
@@ -1563,7 +1913,15 @@ def validate_candidate_lock(
     analysis = _mapping(candidate_lock.get("analysis"), "candidate analysis")
     _exact_keys(
         analysis,
-        {"gate_source_sha256", "report_source_sha256", "scipy_version"},
+        {
+            "gate_source_sha256",
+            "report_source_sha256",
+            "rescore_source_sha256",
+            "rescore_dependency_sha256",
+            "benchmark_launcher_source_sha256",
+            "pilot_evidence_writer_source_sha256",
+            "scipy_version",
+        },
         "candidate analysis",
     )
     gate_source_sha = _sha256(
@@ -1571,6 +1929,22 @@ def validate_candidate_lock(
     )
     report_source_sha = _sha256(
         analysis.get("report_source_sha256"), "de-novo report source digest"
+    )
+    rescore_source_sha = _sha256(
+        analysis.get("rescore_source_sha256"),
+        "independent de-novo rescore source digest",
+    )
+    rescore_dependency_sha = _sha256(
+        analysis.get("rescore_dependency_sha256"),
+        "independent de-novo rescore dependency digest",
+    )
+    benchmark_launcher_source_sha = _sha256(
+        analysis.get("benchmark_launcher_source_sha256"),
+        "de-novo benchmark launcher source digest",
+    )
+    pilot_evidence_writer_source_sha = _sha256(
+        analysis.get("pilot_evidence_writer_source_sha256"),
+        "pilot evidence writer source digest",
     )
     scipy_version = analysis.get("scipy_version")
     if not isinstance(scipy_version, str) or not scipy_version.strip():
@@ -1724,6 +2098,7 @@ def validate_candidate_lock(
         "locked_at": locked_at,
         "source_revision": source_revision,
         "ledger": ledger,
+        "terminal_e_receipt": terminal_e_receipt,
         "selection_rule": selection["selection_rule"],
         "checkpoint_selection_rule": selection["checkpoint_selection_rule"],
         "summary": summary_ref,
@@ -1766,6 +2141,10 @@ def validate_candidate_lock(
         "final_run_directories": final_directories,
         "gate_source_sha256": gate_source_sha,
         "report_source_sha256": report_source_sha,
+        "rescore_source_sha256": rescore_source_sha,
+        "rescore_dependency_sha256": rescore_dependency_sha,
+        "benchmark_launcher_source_sha256": benchmark_launcher_source_sha,
+        "pilot_evidence_writer_source_sha256": pilot_evidence_writer_source_sha,
         "scipy_version": scipy_version,
         "claim_scope": candidate_lock["claim_scope"],
     }
@@ -1834,6 +2213,7 @@ _LAUNCH_MANIFEST_KEYS = {
     "matched_panel_spec",
     "matched_panel_spec_sha256",
     "matched_panel_variant_position",
+    "predecessor_receipt_binding",
     "single_training_job_lock",
     "tmux_session",
     "user_requested_gpu_count",
@@ -1884,10 +2264,259 @@ _GPU_STATE_KEYS = {
     "compute_mode",
     "compute_processes",
 }
+_PREDECESSOR_BINDING_KEYS = {
+    "schema_version",
+    "state",
+    "current_training_variant",
+    "current_variant_position",
+    "expected_predecessor_training_variant",
+    "expected_predecessor_variant_position",
+    "matched_panel_spec_sha256",
+    "common_training_contract_sha256",
+    "receipt_artifact",
+    "predecessor_launch_manifest_artifact",
+    "predecessor_training_summary_artifact",
+    "predecessor_run_name",
+    "chronology",
+    "validated_before_gpu_probe",
+}
+_PREDECESSOR_CHRONOLOGY_KEYS = {
+    "predecessor_launch_manifest_created_at_utc",
+    "predecessor_training_summary_completed_at_utc",
+    "predecessor_exit_receipt_recorded_at_utc",
+    "strictly_ordered_timestamps_verified",
+}
+_RUNTIME_CONFIG_KEYS = {
+    "schema_version",
+    "status",
+    "source_revision",
+    "source",
+    "training_argv",
+    "observed_training_argv",
+    "training_argv_sha256",
+    "resolved_training_config",
+    "resolved_training_config_sha256",
+    "launch_manifest",
+    "completion_contract",
+    "python_environment",
+}
+_TRAINING_SUMMARY_KEYS = {
+    "schema_version",
+    "status",
+    "completed_at_utc",
+    "source_revision",
+    "source",
+    "resolved_training_config_sha256",
+    "training_argv_sha256",
+    "launch_manifest",
+    "runtime_config",
+    "completion_contract",
+    "observed_training_state",
+    "training_accounting",
+    "training_health",
+    "conditioning_gradient_audit",
+    "screen_initialization_state_audit",
+    "final_checkpoint",
+    "tensor_finiteness",
+    "startup",
+}
+_PILOT_EXIT_STATUS_KEYS = {
+    "schema_version",
+    "status",
+    "overall_status",
+    "recorded_at_utc",
+    "process_exit_status",
+    "expected_contract",
+    "pipeline",
+    "source_at_receipt",
+    "launch_manifest",
+    "predecessor_receipt_binding",
+    "training_job_lock",
+    "training_summary",
+    "runtime_config",
+    "final_checkpoint",
+    "completion_requirements",
+}
+_PIPELINE_COMPONENT_KEYS = {
+    "shell_exit_status",
+    "succeeded",
+    "possible_termination_signal",
+    "shell_status_is_signal_compatible",
+    "signal_provenance",
+}
+_MATCHED_PANEL_VARIANT_ORDER = (
+    "udlm",
+    "schedule_uniform",
+    "udlm_categorical",
+)
+
+
+def _validate_successful_pipeline(value: object, *, label: str) -> None:
+    pipeline = _mapping(value, label)
+    _exact_keys(
+        pipeline,
+        {"training", "tee", "pipefail_shell_exit_status"},
+        label,
+    )
+    pipefail_status = _integer(
+        pipeline.get("pipefail_shell_exit_status"),
+        f"{label} pipefail shell exit status",
+    )
+    if pipefail_status != 0:
+        raise GateValidationError(f"{label} did not exit cleanly")
+    expected_component = {
+        "shell_exit_status": 0,
+        "succeeded": True,
+        "possible_termination_signal": None,
+        "shell_status_is_signal_compatible": False,
+        "signal_provenance": None,
+    }
+    for component_name in ("training", "tee"):
+        component_label = f"{label} {component_name} component"
+        component = _mapping(pipeline.get(component_name), component_label)
+        _exact_keys(component, _PIPELINE_COMPONENT_KEYS, component_label)
+        if dict(component) != expected_component:
+            raise GateValidationError(f"{component_label} is not successful")
+
+
+def _validate_receipt_source(
+    value: object, *, expected_revision: str, label: str
+) -> None:
+    source = _mapping(value, label)
+    expected = {
+        "verified": True,
+        "expected_revision": expected_revision,
+        "head": expected_revision,
+        "upstream": expected_revision,
+        "output_directory_excluded_from_cleanliness_check": True,
+    }
+    _exact_keys(source, set(expected), label)
+    if dict(source) != expected:
+        raise GateValidationError(f"{label} is invalid")
+
+
+def _validate_training_source(
+    value: object, *, expected_revision: str, label: str
+) -> None:
+    source = _mapping(value, label)
+    expected = {"head": expected_revision, "upstream": expected_revision}
+    _exact_keys(source, set(expected), label)
+    if dict(source) != expected:
+        raise GateValidationError(f"{label} is invalid")
+
+
+def _validate_python_environment(value: object, *, seed: int, label: str) -> None:
+    environment = _mapping(value, label)
+    expected = {
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONHASHSEED": str(seed),
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONOPTIMIZE": "0",
+        "PYTHONPATH": os.pathsep.join(
+            [str(REPOSITORY_ROOT / "src"), str(REPOSITORY_ROOT)]
+        ),
+        "PYTHONUTF8": "1",
+    }
+    _exact_keys(environment, set(expected), label)
+    if dict(environment) != expected:
+        raise GateValidationError(f"{label} is invalid")
+
+
+def _validate_finiteness_record(value: object, *, label: str) -> None:
+    record = _mapping(value, label)
+    _exact_keys(
+        record,
+        {"all_finite", "floating_tensor_count", "floating_element_count"},
+        label,
+    )
+    _required_true(record.get("all_finite"), f"{label} all-finite flag")
+    tensor_count = _integer(
+        record.get("floating_tensor_count"), f"{label} tensor count", minimum=1
+    )
+    element_count = _integer(
+        record.get("floating_element_count"), f"{label} element count", minimum=1
+    )
+    if element_count < tensor_count:
+        raise GateValidationError(f"{label} has fewer elements than tensors")
+
+
+def _validate_training_health(value: object, *, optimizer_updates: int) -> None:
+    health = _mapping(value, "training health")
+    _exact_keys(
+        health,
+        {
+            "scope",
+            "all_losses_finite",
+            "all_observed_gradients_finite",
+            "every_optimizer_step_had_a_nonzero_gradient",
+            "loss_checks",
+            "optimizer_step_checks",
+            "gradient_tensor_observations",
+            "gradient_element_observations",
+        },
+        "training health",
+    )
+    if health.get("scope") != (
+        "global-rank-zero callback counters; identical fail-fast checks execute "
+        "independently on every rank"
+    ):
+        raise GateValidationError("training health scope is unexpected")
+    for field in (
+        "all_losses_finite",
+        "all_observed_gradients_finite",
+        "every_optimizer_step_had_a_nonzero_gradient",
+    ):
+        _required_true(health.get(field), f"training health {field}")
+    loss_checks = _integer(
+        health.get("loss_checks"), "training health loss checks", minimum=1
+    )
+    optimizer_checks = _integer(
+        health.get("optimizer_step_checks"),
+        "training health optimizer-step checks",
+        minimum=1,
+    )
+    if loss_checks < optimizer_updates or optimizer_checks != optimizer_updates:
+        raise GateValidationError("training health counters disagree with updates")
+    gradient_tensors = _integer(
+        health.get("gradient_tensor_observations"),
+        "training health gradient_tensor_observations",
+        minimum=1,
+    )
+    gradient_elements = _integer(
+        health.get("gradient_element_observations"),
+        "training health gradient_element_observations",
+        minimum=1,
+    )
+    if gradient_tensors < optimizer_checks or gradient_elements < gradient_tensors:
+        raise GateValidationError(
+            "training health gradient observation counts are inconsistent"
+        )
 
 
 def _expected_artifact_path(relative_path: Path) -> Path:
     return Path(os.path.abspath(REPOSITORY_ROOT / relative_path))
+
+
+def _reviewed_training_python_executables() -> tuple[Path, Path]:
+    """Return both immutable lexical interpreter locations allowed at launch."""
+
+    return (
+        REPOSITORY_ROOT / ".venv" / "bin" / "python",
+        REPOSITORY_ROOT.parents[1] / ".venv" / "bin" / "python",
+    )
+
+
+def _project_training_python_executable() -> Path:
+    """Return the one shared project interpreter used by the benchmark launcher."""
+
+    repository_root = Path(os.path.abspath(REPOSITORY_ROOT))
+    project_root = (
+        repository_root.parent.parent
+        if repository_root.parent.name == "run_sources"
+        else repository_root
+    )
+    return project_root / ".venv" / "bin" / "python"
 
 
 def _validate_snapshot_claim(
@@ -1931,6 +2560,516 @@ def _validate_snapshot_claim(
                 f"{label} selected GPU UUIDs disagree with launch manifest"
             )
     return dict(claim)
+
+
+def _load_bound_predecessor_json(
+    claim_value: object,
+    *,
+    label: str,
+    basename: str,
+    run_name: str,
+) -> tuple[Mapping[str, Any], dict[str, Any]]:
+    """Read one exact absolute predecessor artifact without trusting its claim."""
+
+    claim = _mapping(claim_value, f"{label} claim")
+    _exact_keys(claim, _STABLE_SNAPSHOT_KEYS, f"{label} claim")
+    path_value = claim.get("path")
+    if not isinstance(path_value, str) or not Path(path_value).is_absolute():
+        raise GateValidationError(f"{label} path must be absolute")
+    root = REPOSITORY_ROOT.resolve(strict=True)
+    path = Path(path_value)
+    expected_run_directory = root / "output" / "udlm" / run_name
+    expected_path = expected_run_directory / basename
+    if path != expected_path:
+        raise GateValidationError(
+            f"{label} path must equal output/udlm/{run_name}/{basename}"
+        )
+    try:
+        resolved_parent = path.parent.resolve(strict=True)
+    except OSError as error:
+        raise GateValidationError(f"{label} parent is unavailable") from error
+    normalized = resolved_parent / path.name
+    if (
+        resolved_parent != expected_run_directory
+        or normalized != expected_path
+        or normalized.name != basename
+        or normalized.suffix != ".json"
+    ):
+        raise GateValidationError(f"{label} must not escape or traverse symlinks")
+    payload = _stable_regular_file_bytes(normalized, label=label)
+    observed_stat = normalized.stat(follow_symlinks=False)
+    observed = {
+        "path": str(normalized),
+        "device": int(observed_stat.st_dev),
+        "inode": int(observed_stat.st_ino),
+        "mode": int(observed_stat.st_mode),
+        "link_count": int(observed_stat.st_nlink),
+        "size_bytes": int(observed_stat.st_size),
+        "mtime_ns": int(observed_stat.st_mtime_ns),
+        "ctime_ns": int(observed_stat.st_ctime_ns),
+        "sha256": _sha256_bytes(payload),
+        "stable_regular_file_verified": True,
+    }
+    if observed != dict(claim):
+        raise GateValidationError(f"{label} no longer matches its bound snapshot")
+    parsed = _mapping(strict_json_loads(payload, label=label), label)
+    return parsed, observed
+
+
+def _derive_predecessor_training_lock(
+    *,
+    run_name: str,
+    manifest: Mapping[str, Any],
+    manifest_snapshot: Mapping[str, Any],
+    summary: Mapping[str, Any],
+    summary_snapshot: Mapping[str, Any],
+    receipt_snapshot: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the validation inputs implied by producer-shaped predecessor evidence."""
+
+    root = REPOSITORY_ROOT.resolve(strict=True)
+    relative_run_directory = Path("output") / "udlm" / run_name
+    run_directory = root / relative_run_directory
+    runtime_claim = _mapping(
+        summary.get("runtime_config"), "bound predecessor summary runtime config"
+    )
+    _exact_keys(
+        runtime_claim,
+        _STABLE_SNAPSHOT_KEYS | {"schema_version", "record_sha256"},
+        "bound predecessor summary runtime config",
+    )
+    runtime_snapshot_claim = {key: runtime_claim[key] for key in _STABLE_SNAPSHOT_KEYS}
+    _runtime, runtime_snapshot = _load_bound_predecessor_json(
+        runtime_snapshot_claim,
+        label="bound predecessor runtime config",
+        basename="runtime_config.json",
+        run_name=run_name,
+    )
+    final_checkpoint = _mapping(
+        summary.get("final_checkpoint"), "bound predecessor final checkpoint"
+    )
+    checkpoint_path_value = final_checkpoint.get("path")
+    max_steps = _integer(
+        manifest.get("max_steps"), "bound predecessor max steps", minimum=1
+    )
+    expected_checkpoint_path = run_directory / "checkpoints" / f"{max_steps}.ckpt"
+    if checkpoint_path_value != str(expected_checkpoint_path):
+        raise GateValidationError(
+            "bound predecessor checkpoint path must use its exact run directory"
+        )
+    accounting = _mapping(
+        summary.get("training_accounting"),
+        "bound predecessor training accounting",
+    )
+    parameters = _mapping(
+        accounting.get("trainable_parameter_counts"),
+        "bound predecessor trainable parameter counts",
+    )
+    semantic = _mapping(
+        final_checkpoint.get("semantic_audit"),
+        "bound predecessor checkpoint semantic audit",
+    )
+    ema_metadata = _mapping(
+        semantic.get("ema_metadata"), "bound predecessor EMA metadata"
+    )
+    startup = _mapping(summary.get("startup"), "bound predecessor startup")
+    checkpoint_sha256 = _sha256(
+        final_checkpoint.get("sha256"), "bound predecessor checkpoint digest"
+    )
+    checkpoint_size = _integer(
+        final_checkpoint.get("size_bytes"),
+        "bound predecessor checkpoint size",
+        minimum=1,
+    )
+    checkpoint_step = _integer(
+        semantic.get("global_step"),
+        "bound predecessor checkpoint step",
+        minimum=1,
+    )
+    global_examples = _integer(
+        accounting.get("effective_global_examples_per_optimizer_step"),
+        "bound predecessor global examples",
+        minimum=1,
+    )
+    optimizer_updates = _integer(
+        accounting.get("optimizer_updates"),
+        "bound predecessor optimizer updates",
+        minimum=1,
+    )
+    return {
+        "summary": {
+            "relative_path": relative_run_directory / "training_summary.json",
+            "sha256": summary_snapshot["sha256"],
+            "schema_version": summary.get("schema_version"),
+        },
+        "receipt": {
+            "relative_path": relative_run_directory / "pilot_exit_status.json",
+            "sha256": receipt_snapshot["sha256"],
+            "schema_version": PILOT_EXIT_STATUS_SCHEMA_VERSION,
+        },
+        "runtime": {
+            "relative_path": relative_run_directory / "runtime_config.json",
+            "sha256": runtime_snapshot["sha256"],
+            "schema_version": runtime_claim.get("schema_version"),
+        },
+        "launch_manifest": {
+            "relative_path": relative_run_directory / "launch_manifest.json",
+            "sha256": manifest_snapshot["sha256"],
+            "schema_version": manifest.get("launch_manifest_schema_version"),
+        },
+        "resolved_training_config_sha256": manifest.get(
+            "resolved_training_config_sha256"
+        ),
+        "training_argv_sha256": manifest.get("training_argv_sha256"),
+        "checkpoint": {
+            "relative_path": (
+                relative_run_directory / "checkpoints" / f"{max_steps}.ckpt"
+            ),
+            "sha256": checkpoint_sha256,
+            "size_bytes": checkpoint_size,
+            "global_step": checkpoint_step,
+        },
+        "source_revision": manifest.get("git_sha"),
+        "initialization_checkpoint_sha256": manifest.get("checkpoint_sha256"),
+        "optimizer_updates": optimizer_updates,
+        "world_size": manifest.get("user_requested_gpu_count"),
+        "training_seed": accounting.get("training_seed"),
+        "data_exposure": {
+            "global_examples_per_optimizer_step": global_examples,
+            "total_requested_examples": global_examples * optimizer_updates,
+            "stream_partition_policy": accounting.get(
+                "hosted_stream_rank_partition_policy"
+            ),
+        },
+        "parameter_counts": {
+            "base_model_trainable": parameters.get("base_backbone"),
+            "time_conditioner_trainable": parameters.get("time_conditioner"),
+            "total_trainable": parameters.get("total"),
+        },
+        "startup_mode": startup.get("mode"),
+        "inference_weights": {
+            "source": "ema",
+            "ema_applied": True,
+            "ema": dict(ema_metadata),
+        },
+    }
+
+
+def _validate_predecessor_receipt_chain(
+    manifest: Mapping[str, Any],
+    receipt: Mapping[str, Any],
+    *,
+    current_receipt_reference: Mapping[str, Any],
+    recursion_depth: int = 0,
+) -> dict[str, Any]:
+    """Independently reconstruct the launch-bound R→S→E receipt chain."""
+
+    if recursion_depth >= len(_MATCHED_PANEL_VARIANT_ORDER):
+        raise GateValidationError("predecessor receipt chain is cyclic or too deep")
+    panel = _mapping(
+        manifest.get("matched_panel_spec"), "predecessor-chain matched-panel spec"
+    )
+    panel_sha256 = manifest.get("matched_panel_spec_sha256")
+    if (
+        panel.get("schema_version") != 2
+        or not isinstance(panel_sha256, str)
+        or canonical_json_sha256(panel) != panel_sha256
+    ):
+        raise GateValidationError("predecessor-chain matched-panel spec is unbound")
+    common = _mapping(
+        panel.get("common_training_contract"),
+        "predecessor-chain common training contract",
+    )
+    common_sha256 = canonical_json_sha256(common)
+    variant = manifest.get("training_variant")
+    position = manifest.get("matched_panel_variant_position")
+    if (
+        variant not in _MATCHED_PANEL_VARIANT_ORDER
+        or type(position) is not int
+        or position != _MATCHED_PANEL_VARIANT_ORDER.index(variant)
+    ):
+        raise GateValidationError("predecessor-chain treatment position is invalid")
+    current_receipt_path = current_receipt_reference.get("relative_path")
+    current_receipt_sha256 = current_receipt_reference.get("sha256")
+    if (
+        not isinstance(current_receipt_path, Path)
+        or not isinstance(current_receipt_sha256, str)
+        or HEX_SHA256.fullmatch(current_receipt_sha256) is None
+    ):
+        raise GateValidationError(
+            "predecessor-chain current receipt reference is invalid"
+        )
+    current_receipt_member = {
+        "variant": variant,
+        "relative_path": current_receipt_path.as_posix(),
+        "sha256": current_receipt_sha256,
+    }
+
+    binding = _mapping(
+        manifest.get("predecessor_receipt_binding"),
+        "launch predecessor receipt binding",
+    )
+    _exact_keys(binding, _PREDECESSOR_BINDING_KEYS, "predecessor receipt binding")
+    if (
+        binding.get("schema_version") != 1
+        or binding.get("current_training_variant") != variant
+        or binding.get("current_variant_position") != position
+        or binding.get("matched_panel_spec_sha256") != panel_sha256
+        or binding.get("common_training_contract_sha256") != common_sha256
+        or binding.get("validated_before_gpu_probe") is not True
+    ):
+        raise GateValidationError("launch predecessor receipt binding is inconsistent")
+    if receipt.get("predecessor_receipt_binding") != binding:
+        raise GateValidationError(
+            "exit receipt does not mirror the launch predecessor binding"
+        )
+    current_completion = _mapping(
+        receipt.get("completion_requirements"),
+        "predecessor-chain receipt completion requirements",
+    )
+    _required_true(
+        current_completion.get("predecessor_receipt_binding_unchanged_and_valid"),
+        "receipt predecessor binding completion requirement",
+    )
+
+    artifact_fields = (
+        "receipt_artifact",
+        "predecessor_launch_manifest_artifact",
+        "predecessor_training_summary_artifact",
+    )
+    if position == 0:
+        if binding.get("state") != "explicit_genesis_no_predecessor":
+            raise GateValidationError("R launch lacks explicit genesis state")
+        for field in (
+            "expected_predecessor_training_variant",
+            "expected_predecessor_variant_position",
+            "predecessor_run_name",
+            "chronology",
+            *artifact_fields,
+        ):
+            if binding.get(field) is not None:
+                raise GateValidationError(
+                    f"R genesis predecessor binding {field} must be null"
+                )
+        return {
+            "chain_depth": 1,
+            "variant_order_prefix": ["udlm"],
+            "receipt_members": [current_receipt_member],
+            "machine_enforced": True,
+        }
+
+    expected_position = position - 1
+    expected_variant = _MATCHED_PANEL_VARIANT_ORDER[expected_position]
+    if (
+        binding.get("state") != "validated_successful_predecessor"
+        or binding.get("expected_predecessor_training_variant") != expected_variant
+        or binding.get("expected_predecessor_variant_position") != expected_position
+    ):
+        raise GateValidationError("S/E predecessor identity is not the prior arm")
+    predecessor_run_name = binding.get("predecessor_run_name")
+    if (
+        not isinstance(predecessor_run_name, str)
+        or RUN_NAME_PATTERN.fullmatch(predecessor_run_name) is None
+    ):
+        raise GateValidationError(
+            "predecessor run name does not use the launcher-normalized syntax"
+        )
+
+    predecessor_receipt, receipt_snapshot = _load_bound_predecessor_json(
+        binding.get("receipt_artifact"),
+        label="bound predecessor exit receipt",
+        basename="pilot_exit_status.json",
+        run_name=predecessor_run_name,
+    )
+    predecessor_manifest, manifest_snapshot = _load_bound_predecessor_json(
+        binding.get("predecessor_launch_manifest_artifact"),
+        label="bound predecessor launch manifest",
+        basename="launch_manifest.json",
+        run_name=predecessor_run_name,
+    )
+    predecessor_summary, summary_snapshot = _load_bound_predecessor_json(
+        binding.get("predecessor_training_summary_artifact"),
+        label="bound predecessor training summary",
+        basename="training_summary.json",
+        run_name=predecessor_run_name,
+    )
+    artifact_parents = {
+        Path(snapshot["path"]).parent
+        for snapshot in (receipt_snapshot, manifest_snapshot, summary_snapshot)
+    }
+    if len(artifact_parents) != 1:
+        raise GateValidationError(
+            "predecessor artifacts do not share one run directory"
+        )
+    _exact_keys(
+        predecessor_receipt,
+        _PILOT_EXIT_STATUS_KEYS,
+        "bound predecessor exit receipt",
+    )
+    _exact_keys(
+        predecessor_manifest,
+        _LAUNCH_MANIFEST_KEYS,
+        "bound predecessor launch manifest",
+    )
+    _exact_keys(
+        predecessor_summary,
+        _TRAINING_SUMMARY_KEYS,
+        "bound predecessor training summary",
+    )
+    if (
+        predecessor_receipt.get("schema_version") != PILOT_EXIT_STATUS_SCHEMA_VERSION
+        or predecessor_receipt.get("status") != "completed"
+        or predecessor_receipt.get("overall_status") != "completed"
+    ):
+        raise GateValidationError("bound predecessor exit receipt is not successful")
+    predecessor_process_status = _integer(
+        predecessor_receipt.get("process_exit_status"),
+        "bound predecessor process exit status",
+    )
+    if predecessor_process_status != 0:
+        raise GateValidationError("bound predecessor exit receipt is not successful")
+    predecessor_completion = _mapping(
+        predecessor_receipt.get("completion_requirements"),
+        "bound predecessor completion requirements",
+    )
+    if not predecessor_completion or any(
+        value is not True for value in predecessor_completion.values()
+    ):
+        raise GateValidationError(
+            "bound predecessor completion requirements are not all true"
+        )
+    _validate_successful_pipeline(
+        predecessor_receipt.get("pipeline"), label="bound predecessor pipeline"
+    )
+    source_revision = common.get("source_revision")
+    _validate_receipt_source(
+        predecessor_receipt.get("source_at_receipt"),
+        expected_revision=source_revision,
+        label="bound predecessor source evidence",
+    )
+
+    if (
+        predecessor_manifest.get("launch_manifest_schema_version")
+        != LAUNCH_MANIFEST_SCHEMA_VERSION
+        or predecessor_manifest.get("purpose") != "bounded UDLM training pilot"
+        or predecessor_manifest.get("training_variant") != expected_variant
+        or predecessor_manifest.get("matched_panel_variant_position")
+        != expected_position
+        or predecessor_manifest.get("matched_panel_spec") != panel
+        or predecessor_manifest.get("matched_panel_spec_sha256") != panel_sha256
+        or predecessor_manifest.get("run_name") != predecessor_run_name
+    ):
+        raise GateValidationError("bound predecessor launch manifest is inconsistent")
+    if (
+        predecessor_summary.get("schema_version") != TRAINING_SUMMARY_SCHEMA_VERSION
+        or predecessor_summary.get("status") != "completed"
+    ):
+        raise GateValidationError("bound predecessor training summary is incomplete")
+    predecessor_manifest_evidence = _mapping(
+        predecessor_receipt.get("launch_manifest"),
+        "bound predecessor receipt launch-manifest evidence",
+    )
+    predecessor_summary_evidence = _mapping(
+        predecessor_receipt.get("training_summary"),
+        "bound predecessor receipt summary evidence",
+    )
+    if (
+        predecessor_manifest_evidence.get("artifact") != manifest_snapshot
+        or predecessor_manifest_evidence.get("valid_and_launch_bound") is not True
+        or predecessor_summary_evidence.get("artifact") != summary_snapshot
+        or predecessor_summary_evidence.get("valid_and_launch_bound") is not True
+    ):
+        raise GateValidationError(
+            "bound predecessor receipt snapshots are inconsistent"
+        )
+    summary_manifest_claim = _mapping(
+        predecessor_summary.get("launch_manifest"),
+        "bound predecessor summary launch-manifest evidence",
+    )
+    if any(
+        summary_manifest_claim.get(key) != value
+        for key, value in manifest_snapshot.items()
+    ):
+        raise GateValidationError(
+            "bound predecessor summary launch-manifest snapshot is inconsistent"
+        )
+
+    chronology = _mapping(binding.get("chronology"), "predecessor chronology")
+    _exact_keys(chronology, _PREDECESSOR_CHRONOLOGY_KEYS, "predecessor chronology")
+    manifest_time = _timestamp(
+        chronology.get("predecessor_launch_manifest_created_at_utc"),
+        "predecessor manifest timestamp",
+    )
+    summary_time = _timestamp(
+        chronology.get("predecessor_training_summary_completed_at_utc"),
+        "predecessor summary timestamp",
+    )
+    receipt_time = _timestamp(
+        chronology.get("predecessor_exit_receipt_recorded_at_utc"),
+        "predecessor receipt timestamp",
+    )
+    _required_true(
+        chronology.get("strictly_ordered_timestamps_verified"),
+        "predecessor strict chronology flag",
+    )
+    if (
+        not manifest_time
+        < summary_time
+        < receipt_time
+        < _timestamp(manifest.get("created_at"), "current manifest timestamp")
+    ):
+        raise GateValidationError("R/S/E predecessor chronology is not strict")
+    if (
+        predecessor_manifest.get("created_at")
+        != chronology.get("predecessor_launch_manifest_created_at_utc")
+        or predecessor_summary.get("completed_at_utc")
+        != chronology.get("predecessor_training_summary_completed_at_utc")
+        or predecessor_receipt.get("recorded_at_utc")
+        != chronology.get("predecessor_exit_receipt_recorded_at_utc")
+    ):
+        raise GateValidationError("R/S/E predecessor chronology is not artifact-bound")
+    current_lock_binding = _mapping(
+        manifest.get("single_training_job_lock"),
+        "successor training-job lock binding",
+    )
+    current_lock_record = _mapping(
+        current_lock_binding.get("record"),
+        "successor training-job lock record",
+    )
+    current_lock_acquired_at = _timestamp(
+        current_lock_record.get("acquired_at_utc"),
+        "successor training-job lock acquisition timestamp",
+    )
+    current_inventory_completed_at = _timestamp(
+        manifest.get("inventory_snapshot_completed_at_utc"),
+        "successor GPU inventory timestamp",
+    )
+    if not receipt_time < current_lock_acquired_at <= current_inventory_completed_at:
+        raise GateValidationError(
+            "predecessor receipt must predate successor lock acquisition and GPU probe"
+        )
+
+    predecessor_lock = _derive_predecessor_training_lock(
+        run_name=predecessor_run_name,
+        manifest=predecessor_manifest,
+        manifest_snapshot=manifest_snapshot,
+        summary=predecessor_summary,
+        summary_snapshot=summary_snapshot,
+        receipt_snapshot=receipt_snapshot,
+    )
+    predecessor_evidence = validate_training_evidence(
+        predecessor_lock,
+        _recursion_depth=recursion_depth + 1,
+    )
+    prefix = predecessor_evidence["predecessor_receipt_chain"]
+    if prefix["chain_depth"] != position:
+        raise GateValidationError("R/S/E predecessor chain has the wrong depth")
+    return {
+        "chain_depth": position + 1,
+        "variant_order_prefix": [*prefix["variant_order_prefix"], variant],
+        "receipt_members": [*prefix["receipt_members"], current_receipt_member],
+        "machine_enforced": True,
+    }
 
 
 def _validate_gpu_state(value: object, *, label: str) -> dict[str, Any]:
@@ -1984,12 +3123,19 @@ def _validate_launch_manifest(
         raise GateValidationError(
             "launch manifest final-probe source revision disagrees with lock"
         )
-    for field in (
-        "created_at",
-        "inventory_snapshot_completed_at_utc",
-        "final_uuid_probes_completed_at_utc",
-    ):
-        _timestamp(manifest.get(field), f"launch manifest {field}")
+    manifest_created_at = _timestamp(
+        manifest.get("created_at"), "launch manifest created_at"
+    )
+    inventory_completed_at = _timestamp(
+        manifest.get("inventory_snapshot_completed_at_utc"),
+        "launch manifest inventory_snapshot_completed_at_utc",
+    )
+    final_probe_completed_at = _timestamp(
+        manifest.get("final_uuid_probes_completed_at_utc"),
+        "launch manifest final_uuid_probes_completed_at_utc",
+    )
+    if not inventory_completed_at <= final_probe_completed_at <= manifest_created_at:
+        raise GateValidationError("launch manifest GPU-probe chronology is invalid")
     for field in (
         "run_name",
         "training_variant",
@@ -2000,6 +3146,32 @@ def _validate_launch_manifest(
     ):
         if not isinstance(manifest.get(field), str) or not manifest[field]:
             raise GateValidationError(f"launch manifest {field} must be nonempty")
+    run_name = manifest["run_name"]
+    if RUN_NAME_PATTERN.fullmatch(run_name) is None:
+        raise GateValidationError("launch manifest run name has invalid syntax")
+    expected_run_directory = Path("output") / "udlm" / run_name
+    expected_run_artifacts = {
+        "launch_manifest": expected_run_directory / "launch_manifest.json",
+        "runtime": expected_run_directory / "runtime_config.json",
+        "summary": expected_run_directory / "training_summary.json",
+        "receipt": expected_run_directory / "pilot_exit_status.json",
+        "checkpoint": (
+            expected_run_directory / "checkpoints" / f"{lock['optimizer_updates']}.ckpt"
+        ),
+    }
+    for lock_field, expected_path in expected_run_artifacts.items():
+        if lock[lock_field]["relative_path"] != expected_path:
+            raise GateValidationError(
+                f"candidate {lock_field} path does not match launch run name"
+            )
+    if manifest.get("tmux_session") != (
+        f"genmol_{manifest['training_variant']}_{run_name}"
+    ):
+        raise GateValidationError("launch manifest tmux session is not run-bound")
+    if manifest.get("log_path") != str(
+        _expected_artifact_path(Path("output/logs") / f"{run_name}.log")
+    ):
+        raise GateValidationError("launch manifest log path is not run-bound")
     world_size = lock["world_size"]
     if manifest.get("user_requested_gpu_count") != world_size:
         raise GateValidationError("launch manifest GPU count disagrees with lock")
@@ -2052,11 +3224,19 @@ def _validate_launch_manifest(
     if [row["physical_index"] for row in final] != physical_indices:
         raise GateValidationError("launch manifest final physical indices disagree")
     inventory_uuids = [row["uuid"] for row in inventory]
-    if len(set(inventory_uuids)) != len(inventory_uuids) or not set(
-        selected_gpu_uuids
-    ).issubset(inventory_uuids):
+    inventory_physical_indices = [row["physical_index"] for row in inventory]
+    if (
+        len(set(inventory_uuids)) != len(inventory_uuids)
+        or len(set(inventory_physical_indices)) != len(inventory_physical_indices)
+        or not set(selected_gpu_uuids).issubset(inventory_uuids)
+    ):
         raise GateValidationError(
             "launch manifest GPU inventory identities are invalid"
+        )
+    inventory_by_uuid = {row["uuid"]: row for row in inventory}
+    if any(row != inventory_by_uuid[row["uuid"]] for row in initial):
+        raise GateValidationError(
+            "launch manifest initial selection differs from its inventory snapshot"
         )
 
     safety = _mapping(manifest.get("gpu_safety_policy"), "launch GPU safety policy")
@@ -2101,15 +3281,30 @@ def _validate_launch_manifest(
     training_argv = manifest.get("training_argv")
     if (
         not isinstance(training_argv, list)
-        or not training_argv
-        or not all(isinstance(argument, str) for argument in training_argv)
+        or len(training_argv) < 5
+        or not all(isinstance(argument, str) and argument for argument in training_argv)
     ):
         raise GateValidationError(
-            "launch manifest training argv must be a string array"
+            "launch manifest training argv must be a nonempty string array"
+        )
+    expected_suffix = [
+        "-u",
+        str(REPOSITORY_ROOT / "scripts" / "train.py"),
+        "--config-name",
+        manifest["hydra_config_name"],
+    ]
+    reviewed_interpreters = {
+        str(candidate) for candidate in _reviewed_training_python_executables()
+    }
+    if training_argv[0] not in reviewed_interpreters or training_argv[1:5] != (
+        expected_suffix
+    ):
+        raise GateValidationError(
+            "launch manifest training argv producer prefix is unexpected"
         )
     if (
         manifest.get("training_argv_sha256") != lock["training_argv_sha256"]
-        or canonical_json_sha256(training_argv) != lock["training_argv_sha256"]
+        or canonical_json_sha256(training_argv[2:]) != lock["training_argv_sha256"]
     ):
         raise GateValidationError("launch manifest training argv is unbound")
     resolved_config = _mapping(
@@ -2158,6 +3353,30 @@ def _validate_launch_manifest(
         or manifest.get("log_reserved_exclusively_before_manifest") is not True
     ):
         raise GateValidationError("launch manifest completion schema is unexpected")
+    completion_contract = _mapping(
+        manifest.get("completion_contract"), "launch completion contract"
+    )
+    expected_completion_contract = {
+        "status_at_launch": "pending",
+        "complete_only_if_valid_training_summary_exists": True,
+        "complete_only_if_successful_exit_receipt_exists": True,
+        "valid_training_summary_and_successful_exit_receipt_both_required": True,
+        "missing_summary_after_tmux_exit_means": "incomplete",
+        "absent_exit_receipt_means": "incomplete",
+        "successful_exit_receipt_requires": {
+            "training_exit_status": 0,
+            "tee_exit_status": 0,
+            "valid_launch_bound_training_summary": True,
+            "exact_launch_manifest_still_matches": True,
+            "clean_pushed_source_at_receipt": True,
+            "predecessor_receipt_binding_unchanged_and_valid": True,
+        },
+        "training_job_lock_release": (
+            "after_exit_receipt_publication_for_completed_or_failed_pipeline"
+        ),
+    }
+    if dict(completion_contract) != expected_completion_contract:
+        raise GateValidationError("launch manifest completion contract is unexpected")
     if manifest.get("checkpoint_sha256") != lock["initialization_checkpoint_sha256"]:
         raise GateValidationError("launch manifest initialization digest disagrees")
     if manifest.get("seed") != lock["training_seed"]:
@@ -2200,7 +3419,7 @@ def _validate_launch_manifest(
     if (
         canonical_json_sha256(matched_panel)
         != manifest.get("matched_panel_spec_sha256")
-        or matched_panel.get("schema_version") != 1
+        or matched_panel.get("schema_version") != 2
     ):
         raise GateValidationError("launch matched-panel specification is unbound")
     _exact_keys(
@@ -2221,7 +3440,7 @@ def _validate_launch_manifest(
         matched_panel.get("execution"), "launch matched-panel execution"
     )
     if dict(execution) != {
-        "mode": "single_job_lease_with_registered_order_policy",
+        "mode": "single_job_lease_with_machine_enforced_predecessor_receipt_chain",
         "maximum_concurrent_training_jobs": 1,
         "concurrency_enforcement": "atomic_global_worktree_training_job_lock",
         "registered_variant_order": [
@@ -2229,8 +3448,12 @@ def _validate_launch_manifest(
             "schedule_uniform",
             "udlm_categorical",
         ],
-        "advance_policy": "operator_validates_successful_predecessor_receipt",
-        "predecessor_receipt_bound_in_each_manifest": False,
+        "advance_policy": (
+            "launcher_validates_and_binds_exact_successful_predecessor_receipt"
+        ),
+        "predecessor_receipt_bound_in_each_manifest": True,
+        "genesis_requires_explicit_declaration": True,
+        "successor_launch_requires_exact_predecessor_receipt": True,
     }:
         raise GateValidationError("launch matched-panel execution policy is unexpected")
     panel_training = _mapping(
@@ -2253,6 +3476,9 @@ def _validate_launch_manifest(
             "num_workers",
             "seed",
             "exclude_special_tokens",
+            "empirical_uniform_mix",
+            "empirical_uniform_mix_consumed_only_by",
+            "empirical_uniform_mix_audit",
             "common_resolved_config_sha256",
         },
         "launch matched-panel training contract",
@@ -2279,6 +3505,11 @@ def _validate_launch_manifest(
         != lock["initialization_checkpoint_sha256"]
         or panel_training.get("exclude_special_tokens")
         != manifest.get("exclude_special_tokens")
+        or panel_training.get("empirical_uniform_mix") != PILOT_EMPIRICAL_UNIFORM_MIX
+        or panel_training.get("empirical_uniform_mix_consumed_only_by")
+        != "empirical_frequency"
+        or panel_training.get("empirical_uniform_mix_audit")
+        != PILOT_EMPIRICAL_UNIFORM_MIX_AUDIT
         or panel_training.get("common_resolved_config_sha256") != common_config_sha256
     ):
         raise GateValidationError("launch matched-panel contract disagrees with lock")
@@ -2290,6 +3521,12 @@ def _validate_launch_manifest(
     )
     resolved_callback = _mapping(
         resolved_config.get("callback"), "launch resolved callback config"
+    )
+    resolved_training = _mapping(
+        resolved_config.get("training"), "launch resolved training config"
+    )
+    resolved_udlm = _mapping(
+        resolved_training.get("udlm"), "launch resolved UDLM config"
     )
     resolved_num_workers = _integer(
         resolved_loader.get("num_workers"),
@@ -2309,6 +3546,7 @@ def _validate_launch_manifest(
         or resolved_trainer.get("max_steps") != manifest.get("max_steps")
         or resolved_trainer.get("accumulate_grad_batches") != accumulation
         or resolved_callback.get("dirpath") != expected_checkpoint_directory
+        or resolved_udlm.get("empirical_uniform_mix") != PILOT_EMPIRICAL_UNIFORM_MIX
     ):
         raise GateValidationError(
             "launch matched-panel controls disagree with the resolved config"
@@ -2435,10 +3673,14 @@ def _validate_launch_manifest(
         "launch training-job lock launcher PID",
         minimum=1,
     )
-    _timestamp(
+    lock_acquired_at = _timestamp(
         lock_record.get("acquired_at_utc"),
         "launch training-job lock acquisition timestamp",
     )
+    if lock_acquired_at > inventory_completed_at:
+        raise GateValidationError(
+            "launch training-job lock was acquired after GPU inventory probing"
+        )
     lock_payload = (
         json.dumps(lock_record, indent=2, sort_keys=True, allow_nan=False) + "\n"
     ).encode("utf-8")
@@ -2478,7 +3720,9 @@ def _load_launch_manifest(
     return manifest, len(payload), selected_gpu_uuids
 
 
-def validate_training_evidence(lock: Mapping[str, Any]) -> dict[str, Any]:
+def validate_training_evidence(
+    lock: Mapping[str, Any], *, _recursion_depth: int = 0
+) -> dict[str, Any]:
     """Join the lock to the launch-bound training summary and exit receipt."""
 
     summary = _load_referenced_json(lock["summary"], label="training summary")
@@ -2495,6 +3739,19 @@ def validate_training_evidence(lock: Mapping[str, Any]) -> dict[str, Any]:
         )
     )
     _manifest, manifest_size_bytes, selected_gpu_uuids = _load_launch_manifest(lock)
+    checkpoint_snapshot = _repository_artifact_snapshot(
+        lock["checkpoint"]["relative_path"], label="training checkpoint"
+    )
+    if (
+        checkpoint_snapshot["sha256"] != lock["checkpoint"]["sha256"]
+        or checkpoint_snapshot["size_bytes"] != lock["checkpoint"]["size_bytes"]
+    ):
+        raise GateValidationError(
+            "training checkpoint bytes disagree with the candidate lock"
+        )
+    _exact_keys(summary, _TRAINING_SUMMARY_KEYS, "training summary")
+    _exact_keys(receipt, _PILOT_EXIT_STATUS_KEYS, "training exit receipt")
+    _exact_keys(runtime, _RUNTIME_CONFIG_KEYS, "training runtime config")
     if summary.get("schema_version") != TRAINING_SUMMARY_SCHEMA_VERSION:
         raise GateValidationError("training summary schema version is unsupported")
     if receipt.get("schema_version") != PILOT_EXIT_STATUS_SCHEMA_VERSION:
@@ -2503,6 +3760,33 @@ def validate_training_evidence(lock: Mapping[str, Any]) -> dict[str, Any]:
         raise GateValidationError(
             "training runtime-config schema version is unsupported"
         )
+    _validate_training_source(
+        summary.get("source"),
+        expected_revision=lock["source_revision"],
+        label="training summary source",
+    )
+    _validate_training_source(
+        runtime.get("source"),
+        expected_revision=lock["source_revision"],
+        label="training runtime source",
+    )
+    launch_time = _utc_timestamp(_manifest.get("created_at"), "launch timestamp")
+    summary_time = _utc_timestamp(
+        summary.get("completed_at_utc"), "training summary completion timestamp"
+    )
+    receipt_time = _utc_timestamp(
+        receipt.get("recorded_at_utc"), "training exit receipt timestamp"
+    )
+    if not launch_time < summary_time < receipt_time:
+        raise GateValidationError(
+            "training launch, summary, and receipt chronology is not strict"
+        )
+    predecessor_chain = _validate_predecessor_receipt_chain(
+        _manifest,
+        receipt,
+        current_receipt_reference=lock["receipt"],
+        recursion_depth=_recursion_depth,
+    )
     if summary.get("status") != "completed":
         raise GateValidationError("training summary is not completed")
     if summary.get("source_revision") != lock["source_revision"]:
@@ -2577,26 +3861,103 @@ def validate_training_evidence(lock: Mapping[str, Any]) -> dict[str, Any]:
     observed = _mapping(
         summary.get("observed_training_state"), "observed training state"
     )
+    _exact_keys(
+        observed,
+        {"global_rank", "global_step", "world_size"},
+        "observed training state",
+    )
+    if observed.get("global_rank") != 0:
+        raise GateValidationError("training summary must be published by global rank 0")
     if observed.get("global_step") != lock["optimizer_updates"]:
         raise GateValidationError("training summary step count disagrees with lock")
     if observed.get("world_size") != lock["world_size"]:
         raise GateValidationError("training summary world size disagrees with lock")
     final_checkpoint = _mapping(summary.get("final_checkpoint"), "summary checkpoint")
-    for key in ("sha256", "size_bytes"):
-        if final_checkpoint.get(key) != lock["checkpoint"][key]:
-            raise GateValidationError(f"summary checkpoint {key} disagrees with lock")
+    _exact_keys(
+        final_checkpoint,
+        _STABLE_SNAPSHOT_KEYS | {"semantic_audit"},
+        "summary checkpoint",
+    )
+    summary_checkpoint_artifact = _validate_snapshot_claim(
+        {key: final_checkpoint[key] for key in _STABLE_SNAPSHOT_KEYS},
+        label="summary checkpoint artifact",
+        expected_path=_expected_artifact_path(lock["checkpoint"]["relative_path"]),
+        expected_sha256=lock["checkpoint"]["sha256"],
+        expected_size_bytes=lock["checkpoint"]["size_bytes"],
+    )
+    if summary_checkpoint_artifact != checkpoint_snapshot:
+        raise GateValidationError(
+            "summary checkpoint snapshot disagrees with the live artifact"
+        )
     semantic = _mapping(
         final_checkpoint.get("semantic_audit"), "checkpoint semantic audit"
     )
+    _exact_keys(
+        semantic,
+        {
+            "deserialized",
+            "global_step",
+            "raw_model",
+            "ema",
+            "ema_metadata",
+            "optimizer",
+            "all_checkpoint_tensors",
+            "udlm_process_identity_verified",
+            "live_model_match",
+            "live_ema_match",
+        },
+        "checkpoint semantic audit",
+    )
+    _required_true(semantic.get("deserialized"), "checkpoint deserialization")
+    _required_true(
+        semantic.get("udlm_process_identity_verified"),
+        "checkpoint UDLM process identity",
+    )
+    for field in ("raw_model", "ema", "optimizer", "all_checkpoint_tensors"):
+        _validate_finiteness_record(
+            semantic.get(field), label=f"checkpoint {field} finiteness"
+        )
     if semantic.get("global_step") != lock["checkpoint"]["global_step"]:
         raise GateValidationError("semantic checkpoint step disagrees with lock")
-    for path, label in (
-        (("ema", "all_finite"), "serialized EMA finiteness"),
-        (("live_ema_match", "exact_tensor_values"), "live EMA checkpoint match"),
-        (("live_model_match", "exact_tensor_values"), "live model checkpoint match"),
-    ):
-        container = _mapping(semantic.get(path[0]), label)
-        _required_true(container.get(path[1]), label)
+    serialized_ema = _mapping(semantic.get("ema"), "serialized EMA finiteness")
+    _required_true(serialized_ema.get("all_finite"), "serialized EMA finiteness")
+    live_ema_match = _mapping(
+        semantic.get("live_ema_match"), "live EMA checkpoint match"
+    )
+    _exact_keys(
+        live_ema_match,
+        {"exact_tensor_values", "tensor_count"},
+        "live EMA checkpoint match",
+    )
+    _required_true(
+        live_ema_match.get("exact_tensor_values"), "live EMA checkpoint match"
+    )
+    _integer(
+        live_ema_match.get("tensor_count"),
+        "live EMA checkpoint tensor count",
+        minimum=1,
+    )
+    live_model_match = _mapping(
+        semantic.get("live_model_match"), "live model checkpoint match"
+    )
+    _exact_keys(
+        live_model_match,
+        {"exact_key_set", "exact_tensor_values", "tensor_count"},
+        "live model checkpoint match",
+    )
+    _required_true(
+        live_model_match.get("exact_key_set"),
+        "live model checkpoint exact key set",
+    )
+    _required_true(
+        live_model_match.get("exact_tensor_values"),
+        "live model checkpoint match",
+    )
+    _integer(
+        live_model_match.get("tensor_count"),
+        "live model checkpoint tensor count",
+        minimum=1,
+    )
     summary_ema_metadata = _mapping(
         semantic.get("ema_metadata"), "training-summary EMA metadata"
     )
@@ -2615,16 +3976,17 @@ def validate_training_evidence(lock: Mapping[str, Any]) -> dict[str, Any]:
         ) from error
     if summary_inference_weights != lock["inference_weights"]:
         raise GateValidationError("training-summary EMA metadata disagrees with lock")
-    live_ema_match = _mapping(
-        semantic.get("live_ema_match"), "live EMA checkpoint match"
-    )
-    serialized_ema = _mapping(semantic.get("ema"), "serialized EMA finiteness")
     shadow_count = summary_inference_weights["ema"]["shadow_parameter_count"]
     if live_ema_match.get("tensor_count") != shadow_count:
         raise GateValidationError("live EMA tensor count disagrees with EMA metadata")
     if serialized_ema.get("floating_tensor_count") != shadow_count:
         raise GateValidationError("serialized EMA tensor count disagrees with metadata")
     startup = _mapping(summary.get("startup"), "training summary startup")
+    _exact_keys(
+        startup,
+        {"mode", "verified_mdlm_warm_start_report"},
+        "training summary startup",
+    )
     if startup.get("mode") != lock["startup_mode"]:
         raise GateValidationError("training startup mode disagrees with candidate lock")
     warm_report = startup.get("verified_mdlm_warm_start_report")
@@ -2632,8 +3994,32 @@ def validate_training_evidence(lock: Mapping[str, Any]) -> dict[str, Any]:
         warm_report = _mapping(warm_report, "warm-start report")
         if warm_report.get("source_sha256") != lock["initialization_checkpoint_sha256"]:
             raise GateValidationError("warm-start source digest disagrees with lock")
+        if (
+            warm_report.get("expected_source_sha256")
+            != lock["initialization_checkpoint_sha256"]
+        ):
+            raise GateValidationError(
+                "warm-start expected source digest disagrees with lock"
+            )
+        _required_true(
+            warm_report.get("byte_identity_verified_before_and_after_load"),
+            "warm-start byte identity",
+        )
         if warm_report.get("weights") != "ema":
             raise GateValidationError("warm-start initialization must use MDLM EMA")
+        for field in ("source_path", "source_resolved_path"):
+            if not isinstance(warm_report.get(field), str) or not warm_report[field]:
+                raise GateValidationError(f"warm-start {field} must be nonempty")
+        _integer(
+            warm_report.get("source_size_bytes"),
+            "warm-start source size",
+            minimum=1,
+        )
+        _integer(
+            warm_report.get("parameter_tensors"),
+            "warm-start parameter tensor count",
+            minimum=1,
+        )
     elif warm_report is not None:
         raise GateValidationError(
             "scratch summary unexpectedly contains warm-start evidence"
@@ -2655,13 +4041,35 @@ def validate_training_evidence(lock: Mapping[str, Any]) -> dict[str, Any]:
             "screen initialization-state audit"
         )
 
+    _validate_training_health(
+        summary.get("training_health"), optimizer_updates=lock["optimizer_updates"]
+    )
+    tensor_finiteness = _mapping(
+        summary.get("tensor_finiteness"), "summary tensor finiteness"
+    )
+    _exact_keys(tensor_finiteness, {"raw_model", "ema"}, "summary tensor finiteness")
+    for field in ("raw_model", "ema"):
+        _validate_finiteness_record(
+            tensor_finiteness.get(field), label=f"summary {field} finiteness"
+        )
+        if tensor_finiteness.get(field) != semantic.get(field):
+            raise GateValidationError(
+                f"live and serialized {field} finiteness evidence disagree"
+            )
+
     if (
         receipt.get("status") != "completed"
         or receipt.get("overall_status") != "completed"
     ):
         raise GateValidationError("training exit receipt is not completed")
-    if receipt.get("process_exit_status") != 0:
+    process_exit_status = _integer(
+        receipt.get("process_exit_status"), "training exit receipt process status"
+    )
+    if process_exit_status != 0:
         raise GateValidationError("training exit receipt records nonzero status")
+    _validate_successful_pipeline(
+        receipt.get("pipeline"), label="training exit receipt pipeline"
+    )
     expected = _mapping(receipt.get("expected_contract"), "receipt expected contract")
     _exact_keys(
         expected,
@@ -2706,8 +4114,11 @@ def validate_training_evidence(lock: Mapping[str, Any]) -> dict[str, Any]:
     for key, value in expected_values.items():
         if expected.get(key) != value:
             raise GateValidationError(f"exit receipt {key} disagrees with lock")
-    source = _mapping(receipt.get("source_at_receipt"), "receipt source evidence")
-    _required_true(source.get("verified"), "clean pushed source at receipt")
+    _validate_receipt_source(
+        receipt.get("source_at_receipt"),
+        expected_revision=lock["source_revision"],
+        label="receipt source evidence",
+    )
     receipt_manifest = _mapping(
         receipt.get("launch_manifest"), "receipt launch-manifest evidence"
     )
@@ -2828,6 +4239,25 @@ def validate_training_evidence(lock: Mapping[str, Any]) -> dict[str, Any]:
     receipt_summary = _mapping(
         receipt.get("training_summary"), "receipt summary evidence"
     )
+    _exact_keys(
+        receipt_summary,
+        {
+            "path",
+            "present",
+            "valid_and_launch_bound",
+            "artifact",
+            "validated_bindings",
+            "validation_error",
+        },
+        "receipt summary evidence",
+    )
+    if receipt_summary.get("path") != str(
+        _expected_artifact_path(lock["summary"]["relative_path"])
+    ):
+        raise GateValidationError("receipt training-summary path disagrees with lock")
+    _required_true(receipt_summary.get("present"), "receipt summary presence")
+    if receipt_summary.get("validation_error") is not None:
+        raise GateValidationError("receipt summary evidence records an error")
     _required_true(
         receipt_summary.get("valid_and_launch_bound"),
         "launch-bound training summary",
@@ -2845,19 +4275,48 @@ def validate_training_evidence(lock: Mapping[str, Any]) -> dict[str, Any]:
     receipt_checkpoint = _mapping(
         receipt.get("final_checkpoint"), "receipt checkpoint evidence"
     )
+    _exact_keys(
+        receipt_checkpoint,
+        {"path", "present", "matches_training_summary_snapshot", "artifact"},
+        "receipt checkpoint evidence",
+    )
+    if receipt_checkpoint.get("path") != str(
+        _expected_artifact_path(lock["checkpoint"]["relative_path"])
+    ):
+        raise GateValidationError("receipt checkpoint path disagrees with lock")
+    _required_true(receipt_checkpoint.get("present"), "receipt checkpoint presence")
     _required_true(
         receipt_checkpoint.get("matches_training_summary_snapshot"),
         "receipt checkpoint snapshot match",
     )
-    checkpoint_artifact = _mapping(
-        receipt_checkpoint.get("artifact"), "receipt checkpoint artifact"
+    receipt_checkpoint_artifact = _validate_snapshot_claim(
+        receipt_checkpoint.get("artifact"),
+        label="receipt checkpoint artifact",
+        expected_path=_expected_artifact_path(lock["checkpoint"]["relative_path"]),
+        expected_sha256=lock["checkpoint"]["sha256"],
+        expected_size_bytes=lock["checkpoint"]["size_bytes"],
     )
-    for key in ("sha256", "size_bytes"):
-        if checkpoint_artifact.get(key) != lock["checkpoint"][key]:
-            raise GateValidationError(f"receipt checkpoint {key} disagrees with lock")
+    if receipt_checkpoint_artifact != summary_checkpoint_artifact:
+        raise GateValidationError("receipt and summary checkpoint snapshots disagree")
     receipt_runtime = _mapping(
         receipt.get("runtime_config"), "receipt runtime evidence"
     )
+    _exact_keys(
+        receipt_runtime,
+        {
+            "path",
+            "present",
+            "matches_training_summary_snapshot",
+            "semantic_validation_passed",
+            "artifact",
+        },
+        "receipt runtime evidence",
+    )
+    if receipt_runtime.get("path") != str(
+        _expected_artifact_path(lock["runtime"]["relative_path"])
+    ):
+        raise GateValidationError("receipt runtime path disagrees with lock")
+    _required_true(receipt_runtime.get("present"), "receipt runtime presence")
     _required_true(
         receipt_runtime.get("matches_training_summary_snapshot"),
         "receipt runtime snapshot match",
@@ -2925,6 +4384,19 @@ def validate_training_evidence(lock: Mapping[str, Any]) -> dict[str, Any]:
         raise GateValidationError("runtime training argv must be a string list")
     if canonical_json_sha256(training_argv) != lock["training_argv_sha256"]:
         raise GateValidationError("runtime training argv content is unbound")
+    if training_argv != _manifest["training_argv"][2:]:
+        raise GateValidationError(
+            "runtime training argv disagrees with launch producer command"
+        )
+    if runtime.get("observed_training_argv") != training_argv:
+        raise GateValidationError(
+            "runtime observed training argv disagrees with its base argv"
+        )
+    _validate_python_environment(
+        runtime.get("python_environment"),
+        seed=lock["training_seed"],
+        label="runtime Python environment",
+    )
 
     accounting = _mapping(
         summary.get("training_accounting"), "summary training accounting"
@@ -3118,6 +4590,7 @@ def validate_training_evidence(lock: Mapping[str, Any]) -> dict[str, Any]:
             "tee_exit_zero",
             "training_summary_valid_and_launch_bound",
             "launch_manifest_matches_summary_runtime_and_launch",
+            "predecessor_receipt_binding_unchanged_and_valid",
             "training_job_lock_valid_before_receipt_publication",
             "runtime_config_matches_summary_and_launch",
             "final_checkpoint_matches_training_summary",
@@ -3173,7 +4646,1288 @@ def validate_training_evidence(lock: Mapping[str, Any]) -> dict[str, Any]:
         "successful_exit_receipt": True,
         "training_accounting": dict(accounting),
         "ema_metadata": dict(summary_ema_metadata),
+        "predecessor_receipt_chain": predecessor_chain,
+        "training_variant": _manifest["training_variant"],
+        "matched_panel_spec_sha256": _manifest["matched_panel_spec_sha256"],
+        "launch_manifest_created_at_utc": _manifest["created_at"],
+        "exit_receipt_recorded_at_utc": receipt["recorded_at_utc"],
     }
+
+
+def validate_completed_matched_panel(
+    lock: Mapping[str, Any],
+    selected_training_evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Require an immutable terminal-E receipt proving the full R→S→E panel."""
+
+    terminal_ref = _mapping(
+        lock.get("terminal_e_receipt"), "terminal E exit-receipt reference"
+    )
+    terminal_receipt = _load_referenced_json(
+        terminal_ref, label="terminal E exit receipt"
+    )
+    _exact_keys(
+        terminal_receipt,
+        _PILOT_EXIT_STATUS_KEYS,
+        "terminal E exit receipt",
+    )
+    relative_path = terminal_ref.get("relative_path")
+    if not isinstance(relative_path, Path):
+        raise GateValidationError("normalized terminal E receipt path is unavailable")
+    parts = relative_path.parts
+    if (
+        len(parts) != 4
+        or parts[:2] != ("output", "udlm")
+        or RUN_NAME_PATTERN.fullmatch(parts[2]) is None
+        or parts[3] != "pilot_exit_status.json"
+    ):
+        raise GateValidationError(
+            "terminal E exit receipt must be output/udlm/<run>/pilot_exit_status.json"
+        )
+    run_name = parts[2]
+    receipt_snapshot = _repository_artifact_snapshot(
+        relative_path, label="terminal E exit receipt"
+    )
+    if receipt_snapshot["sha256"] != terminal_ref.get("sha256"):
+        raise GateValidationError(
+            "terminal E exit receipt digest disagrees with candidate lock"
+        )
+
+    receipt_manifest_evidence = _mapping(
+        terminal_receipt.get("launch_manifest"),
+        "terminal E receipt launch-manifest evidence",
+    )
+    receipt_summary_evidence = _mapping(
+        terminal_receipt.get("training_summary"),
+        "terminal E receipt training-summary evidence",
+    )
+    terminal_manifest, manifest_snapshot = _load_bound_predecessor_json(
+        receipt_manifest_evidence.get("artifact"),
+        label="terminal E launch manifest",
+        basename="launch_manifest.json",
+        run_name=run_name,
+    )
+    terminal_summary, summary_snapshot = _load_bound_predecessor_json(
+        receipt_summary_evidence.get("artifact"),
+        label="terminal E training summary",
+        basename="training_summary.json",
+        run_name=run_name,
+    )
+    terminal_lock = _derive_predecessor_training_lock(
+        run_name=run_name,
+        manifest=terminal_manifest,
+        manifest_snapshot=manifest_snapshot,
+        summary=terminal_summary,
+        summary_snapshot=summary_snapshot,
+        receipt_snapshot=receipt_snapshot,
+    )
+    if terminal_lock["receipt"] != dict(terminal_ref):
+        raise GateValidationError(
+            "terminal E receipt reference disagrees with its producer evidence"
+        )
+    terminal_evidence = validate_training_evidence(terminal_lock)
+    expected_order = list(_MATCHED_PANEL_VARIANT_ORDER)
+    terminal_chain = _mapping(
+        terminal_evidence.get("predecessor_receipt_chain"),
+        "terminal E predecessor chain",
+    )
+    raw_receipt_members = terminal_chain.get("receipt_members")
+    if not isinstance(raw_receipt_members, list):
+        raise GateValidationError("terminal E chain receipt members must be a list")
+    receipt_members: list[dict[str, str]] = []
+    for index, raw_member in enumerate(raw_receipt_members):
+        member = _mapping(raw_member, f"terminal E chain receipt member {index}")
+        _exact_keys(
+            member,
+            {"variant", "relative_path", "sha256"},
+            f"terminal E chain receipt member {index}",
+        )
+        member_variant = member.get("variant")
+        member_relative_path = member.get("relative_path")
+        member_sha256 = member.get("sha256")
+        if (
+            not isinstance(member_variant, str)
+            or not isinstance(member_relative_path, str)
+            or not isinstance(member_sha256, str)
+            or HEX_SHA256.fullmatch(member_sha256) is None
+        ):
+            raise GateValidationError("terminal E chain receipt member is invalid")
+        receipt_members.append(dict(member))
+    if (
+        terminal_evidence.get("training_variant") != expected_order[-1]
+        or terminal_manifest.get("matched_panel_variant_position")
+        != len(expected_order) - 1
+        or terminal_chain.get("chain_depth") != len(expected_order)
+        or terminal_chain.get("variant_order_prefix") != expected_order
+        or [member["variant"] for member in receipt_members] != expected_order
+        or len({member["relative_path"] for member in receipt_members})
+        != len(expected_order)
+        or terminal_chain.get("machine_enforced") is not True
+    ):
+        raise GateValidationError(
+            "terminal E receipt does not prove the complete registered R/S/E panel"
+        )
+    selected_variant = selected_training_evidence.get("training_variant")
+    selected_receipt_ref = _mapping(
+        lock.get("receipt"), "selected candidate receipt reference"
+    )
+    if selected_variant not in _MATCHED_PANEL_VARIANT_ORDER:
+        raise GateValidationError("selected candidate training variant is invalid")
+    expected_selected_member = {
+        "variant": selected_variant,
+        "relative_path": selected_receipt_ref["relative_path"].as_posix(),
+        "sha256": selected_receipt_ref["sha256"],
+    }
+    selected_position = _MATCHED_PANEL_VARIANT_ORDER.index(selected_variant)
+    if receipt_members[selected_position] != expected_selected_member:
+        raise GateValidationError(
+            "selected candidate receipt is not a member of the terminal R/S/E chain"
+        )
+    expected_terminal_member = {
+        "variant": expected_order[-1],
+        "relative_path": terminal_ref["relative_path"].as_posix(),
+        "sha256": terminal_ref["sha256"],
+    }
+    if receipt_members[-1] != expected_terminal_member:
+        raise GateValidationError(
+            "terminal E receipt reference is not the chain's terminal member"
+        )
+    selected_panel_sha256 = selected_training_evidence.get("matched_panel_spec_sha256")
+    if (
+        not isinstance(selected_panel_sha256, str)
+        or terminal_evidence.get("matched_panel_spec_sha256") != selected_panel_sha256
+    ):
+        raise GateValidationError(
+            "terminal E and selected candidate do not share one matched panel"
+        )
+    terminal_recorded_at = _utc_timestamp(
+        terminal_receipt.get("recorded_at_utc"),
+        "terminal E exit receipt timestamp",
+    )
+    locked_at = lock.get("locked_at")
+    selected_recorded_at = _utc_timestamp(
+        selected_training_evidence.get("exit_receipt_recorded_at_utc"),
+        "selected candidate exit receipt timestamp",
+    )
+    if (
+        not isinstance(locked_at, datetime)
+        or not selected_recorded_at < locked_at
+        or not terminal_recorded_at < locked_at
+    ):
+        raise GateValidationError(
+            "selected candidate and terminal E receipts must strictly predate "
+            "the candidate lock"
+        )
+    return {
+        "terminal_e_run_name": run_name,
+        "terminal_e_exit_receipt_sha256": terminal_ref["sha256"],
+        "terminal_e_exit_receipt_recorded_at_utc": terminal_receipt["recorded_at_utc"],
+        "selected_exit_receipt_recorded_at_utc": selected_training_evidence[
+            "exit_receipt_recorded_at_utc"
+        ],
+        "candidate_locked_at_utc": locked_at.isoformat(),
+        "matched_panel_spec_sha256": selected_panel_sha256,
+        "chain_depth": len(expected_order),
+        "variant_order": expected_order,
+        "receipt_members": receipt_members,
+        "selected_receipt_membership_proved": True,
+        "complete_registered_panel_proved": True,
+    }
+
+
+def _validate_rescore_worker_proof(
+    value: object,
+    *,
+    label: str,
+    expected_seed: int,
+    expected_sample_count: int,
+    expected_summary_path: Path,
+    expected_raw_path: Path,
+    expected_summary_sha256: str,
+    expected_raw_sha256: str,
+) -> Mapping[str, Any]:
+    """Validate the complete fresh-worker result before trusting any metric."""
+
+    result = _mapping(value, label)
+    _exact_keys(
+        result,
+        {
+            "status",
+            "seed",
+            "summary_sha256",
+            "raw_samples_sha256",
+            "row_comparison",
+            "metrics",
+            "failure_counts",
+            "identity",
+            "independent_recomputation",
+            "stable_inputs",
+            "worker_environment",
+        },
+        label,
+    )
+    if (
+        result.get("status") != "exact_match"
+        or result.get("seed") != expected_seed
+        or result.get("summary_sha256") != expected_summary_sha256
+        or result.get("raw_samples_sha256") != expected_raw_sha256
+    ):
+        raise GateValidationError(f"{label} completion/artifact identity differs")
+
+    row_comparison = _mapping(result.get("row_comparison"), f"{label} rows")
+    _exact_keys(
+        row_comparison,
+        {
+            "all_match",
+            "row_count",
+            "field_count",
+            "cell_count",
+            "numeric_absolute_tolerance",
+            "field_results",
+        },
+        f"{label} rows",
+    )
+    if (
+        row_comparison.get("all_match") is not True
+        or row_comparison.get("row_count") != expected_sample_count
+        or row_comparison.get("field_count") != EXPECTED_BASELINE_RAW_SAMPLE_FIELD_COUNT
+        or row_comparison.get("cell_count")
+        != expected_sample_count * EXPECTED_BASELINE_RAW_SAMPLE_FIELD_COUNT
+        or row_comparison.get("numeric_absolute_tolerance") != 1e-12
+    ):
+        raise GateValidationError(f"{label} row-comparison totals are incomplete")
+    field_results = row_comparison.get("field_results")
+    if not isinstance(field_results, list) or len(field_results) != len(
+        denovo_report.RAW_SAMPLE_FIELDS
+    ):
+        raise GateValidationError(f"{label} field comparisons are incomplete")
+    for expected_field, raw_field_result in zip(
+        denovo_report.RAW_SAMPLE_FIELDS, field_results, strict=True
+    ):
+        field_result = _mapping(
+            raw_field_result, f"{label} field comparison {expected_field}"
+        )
+        _exact_keys(
+            field_result,
+            {
+                "field",
+                "comparison",
+                "compared_rows",
+                "mismatch_count",
+                "max_absolute_difference",
+            },
+            f"{label} field comparison {expected_field}",
+        )
+        maximum_difference = field_result.get("max_absolute_difference")
+        if maximum_difference is not None:
+            maximum_difference = _finite(
+                maximum_difference,
+                f"{label} field comparison {expected_field} maximum difference",
+            )
+        expected_comparison = (
+            "finite_numeric_absolute_tolerance_1e-12_or_exact_null"
+            if expected_field in NUMERIC_RAW_SAMPLE_FIELDS
+            else "exact_value_and_type"
+        )
+        if (
+            field_result.get("field") != expected_field
+            or field_result.get("comparison") != expected_comparison
+            or field_result.get("compared_rows") != expected_sample_count
+            or field_result.get("mismatch_count") != 0
+            or (
+                expected_field not in NUMERIC_RAW_SAMPLE_FIELDS
+                and maximum_difference is not None
+            )
+            or (maximum_difference is not None and maximum_difference > 1e-12)
+        ):
+            raise GateValidationError(
+                f"{label} field comparison {expected_field} is incomplete"
+            )
+
+    recomputation = _mapping(
+        result.get("independent_recomputation"), f"{label} recomputation"
+    )
+    expected_recomputation = {
+        "raw_input_field": "raw_model_text",
+        "decoder": "benchmark.decode_records",
+        "metric_evaluator": "benchmark.evaluate_records",
+        "qed_recomputed": True,
+        "sa_recomputed": True,
+        "released_diversity_recomputed": True,
+        "strict_branch_recomputed": True,
+        "all_21_raw_fields_compared": True,
+        "numeric_absolute_tolerance": 1e-12,
+    }
+    _exact_keys(recomputation, set(expected_recomputation), f"{label} recomputation")
+    if dict(recomputation) != expected_recomputation:
+        raise GateValidationError(f"{label} independent recomputation is incomplete")
+
+    stable_inputs = _mapping(result.get("stable_inputs"), f"{label} stable inputs")
+    _exact_keys(
+        stable_inputs,
+        {
+            "summary_json",
+            "raw_samples_csv",
+            "recorded_path_bindings",
+            "revalidated_unchanged_after_rescore",
+        },
+        f"{label} stable inputs",
+    )
+    if stable_inputs.get("revalidated_unchanged_after_rescore") is not True:
+        raise GateValidationError(f"{label} inputs were not revalidated after rescore")
+    expected_artifacts = {
+        "summary_json": (expected_summary_path, expected_summary_sha256),
+        "raw_samples_csv": (expected_raw_path, expected_raw_sha256),
+    }
+    for name, (expected_path, expected_sha256) in expected_artifacts.items():
+        artifact = _mapping(stable_inputs.get(name), f"{label} stable {name}")
+        _exact_keys(
+            artifact,
+            {"path", "sha256", "size_bytes", "read_policy"},
+            f"{label} stable {name}",
+        )
+        if (
+            artifact.get("path") != str(expected_path)
+            or artifact.get("sha256") != expected_sha256
+            or artifact.get("read_policy")
+            != "regular_file_no_symlink_stable_descriptor_bytes_retained_in_memory"
+        ):
+            raise GateValidationError(f"{label} stable {name} identity differs")
+        _integer(artifact.get("size_bytes"), f"{label} stable {name} size", minimum=1)
+    bindings = _mapping(
+        stable_inputs.get("recorded_path_bindings"),
+        f"{label} recorded path bindings",
+    )
+    _exact_keys(bindings, {"summary_json", "raw_samples_csv"}, f"{label} path bindings")
+    for name, (expected_path, _expected_sha256) in expected_artifacts.items():
+        binding = _mapping(bindings.get(name), f"{label} path binding {name}")
+        expected_binding = {
+            "recorded_path": str(expected_path),
+            "supplied_resolved_path": str(expected_path),
+            "exact_path_match": True,
+        }
+        _exact_keys(binding, set(expected_binding), f"{label} path binding {name}")
+        if dict(binding) != expected_binding:
+            raise GateValidationError(f"{label} path binding {name} differs")
+
+    environment = _mapping(
+        result.get("worker_environment"), f"{label} worker environment"
+    )
+    _exact_keys(
+        environment,
+        {
+            "python_hash_seed",
+            "device",
+            "cuda_visible_devices",
+            "nvidia_visible_devices",
+            "offline_environment",
+            "python_network_guard_during_computation",
+            "executable",
+            "python",
+            "platform",
+            "pid",
+        },
+        f"{label} worker environment",
+    )
+    expected_environment = {
+        "python_hash_seed": str(expected_seed),
+        "device": "cpu",
+        "cuda_visible_devices": "",
+        "nvidia_visible_devices": "",
+    }
+    if any(
+        environment.get(key) != expected
+        for key, expected in expected_environment.items()
+    ):
+        raise GateValidationError(f"{label} worker CPU/seed environment differs")
+    expected_offline = {
+        "HF_HUB_OFFLINE": "1",
+        "HF_DATASETS_OFFLINE": "1",
+        "TRANSFORMERS_OFFLINE": "1",
+        "WANDB_MODE": "offline",
+        "WANDB_DISABLED": "true",
+    }
+    if environment.get("offline_environment") != expected_offline:
+        raise GateValidationError(f"{label} worker offline environment differs")
+    network_guard = _mapping(
+        environment.get("python_network_guard_during_computation"),
+        f"{label} worker network guard",
+    )
+    _exact_keys(
+        network_guard,
+        {"guarded_apis", "scope_limitation"},
+        f"{label} worker network guard",
+    )
+    if network_guard.get("guarded_apis") != [
+        "socket.create_connection",
+        "socket.getaddrinfo",
+        "socket.socket.connect",
+        "socket.socket.connect_ex",
+    ] or not isinstance(network_guard.get("scope_limitation"), str):
+        raise GateValidationError(f"{label} worker network guard differs")
+    for field in ("executable", "python", "platform"):
+        if not isinstance(environment.get(field), str) or not environment[field]:
+            raise GateValidationError(f"{label} worker {field} is missing")
+    _integer(environment.get("pid"), f"{label} worker PID", minimum=1)
+
+    identity = _mapping(result.get("identity"), f"{label} identity")
+    _exact_keys(
+        identity,
+        {
+            "seed",
+            "sample_count",
+            "started_at_utc",
+            "completed_at_utc",
+            "checkpoint",
+            "config",
+            "generation",
+            "source",
+            "artifacts",
+        },
+        f"{label} identity",
+    )
+    if (
+        identity.get("seed") != expected_seed
+        or identity.get("sample_count") != expected_sample_count
+    ):
+        raise GateValidationError(f"{label} identity seed/sample count differs")
+    started_at = _timestamp(identity.get("started_at_utc"), f"{label} start")
+    completed_at = _timestamp(identity.get("completed_at_utc"), f"{label} completion")
+    if completed_at < started_at:
+        raise GateValidationError(f"{label} completion predates its start")
+    for field in ("checkpoint", "config", "generation", "source", "artifacts"):
+        _mapping(identity.get(field), f"{label} identity {field}")
+    _mapping(result.get("metrics"), f"{label} metrics")
+    _mapping(result.get("failure_counts"), f"{label} failure counts")
+    return result
+
+
+def _require_completed_pilot_references_at_revision(
+    evidence: Mapping[str, Any], benchmark_revision: str
+) -> None:
+    """Require every completed-envelope payload to be a Git blob at evaluation."""
+
+    receipt_ref = _artifact_reference(
+        evidence.get("training_exit_receipt"),
+        label="committed pilot training exit receipt",
+        suffix=".json",
+        require_schema=True,
+    )
+    benchmark_artifacts = _mapping(
+        evidence.get("benchmark_artifacts"), "committed pilot benchmark artifacts"
+    )
+    _exact_keys(
+        benchmark_artifacts,
+        {"summary_json", "raw_samples_csv"},
+        "committed pilot benchmark artifacts",
+    )
+    summary_ref = _artifact_reference(
+        benchmark_artifacts.get("summary_json"),
+        label="committed pilot summary",
+        suffix=".json",
+        require_schema=True,
+    )
+    raw_ref = _artifact_reference(
+        benchmark_artifacts.get("raw_samples_csv"),
+        label="committed pilot raw samples",
+        suffix=".csv",
+        require_schema=False,
+    )
+    for label, reference in (
+        ("pilot training exit receipt", receipt_ref),
+        ("pilot benchmark summary", summary_ref),
+        ("pilot raw samples", raw_ref),
+    ):
+        blob = _git_blob(benchmark_revision, reference["relative_path"])
+        if _sha256_bytes(blob) != reference["sha256"]:
+            raise GateValidationError(
+                f"benchmark revision {label} Git blob digest differs"
+            )
+
+
+def _validate_completed_pilot_evidence_live(
+    evidence: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Validate and independently re-score one live schema-7 pilot run.
+
+    The committed evidence envelope supplies only identities.  This adapter
+    validates the producer-shaped files, checks the successful training receipt,
+    and then invokes a fresh seed-at-interpreter-start CPU worker so PyTDC's
+    diversity reduction is deterministic for both registered pilot seeds.
+    """
+
+    from scripts.udlm import rescore_denovo_run as denovo_rescore
+    from scripts.udlm import write_pilot_evidence as pilot_evidence_writer
+
+    attempt_id = evidence["attempt_id"]
+    candidate_id = evidence["candidate_id"]
+    pilot_seed = evidence["pilot_seed"]
+    benchmark_artifacts = _mapping(
+        evidence.get("benchmark_artifacts"), "pilot benchmark artifacts"
+    )
+    summary_ref = _artifact_reference(
+        benchmark_artifacts.get("summary_json"),
+        label="pilot summary",
+        suffix=".json",
+        require_schema=True,
+    )
+    raw_ref = _artifact_reference(
+        benchmark_artifacts.get("raw_samples_csv"),
+        label="pilot raw samples",
+        suffix=".csv",
+        require_schema=False,
+    )
+    summary_path = _expected_artifact_path(summary_ref["relative_path"])
+    raw_path = _expected_artifact_path(raw_ref["relative_path"])
+    summary_payload = _repository_artifact_bytes(
+        summary_ref["relative_path"], label="pilot benchmark summary"
+    )
+    if _sha256_bytes(summary_payload) != summary_ref["sha256"]:
+        raise GateValidationError("pilot benchmark summary digest differs")
+    raw_payload = _repository_artifact_bytes(
+        raw_ref["relative_path"], label="pilot raw samples"
+    )
+    if _sha256_bytes(raw_payload) != raw_ref["sha256"]:
+        raise GateValidationError("pilot raw-sample digest differs")
+    summary_document = _mapping(
+        strict_json_loads(summary_payload, label="pilot benchmark summary"),
+        "pilot benchmark summary",
+    )
+    requested_samples = _integer(
+        summary_document.get("num_samples"),
+        "pilot benchmark requested samples",
+        minimum=1,
+    )
+    expected_tier = (
+        "final" if requested_samples == EXPECTED_SAMPLES_PER_SEED else "pilot"
+    )
+    try:
+        structural = denovo_report.validate_run_evidence(
+            summary_path.parent,
+            pilot_seed,
+            expected_samples=requested_samples,
+            expected_tier=expected_tier,
+            final_protocol_eligible=(expected_tier == "final"),
+        )
+    except (OSError, ValueError) as error:
+        raise GateValidationError(
+            f"pilot schema-7 structural validation failed: {error}"
+        ) from error
+    if (
+        Path(structural["summary_path"]) != summary_path
+        or Path(structural["raw_samples_path"]) != raw_path
+        or structural["summary_sha256"] != summary_ref["sha256"]
+        or structural["raw_samples_sha256"] != raw_ref["sha256"]
+    ):
+        raise GateValidationError(
+            "pilot structural validator returned different artifact identities"
+        )
+
+    receipt_ref = _artifact_reference(
+        evidence.get("training_exit_receipt"),
+        label="pilot training exit receipt",
+        suffix=".json",
+        require_schema=True,
+    )
+    receipt_payload = _repository_artifact_bytes(
+        receipt_ref["relative_path"], label="pilot training exit receipt"
+    )
+    if _sha256_bytes(receipt_payload) != receipt_ref["sha256"]:
+        raise GateValidationError("pilot training exit receipt digest differs")
+    receipt = _mapping(
+        strict_json_loads(receipt_payload, label="pilot training exit receipt"),
+        "pilot training exit receipt",
+    )
+    structural_checkpoint = structural["checkpoint"]
+    try:
+        receipt_recorded_at, training_inputs = (
+            pilot_evidence_writer.validate_successful_training_receipt(
+                receipt,
+                receipt_path=_expected_artifact_path(receipt_ref["relative_path"]),
+                structural=structural,
+            )
+        )
+    except (OSError, ValueError) as error:
+        raise GateValidationError(
+            f"pilot training exit receipt validation failed: {error}"
+        ) from error
+
+    implementation_inputs = structural["implementation_inputs"]
+    metric_inputs = structural["metric_inputs"]
+    config = structural["config"]
+    source = structural["git"]
+    try:
+        rescored = denovo_rescore.invoke_rescore_worker(
+            summary_path=summary_path,
+            raw_samples_path=raw_path,
+            allowed_root=REPOSITORY_ROOT,
+            expected_summary_sha256=summary_ref["sha256"],
+            expected_raw_samples_sha256=raw_ref["sha256"],
+            expected_seed=pilot_seed,
+            expected_sample_count=requested_samples,
+            expected_checkpoint_sha256=structural_checkpoint["sha256"],
+            expected_config_sha256=config["sha256"],
+            expected_source_revision=source["commit"],
+            expected_runner_sha256=structural["runner_sha256"],
+            expected_sampler_source_sha256=implementation_inputs["sampler_source"][
+                "sha256"
+            ],
+            expected_ema_source_sha256=implementation_inputs["ema_source"]["sha256"],
+            expected_implementation_inputs_sha256=canonical_json_sha256(
+                implementation_inputs
+            ),
+            expected_metric_inputs_sha256=canonical_json_sha256(metric_inputs),
+        )
+    except (OSError, ValueError) as error:
+        raise GateValidationError(
+            f"independent pilot rescore failed: {error}"
+        ) from error
+    rescored = _validate_rescore_worker_proof(
+        rescored,
+        label="pilot independent rescore",
+        expected_seed=pilot_seed,
+        expected_sample_count=requested_samples,
+        expected_summary_path=summary_path,
+        expected_raw_path=raw_path,
+        expected_summary_sha256=summary_ref["sha256"],
+        expected_raw_sha256=raw_ref["sha256"],
+    )
+    identity = _mapping(rescored.get("identity"), "pilot rescore identity")
+    generation = _mapping(identity.get("generation"), "pilot rescore generation")
+    identity_config = _mapping(identity.get("config"), "pilot rescore config")
+    identity_source = _mapping(identity.get("source"), "pilot rescore source")
+    metrics = _mapping(rescored.get("metrics"), "pilot rescore metrics")
+    released = _mapping(
+        metrics.get(REGISTERED_SELECTION_METRIC_BRANCH),
+        "pilot rescore released metrics",
+    )
+    if (
+        identity_source.get("revision") != source["commit"]
+        or identity_source.get("runner_sha256") != structural["runner_sha256"]
+        or identity_source.get("sampler_source_sha256")
+        != implementation_inputs["sampler_source"]["sha256"]
+        or identity_source.get("ema_source_sha256")
+        != implementation_inputs["ema_source"]["sha256"]
+        or identity_source.get("implementation_inputs_sha256")
+        != canonical_json_sha256(implementation_inputs)
+        or identity_source.get("metric_inputs_sha256")
+        != canonical_json_sha256(metric_inputs)
+    ):
+        raise GateValidationError("pilot independent rescore source identity differs")
+    try:
+        pilot_evidence_writer.revalidate_inputs(training_inputs)
+    except (OSError, ValueError) as error:
+        raise GateValidationError(
+            f"pilot training evidence changed during independent rescore: {error}"
+        ) from error
+
+    tracking = _mapping(config.get("git_tracking"), "pilot config Git tracking")
+    return {
+        "attempt_id": attempt_id,
+        "candidate_id": candidate_id,
+        "pilot_seed": pilot_seed,
+        "requested_samples": requested_samples,
+        "nfe": generation["nfe"],
+        "metric_branch": REGISTERED_SELECTION_METRIC_BRANCH,
+        "checkpoint": {
+            key: structural_checkpoint[key]
+            for key in ("sha256", "size_bytes", "global_step")
+        },
+        "evaluation_config": {
+            "relative_path": tracking["relative_path"],
+            "sha256": config["sha256"],
+        },
+        "sampling": {
+            "config": identity_config["sampling"],
+            "sha256": identity_config["sampling_sha256"],
+        },
+        "inference_weights": generation["inference_weights"],
+        "runner_sha256": identity_source["runner_sha256"],
+        "sampler_source_sha256": identity_source["sampler_source_sha256"],
+        "implementation_inputs_sha256": identity_source["implementation_inputs_sha256"],
+        "metric_inputs_sha256": identity_source["metric_inputs_sha256"],
+        "benchmark_revision": identity_source["revision"],
+        "started_at_utc": identity["started_at_utc"],
+        "completed_at_utc": identity["completed_at_utc"],
+        "training_exit_receipt": {
+            "relative_path": receipt_ref["relative_path"].as_posix(),
+            "sha256": receipt_ref["sha256"],
+            "schema_version": receipt_ref["schema_version"],
+            "recorded_at_utc": receipt_recorded_at.isoformat(),
+        },
+        "summary_json_sha256": summary_ref["sha256"],
+        "raw_samples_csv_sha256": raw_ref["sha256"],
+        "quality": released["quality"],
+        "diversity": released["diversity"],
+        "independent_rescore": {
+            "all_21_fields_match": True,
+            "both_metric_branches_match": True,
+            "failure_counts_match": True,
+            "raw_model_text_redecoded": True,
+        },
+    }
+
+
+_PILOT_RUN_VALIDATION_KEYS = {
+    "attempt_id",
+    "candidate_id",
+    "pilot_seed",
+    "requested_samples",
+    "nfe",
+    "metric_branch",
+    "checkpoint",
+    "evaluation_config",
+    "sampling",
+    "inference_weights",
+    "runner_sha256",
+    "sampler_source_sha256",
+    "implementation_inputs_sha256",
+    "metric_inputs_sha256",
+    "benchmark_revision",
+    "started_at_utc",
+    "completed_at_utc",
+    "training_exit_receipt",
+    "summary_json_sha256",
+    "raw_samples_csv_sha256",
+    "quality",
+    "diversity",
+    "independent_rescore",
+}
+
+
+def _pilot_output_artifact_reference(
+    value: object,
+    *,
+    label: str,
+    suffix: str,
+    attempt_id: str,
+    pilot_seed: int,
+    require_schema: bool,
+) -> dict[str, Any]:
+    reference = _artifact_reference(
+        value, label=label, suffix=suffix, require_schema=require_schema
+    )
+    relative_path = reference["relative_path"]
+    expected_seed_directory = f"seed_{pilot_seed}"
+    if (
+        len(relative_path.parts) < 4
+        or relative_path.parts[0] != "output"
+        or relative_path.parent.name != expected_seed_directory
+        or relative_path.parent.parent.name != attempt_id
+        or relative_path.name
+        != ("summary.json" if suffix == ".json" else "raw_samples.csv")
+    ):
+        raise GateValidationError(
+            f"{label} must live below output/.../{attempt_id}/"
+            f"{expected_seed_directory}"
+        )
+    return reference
+
+
+def _absolute_repository_path(value: object, label: str) -> Path:
+    if not isinstance(value, str) or not value:
+        raise GateValidationError(f"{label} must be an absolute repository path")
+    root = Path(os.path.abspath(REPOSITORY_ROOT))
+    path = Path(value)
+    if not path.is_absolute() or Path(os.path.abspath(path)) != path:
+        raise GateValidationError(f"{label} must be a normalized absolute path")
+    if path == root or root not in path.parents:
+        raise GateValidationError(f"{label} must remain inside the repository")
+    return path
+
+
+def _absolute_project_checkpoint_path(value: object, label: str) -> Path:
+    if not isinstance(value, str) or not value:
+        raise GateValidationError(f"{label} must be an absolute project path")
+    repository_root = Path(os.path.abspath(REPOSITORY_ROOT))
+    project_root = (
+        repository_root.parent.parent
+        if repository_root.parent.name == "run_sources"
+        else repository_root
+    )
+    path = Path(value)
+    if not path.is_absolute() or Path(os.path.abspath(path)) != path:
+        raise GateValidationError(f"{label} must be a normalized absolute path")
+    if path == project_root or project_root not in path.parents:
+        raise GateValidationError(f"{label} must remain inside the containing project")
+    return path
+
+
+def _failure_supporting_reference(
+    value: object,
+    *,
+    label: str,
+    artifact_loader: Callable[[Path], bytes],
+    expected_path: Path | None = None,
+) -> dict[str, Any]:
+    reference = _mapping(value, label)
+    _exact_keys(reference, {"path", "sha256", "size_bytes"}, label)
+    path = _absolute_repository_path(reference.get("path"), f"{label} path")
+    if expected_path is not None and path != expected_path:
+        raise GateValidationError(f"{label} path differs from its bound artifact")
+    sha256 = _sha256(reference.get("sha256"), f"{label} digest")
+    size_bytes = _integer(reference.get("size_bytes"), f"{label} size", minimum=0)
+    relative_path = path.relative_to(Path(os.path.abspath(REPOSITORY_ROOT)))
+    try:
+        payload = artifact_loader(relative_path)
+    except GateValidationError:
+        raise
+    except Exception as error:
+        raise GateValidationError(
+            f"{label} is not committed and available: {relative_path}"
+        ) from error
+    if not isinstance(payload, bytes):
+        raise GateValidationError("pilot artifact loader must return bytes")
+    if len(payload) != size_bytes or _sha256_bytes(payload) != sha256:
+        raise GateValidationError(f"{label} committed bytes differ from its receipt")
+    return {
+        "relative_path": relative_path,
+        "sha256": sha256,
+        "size_bytes": size_bytes,
+    }
+
+
+def _validate_pilot_failure_receipt(
+    receipt: Mapping[str, Any],
+    *,
+    receipt_path: Path,
+    attempt_id: str,
+    candidate_id: str,
+    pilot_seed: int,
+    artifact_loader: Callable[[Path], bytes],
+) -> dict[str, Any]:
+    """Validate one launcher-authored failed-seed receipt and its committed support."""
+
+    label = f"pilot failure receipt {receipt_path.as_posix()}"
+    _exact_keys(
+        receipt,
+        {
+            "schema_version",
+            "artifact_kind",
+            "status",
+            "attempt_id",
+            "candidate_id",
+            "pilot_seed",
+            "pilot_mode",
+            "requested_samples",
+            "stage",
+            "reason",
+            "started_at_utc",
+            "failed_at_utc",
+            "process_exit_status",
+            "checkpoint",
+            "config",
+            "command",
+            "source_revision",
+            "launcher_source",
+            "log",
+            "partial_artifacts",
+        },
+        label,
+    )
+    expected_bindings = {
+        "schema_version": PILOT_FAILURE_RECEIPT_SCHEMA_VERSION,
+        "artifact_kind": PILOT_FAILURE_RECEIPT_KIND,
+        "status": "failed",
+        "attempt_id": attempt_id,
+        "candidate_id": candidate_id,
+        "pilot_seed": pilot_seed,
+    }
+    for field, expected in expected_bindings.items():
+        if receipt.get(field) != expected:
+            raise GateValidationError(f"{label} {field} disagrees with its envelope")
+    pilot_mode = receipt.get("pilot_mode")
+    requested_samples = _integer(
+        receipt.get("requested_samples"), f"{label} requested samples", minimum=1
+    )
+    if pilot_mode == "engineering":
+        if pilot_seed < 1000 or requested_samples > 100:
+            raise GateValidationError(
+                f"{label} engineering mode requires seed >=1000 and 1..100 samples"
+            )
+    elif pilot_mode == "registered_selection":
+        if (
+            pilot_seed not in REGISTERED_SELECTION_PILOT_SEEDS
+            or requested_samples != REGISTERED_SELECTION_SAMPLES_PER_SEED
+        ):
+            raise GateValidationError(
+                f"{label} registered-selection mode has an invalid seed/sample count"
+            )
+    else:
+        raise GateValidationError(f"{label} pilot mode is invalid")
+
+    started_at = _timestamp(receipt.get("started_at_utc"), f"{label} start")
+    failed_at = _timestamp(receipt.get("failed_at_utc"), f"{label} failure")
+    if failed_at < started_at:
+        raise GateValidationError(f"{label} failure predates its child start")
+    stage = receipt.get("stage")
+    process_exit_status = receipt.get("process_exit_status")
+    if stage == "benchmark_child_process":
+        if type(process_exit_status) is not int or process_exit_status == 0:
+            raise GateValidationError(
+                f"{label} child-process failure requires a nonzero exit status"
+            )
+    elif stage == "completion_validation":
+        if process_exit_status is not None:
+            raise GateValidationError(
+                f"{label} completion-validation failure requires a null exit status"
+            )
+    else:
+        raise GateValidationError(f"{label} stage is invalid")
+    reason = receipt.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        raise GateValidationError(f"{label} reason must be nonempty")
+
+    checkpoint = _mapping(receipt.get("checkpoint"), f"{label} checkpoint")
+    _exact_keys(
+        checkpoint,
+        {"path", "sha256", "size_bytes", "global_step"},
+        f"{label} checkpoint",
+    )
+    checkpoint_path = _absolute_project_checkpoint_path(
+        checkpoint.get("path"), f"{label} checkpoint path"
+    )
+    checkpoint_identity = {
+        "path": checkpoint_path,
+        "sha256": _sha256(checkpoint.get("sha256"), f"{label} checkpoint digest"),
+        "size_bytes": _integer(
+            checkpoint.get("size_bytes"), f"{label} checkpoint size", minimum=1
+        ),
+        "global_step": _integer(
+            checkpoint.get("global_step"), f"{label} checkpoint step", minimum=0
+        ),
+    }
+
+    config = _mapping(receipt.get("config"), f"{label} config")
+    _exact_keys(
+        config,
+        {"path", "sha256", "sampling", "sampling_sha256"},
+        f"{label} config",
+    )
+    config_path = _absolute_repository_path(config.get("path"), f"{label} config path")
+    config_relative_path = config_path.relative_to(
+        Path(os.path.abspath(REPOSITORY_ROOT))
+    )
+    config_sha256 = _sha256(config.get("sha256"), f"{label} config digest")
+    sampling = _mapping(config.get("sampling"), f"{label} sampling config")
+    sampling_sha256 = _sha256(config.get("sampling_sha256"), f"{label} sampling digest")
+    if canonical_json_sha256(sampling) != sampling_sha256:
+        raise GateValidationError(f"{label} sampling digest is not canonical")
+    try:
+        normalized_sampling = denovo_report.validate_sampling_config(sampling)
+    except ValueError as error:
+        raise GateValidationError(
+            f"{label} sampling config is invalid: {error}"
+        ) from error
+    if normalized_sampling != sampling or sampling.get("diffusion_type") != "udlm":
+        raise GateValidationError(f"{label} must describe canonical UDLM sampling")
+    if pilot_mode == "registered_selection" and sampling.get("num_steps") != 128:
+        raise GateValidationError(
+            f"{label} registered selection requires the 128-NFE sampling config"
+        )
+
+    source = _mapping(receipt.get("source_revision"), f"{label} source revision")
+    _exact_keys(source, {"head", "upstream"}, f"{label} source revision")
+    source_revision = _git_revision(source.get("head"), f"{label} source revision")
+    if source.get("upstream") != source_revision:
+        raise GateValidationError(f"{label} source was not clean and pushed")
+
+    command = receipt.get("command")
+    if (
+        not isinstance(command, list)
+        or len(command) != 20
+        or any(not isinstance(value, str) or not value for value in command)
+    ):
+        raise GateValidationError(f"{label} command must contain exactly ten pairs")
+    interpreter = Path(command[0])
+    if interpreter != _project_training_python_executable():
+        raise GateValidationError(f"{label} command interpreter is not project .venv")
+    expected_command = [
+        command[0],
+        str(
+            Path(os.path.abspath(REPOSITORY_ROOT / "scripts/exps/denovo/benchmark.py"))
+        ),
+        "--checkpoint",
+        str(checkpoint_path),
+        "--expected-checkpoint-sha256",
+        checkpoint_identity["sha256"],
+        "--expected-source-revision",
+        source_revision,
+        "--config",
+        str(config_path),
+        "--expected-config-sha256",
+        config_sha256,
+        "--num-samples",
+        str(requested_samples),
+        "--seed",
+        str(pilot_seed),
+        "--device",
+        "cuda:0",
+        "--output-dir",
+        str(Path(os.path.abspath(REPOSITORY_ROOT / receipt_path.parent))),
+    ]
+    if command != expected_command:
+        raise GateValidationError(f"{label} command differs from its pilot launch")
+
+    launcher_path = Path(
+        os.path.abspath(REPOSITORY_ROOT / DENOVO_LAUNCHER_RELATIVE_PATH)
+    )
+    launcher_source = _failure_supporting_reference(
+        receipt.get("launcher_source"),
+        label=f"{label} launcher source",
+        artifact_loader=artifact_loader,
+        expected_path=launcher_path,
+    )
+    log = _failure_supporting_reference(
+        receipt.get("log"),
+        label=f"{label} log",
+        artifact_loader=artifact_loader,
+    )
+    expected_log_name = (
+        denovo_report.benchmark_run_label(
+            checkpoint_identity["global_step"],
+            checkpoint_identity["sha256"],
+            pilot_seed,
+        )
+        + ".log"
+    )
+    if (
+        log["relative_path"].name != expected_log_name
+        or log["relative_path"].parent.name != attempt_id
+        or log["relative_path"].parent == receipt_path.parent.parent
+    ):
+        raise GateValidationError(
+            f"{label} log path is not keyed by a distinct attempt root"
+        )
+
+    partials = _mapping(receipt.get("partial_artifacts"), f"{label} partial artifacts")
+    _exact_keys(
+        partials, {"summary_json", "raw_samples_csv"}, f"{label} partial artifacts"
+    )
+    normalized_partials: dict[str, dict[str, Any] | None] = {}
+    for name, filename in (
+        ("summary_json", "summary.json"),
+        ("raw_samples_csv", "raw_samples.csv"),
+    ):
+        value = partials.get(name)
+        if value is None:
+            normalized_partials[name] = None
+            continue
+        normalized_partials[name] = _failure_supporting_reference(
+            value,
+            label=f"{label} partial {name}",
+            artifact_loader=artifact_loader,
+            expected_path=Path(
+                os.path.abspath(REPOSITORY_ROOT / receipt_path.parent / filename)
+            ),
+        )
+
+    try:
+        config_blob = artifact_loader(config_relative_path)
+    except Exception as error:
+        raise GateValidationError(
+            f"{label} config is unavailable at the ledger revision"
+        ) from error
+    if (
+        not isinstance(config_blob, bytes)
+        or _sha256_bytes(config_blob) != config_sha256
+    ):
+        raise GateValidationError(f"{label} config Git blob differs")
+    try:
+        import yaml
+
+        source_config = yaml.safe_load(config_blob.decode("utf-8"))
+        if not isinstance(source_config, Mapping):
+            raise ValueError("config root is not an object")
+        canonical_json_sha256(source_config)
+        source_sampling = denovo_report.validate_sampling_config(source_config)
+    except (TypeError, UnicodeDecodeError, ValueError, yaml.YAMLError) as error:
+        raise GateValidationError(
+            f"{label} committed config is invalid: {error}"
+        ) from error
+    if source_sampling != dict(sampling):
+        raise GateValidationError(
+            f"{label} sampling config differs from the committed YAML"
+        )
+    return {
+        "attempt_id": attempt_id,
+        "pilot_seed": pilot_seed,
+        "pilot_mode": pilot_mode,
+        "requested_samples": requested_samples,
+        "started_at": started_at,
+        "failed_at": failed_at,
+        "source_revision": source_revision,
+        "launcher_source_sha256": launcher_source["sha256"],
+        "config_relative_path": config_relative_path,
+        "config_sha256": config_sha256,
+        "checkpoint": checkpoint_identity,
+        "stage": stage,
+        "reason": reason,
+        "process_exit_status": process_exit_status,
+        "log": log,
+        "partial_artifacts": normalized_partials,
+    }
+
+
+def _validate_pilot_run_result(
+    value: object,
+    *,
+    evidence: Mapping[str, Any],
+    summary_ref: Mapping[str, Any],
+    raw_ref: Mapping[str, Any],
+    receipt_ref: Mapping[str, Any],
+) -> dict[str, Any]:
+    label = (
+        f"independent pilot run validation for {evidence['attempt_id']} "
+        f"seed {evidence['pilot_seed']}"
+    )
+    result = _mapping(value, label)
+    _exact_keys(result, _PILOT_RUN_VALIDATION_KEYS, label)
+    for field in ("attempt_id", "candidate_id", "pilot_seed"):
+        if result.get(field) != evidence[field]:
+            raise GateValidationError(f"{label} {field} disagrees with evidence")
+    requested_samples = _integer(
+        result.get("requested_samples"), f"{label} requested samples", minimum=1
+    )
+    nfe = _integer(result.get("nfe"), f"{label} NFE", minimum=1)
+    metric_branch = result.get("metric_branch")
+    if metric_branch not in {"released_comparable", "strict"}:
+        raise GateValidationError(f"{label} metric branch is invalid")
+
+    checkpoint = _mapping(result.get("checkpoint"), f"{label} checkpoint")
+    _exact_keys(
+        checkpoint, {"sha256", "size_bytes", "global_step"}, f"{label} checkpoint"
+    )
+    checkpoint_normalized = {
+        "sha256": _sha256(checkpoint.get("sha256"), f"{label} checkpoint digest"),
+        "size_bytes": _integer(
+            checkpoint.get("size_bytes"), f"{label} checkpoint size", minimum=1
+        ),
+        "global_step": _integer(
+            checkpoint.get("global_step"), f"{label} checkpoint step", minimum=1
+        ),
+    }
+    evaluation_config = _mapping(
+        result.get("evaluation_config"), f"{label} evaluation config"
+    )
+    _exact_keys(
+        evaluation_config,
+        {"relative_path", "sha256"},
+        f"{label} evaluation config",
+    )
+    evaluation_config_normalized = {
+        "relative_path": _relative_path(
+            evaluation_config.get("relative_path"),
+            f"{label} evaluation config path",
+            suffix=".yaml",
+        ),
+        "sha256": _sha256(
+            evaluation_config.get("sha256"), f"{label} evaluation config digest"
+        ),
+    }
+    sampling = _mapping(result.get("sampling"), f"{label} sampling")
+    _exact_keys(sampling, {"config", "sha256"}, f"{label} sampling")
+    sampling_config = _mapping(sampling.get("config"), f"{label} sampling config")
+    sampling_sha256 = _sha256(sampling.get("sha256"), f"{label} sampling digest")
+    if canonical_json_sha256(sampling_config) != sampling_sha256:
+        raise GateValidationError(f"{label} sampling digest is not canonical")
+    try:
+        inference_weights = denovo_report.validate_inference_weights(
+            result.get("inference_weights"), require_ema=True
+        )
+    except ValueError as error:
+        raise GateValidationError(
+            f"{label} inference weights are invalid: {error}"
+        ) from error
+
+    receipt = _mapping(
+        result.get("training_exit_receipt"), f"{label} training exit receipt"
+    )
+    _exact_keys(
+        receipt,
+        {"relative_path", "sha256", "schema_version", "recorded_at_utc"},
+        f"{label} training exit receipt",
+    )
+    receipt_normalized = _artifact_reference(
+        {key: receipt[key] for key in ("relative_path", "sha256", "schema_version")},
+        label=f"{label} training exit receipt",
+        suffix=".json",
+        require_schema=True,
+    )
+    if receipt_normalized != dict(receipt_ref):
+        raise GateValidationError(f"{label} training receipt reference differs")
+    receipt_recorded = _timestamp(
+        receipt.get("recorded_at_utc"), f"{label} training receipt timestamp"
+    )
+    started = _timestamp(result.get("started_at_utc"), f"{label} start")
+    completed = _timestamp(result.get("completed_at_utc"), f"{label} completion")
+    if not receipt_recorded < started < completed:
+        raise GateValidationError(
+            f"{label} must start after training receipt and complete afterwards"
+        )
+
+    if result.get("summary_json_sha256") != summary_ref["sha256"]:
+        raise GateValidationError(f"{label} summary digest differs from evidence")
+    if result.get("raw_samples_csv_sha256") != raw_ref["sha256"]:
+        raise GateValidationError(f"{label} raw CSV digest differs from evidence")
+    quality = _finite(result.get("quality"), f"{label} quality")
+    diversity_raw = result.get("diversity")
+    diversity = (
+        None if diversity_raw is None else _finite(diversity_raw, f"{label} diversity")
+    )
+    if not 0.0 <= quality <= 1.0 or (
+        diversity is not None and not 0.0 <= diversity <= 1.0
+    ):
+        raise GateValidationError(f"{label} quality/diversity must lie in [0, 1]")
+    rescore = _mapping(result.get("independent_rescore"), f"{label} rescore")
+    expected_rescore = {
+        "all_21_fields_match": True,
+        "both_metric_branches_match": True,
+        "failure_counts_match": True,
+        "raw_model_text_redecoded": True,
+    }
+    _exact_keys(rescore, set(expected_rescore), f"{label} rescore")
+    if dict(rescore) != expected_rescore:
+        raise GateValidationError(f"{label} independent rescore is incomplete")
+
+    normalized = {
+        "attempt_id": evidence["attempt_id"],
+        "candidate_id": evidence["candidate_id"],
+        "pilot_seed": evidence["pilot_seed"],
+        "requested_samples": requested_samples,
+        "nfe": nfe,
+        "metric_branch": metric_branch,
+        "checkpoint": checkpoint_normalized,
+        "evaluation_config": evaluation_config_normalized,
+        "sampling": {"config": dict(sampling_config), "sha256": sampling_sha256},
+        "inference_weights": inference_weights,
+        "runner_sha256": _sha256(result.get("runner_sha256"), f"{label} runner digest"),
+        "sampler_source_sha256": _sha256(
+            result.get("sampler_source_sha256"), f"{label} sampler digest"
+        ),
+        "implementation_inputs_sha256": _sha256(
+            result.get("implementation_inputs_sha256"),
+            f"{label} implementation inputs digest",
+        ),
+        "metric_inputs_sha256": _sha256(
+            result.get("metric_inputs_sha256"), f"{label} metric inputs digest"
+        ),
+        "benchmark_revision": _git_revision(
+            result.get("benchmark_revision"), f"{label} benchmark revision"
+        ),
+        "started_at": started,
+        "completed_at": completed,
+        "training_exit_receipt": {
+            **receipt_normalized,
+            "recorded_at_utc": receipt_recorded.isoformat(),
+        },
+        "summary_json_sha256": summary_ref["sha256"],
+        "raw_samples_csv_sha256": raw_ref["sha256"],
+        "quality": quality,
+        "diversity": diversity,
+        "independent_rescore": dict(expected_rescore),
+    }
+    return normalized
 
 
 def validate_candidate_ledger(
@@ -3181,12 +5935,15 @@ def validate_candidate_ledger(
     *,
     candidate_id: str,
     artifact_loader: Callable[[Path], bytes],
+    pilot_run_validator: Callable[[Mapping[str, Any]], Mapping[str, Any]],
 ) -> dict[str, Any]:
-    """Validate pilot evidence and deterministically recompute the selection.
+    """Recompute pilot selection from committed envelopes and raw molecules.
 
-    The ledger is intentionally a small index, not a second source of pilot
-    truth.  Every score used for selection is recomputed from immutable pilot
-    evidence bytes supplied by ``artifact_loader`` (Git blobs in production).
+    Schema 2 treats every seed as an independent success/failure outcome.  A
+    partially failed attempt therefore retains and validates its completed
+    seed, but cannot enter selection.  Successful envelopes carry no score:
+    the supplied validator must structurally validate the schema-7 benchmark
+    artifacts and independently re-decode and re-score ``raw_model_text``.
     """
 
     required = {
@@ -3214,14 +5971,20 @@ def validate_candidate_ledger(
         raise GateValidationError(
             "candidate ledger must disclose at least one pilot attempt"
         )
+
     attempt_ids: set[str] = set()
     artifact_paths: set[Path] = set()
     eligible_attempts: list[dict[str, Any]] = []
+    all_completed_outcomes: list[dict[str, Any]] = []
+    all_failed_outcomes: list[dict[str, Any]] = []
     artifact_count = 0
     ineligible_completed_attempt_count = 0
+    undefined_selection_metric_attempt_count = 0
     failed_attempt_count = 0
+    partially_failed_attempt_count = 0
     for index, raw_attempt in enumerate(attempts):
-        attempt = _mapping(raw_attempt, f"candidate ledger attempt {index}")
+        attempt_label = f"candidate ledger attempt {index}"
+        attempt = _mapping(raw_attempt, attempt_label)
         _exact_keys(
             attempt,
             {
@@ -3234,7 +5997,7 @@ def validate_candidate_ledger(
                 "selection_score",
                 "artifact_refs",
             },
-            f"candidate ledger attempt {index}",
+            attempt_label,
         )
         attempt_id = attempt.get("attempt_id")
         if (
@@ -3254,70 +6017,13 @@ def validate_candidate_ledger(
             raise GateValidationError(
                 "candidate ledger candidate_id has invalid syntax"
             )
-        status = attempt.get("status")
-        eligible = attempt.get("eligible_for_selection")
-        if status == "completed":
-            if type(eligible) is not bool:
-                raise GateValidationError(
-                    "completed pilot eligibility must be a boolean"
-                )
-            expected_artifact_kind = "pilot_evaluation"
-            if eligible:
-                if attempt.get("ineligibility_reason") is not None:
-                    raise GateValidationError(
-                        "eligible pilot attempts must have a null ineligibility reason"
-                    )
-                score = _mapping(
-                    attempt.get("selection_score"),
-                    f"candidate ledger attempt {attempt_id} selection score",
-                )
-                _exact_keys(
-                    score,
-                    {"mean_released_quality", "mean_released_diversity"},
-                    f"candidate ledger attempt {attempt_id} selection score",
-                )
-                declared_quality = _finite(
-                    score.get("mean_released_quality"),
-                    f"candidate ledger attempt {attempt_id} mean quality",
-                )
-                declared_diversity = _finite(
-                    score.get("mean_released_diversity"),
-                    f"candidate ledger attempt {attempt_id} mean diversity",
-                )
-                if not 0.0 <= declared_quality <= 1.0:
-                    raise GateValidationError("pilot mean quality must be in [0, 1]")
-                if not 0.0 <= declared_diversity <= 1.0:
-                    raise GateValidationError("pilot mean diversity must be in [0, 1]")
-            else:
-                if (
-                    attempt.get("selection_score") is not None
-                    or attempt.get("ineligibility_reason")
-                    != NONREGISTERED_OPERATING_POINT_REASON
-                ):
-                    raise GateValidationError(
-                        "nonregistered completed pilots must have a null score and "
-                        "the fixed ineligibility reason"
-                    )
-                declared_quality = None
-                declared_diversity = None
-        elif status == "failed":
-            if (
-                eligible is not False
-                or attempt.get("selection_score") is not None
-                or attempt.get("ineligibility_reason") != FAILED_PILOT_REASON
-            ):
-                raise GateValidationError(
-                    "failed pilot attempts must be ineligible with a null score "
-                    "and the fixed failure reason"
-                )
-            expected_artifact_kind = "pilot_failure"
-            declared_quality = None
-            declared_diversity = None
-            failed_attempt_count += 1
-        else:
+        if attempt.get("status") not in {"completed", "failed"}:
             raise GateValidationError(
                 "pilot attempt status must be completed or failed"
             )
+        if type(attempt.get("eligible_for_selection")) is not bool:
+            raise GateValidationError("pilot eligibility must be boolean")
+
         seeds = attempt.get("pilot_seeds")
         if not isinstance(seeds, list) or not seeds:
             raise GateValidationError(
@@ -3336,13 +6042,12 @@ def validate_candidate_ledger(
         refs = attempt.get("artifact_refs")
         if not isinstance(refs, list) or len(refs) != len(seeds):
             raise GateValidationError(
-                "each pilot seed must bind exactly one pilot evidence artifact"
+                "each pilot seed must bind exactly one pilot outcome artifact"
             )
+
         evidence_seeds: set[int] = set()
-        qualities: list[float] = []
-        diversities: list[float] = []
-        checkpoint_shas: set[str] = set()
-        observed_operating_points: list[dict[str, Any]] = []
+        completed_rows: list[dict[str, Any]] = []
+        failed_outcomes = 0
         for ref_index, raw_ref in enumerate(refs):
             ref_label = f"candidate attempt {attempt_id} artifact ref {ref_index}"
             ref = _mapping(raw_ref, ref_label)
@@ -3357,10 +6062,9 @@ def validate_candidate_ledger(
                 },
                 ref_label,
             )
-            if ref.get("artifact_kind") != expected_artifact_kind:
-                raise GateValidationError(
-                    f"{ref_label} kind disagrees with attempt status"
-                )
+            artifact_kind = ref.get("artifact_kind")
+            if artifact_kind not in {"pilot_evaluation", "pilot_failure"}:
+                raise GateValidationError(f"{ref_label} kind is invalid")
             ref_seed = ref.get("pilot_seed")
             if type(ref_seed) is not int or ref_seed not in seeds:
                 raise GateValidationError(f"{ref_label} pilot seed is not declared")
@@ -3372,9 +6076,16 @@ def validate_candidate_ledger(
             relative_path = _relative_path(
                 ref.get("relative_path"), f"{ref_label} path", suffix=".json"
             )
-            if relative_path.parts[:3] != ("experiments", "udlm", "pilots"):
+            if relative_path.parts != (
+                "experiments",
+                "udlm",
+                "pilots",
+                attempt_id,
+                f"seed_{ref_seed}.json",
+            ):
                 raise GateValidationError(
-                    "pilot evidence must live under experiments/udlm/pilots"
+                    "pilot evidence path must be exactly experiments/udlm/pilots/"
+                    "<attempt_id>/seed_<pilot_seed>.json"
                 )
             if relative_path in artifact_paths:
                 raise GateValidationError(
@@ -3398,14 +6109,11 @@ def validate_candidate_ledger(
                 raise GateValidationError(
                     f"pilot evidence digest differs: {relative_path}"
                 )
+            evidence_label = f"pilot evidence {relative_path.as_posix()}"
             evidence = _mapping(
-                strict_json_loads(
-                    artifact_blob,
-                    label=f"pilot evidence {relative_path.as_posix()}",
-                ),
-                f"pilot evidence {relative_path.as_posix()}",
+                strict_json_loads(artifact_blob, label=evidence_label), evidence_label
             )
-            common_evidence_fields = {
+            common_fields = {
                 "schema_version",
                 "artifact_kind",
                 "status",
@@ -3414,22 +6122,23 @@ def validate_candidate_ledger(
                 "pilot_seed",
                 "final_seed_results_included",
             }
-            if status == "completed":
+            if artifact_kind == "pilot_evaluation":
                 _exact_keys(
                     evidence,
-                    common_evidence_fields | {"checkpoint_sha256", "evaluation"},
-                    f"pilot evidence {relative_path.as_posix()}",
+                    common_fields | {"training_exit_receipt", "benchmark_artifacts"},
+                    evidence_label,
                 )
+                expected_status = "completed"
             else:
                 _exact_keys(
                     evidence,
-                    common_evidence_fields | {"failure"},
-                    f"pilot evidence {relative_path.as_posix()}",
+                    common_fields | {"failure_receipt"},
+                    evidence_label,
                 )
-            expected_status = "completed" if status == "completed" else "failed"
+                expected_status = "failed"
             bindings = {
                 "schema_version": PILOT_EVIDENCE_SCHEMA_VERSION,
-                "artifact_kind": expected_artifact_kind,
+                "artifact_kind": artifact_kind,
                 "status": expected_status,
                 "attempt_id": attempt_id,
                 "candidate_id": attempt_candidate_id,
@@ -3441,129 +6150,262 @@ def validate_candidate_ledger(
                     raise GateValidationError(
                         f"pilot evidence {field} disagrees with its ledger attempt"
                     )
-            if status == "completed":
-                checkpoint_shas.add(
-                    _sha256(
-                        evidence.get("checkpoint_sha256"),
-                        f"pilot evidence {relative_path} checkpoint digest",
-                    )
+
+            if artifact_kind == "pilot_evaluation":
+                receipt_ref = _artifact_reference(
+                    evidence.get("training_exit_receipt"),
+                    label=f"{evidence_label} training exit receipt",
+                    suffix=".json",
+                    require_schema=True,
                 )
-                evaluation = _mapping(
-                    evidence.get("evaluation"),
-                    f"pilot evidence {relative_path} evaluation",
+                receipt_parts = receipt_ref["relative_path"].parts
+                if (
+                    receipt_ref["schema_version"] != PILOT_EXIT_STATUS_SCHEMA_VERSION
+                    or len(receipt_parts) != 4
+                    or receipt_parts[:2] != ("output", "udlm")
+                    or RUN_NAME_PATTERN.fullmatch(receipt_parts[2]) is None
+                    or receipt_parts[3] != "pilot_exit_status.json"
+                ):
+                    raise GateValidationError(
+                        f"{evidence_label} training exit receipt path/schema is invalid"
+                    )
+                benchmark_artifacts = _mapping(
+                    evidence.get("benchmark_artifacts"),
+                    f"{evidence_label} benchmark artifacts",
                 )
                 _exact_keys(
-                    evaluation,
+                    benchmark_artifacts,
+                    {"summary_json", "raw_samples_csv"},
+                    f"{evidence_label} benchmark artifacts",
+                )
+                summary_ref = _pilot_output_artifact_reference(
+                    benchmark_artifacts.get("summary_json"),
+                    label=f"{evidence_label} summary",
+                    suffix=".json",
+                    attempt_id=attempt_id,
+                    pilot_seed=ref_seed,
+                    require_schema=True,
+                )
+                if summary_ref["schema_version"] != denovo_report.RUN_SCHEMA_VERSION:
+                    raise GateValidationError(
+                        f"{evidence_label} benchmark summary schema is unsupported"
+                    )
+                raw_ref = _pilot_output_artifact_reference(
+                    benchmark_artifacts.get("raw_samples_csv"),
+                    label=f"{evidence_label} raw samples",
+                    suffix=".csv",
+                    attempt_id=attempt_id,
+                    pilot_seed=ref_seed,
+                    require_schema=False,
+                )
+                if (
+                    summary_ref["relative_path"].parent
+                    != raw_ref["relative_path"].parent
+                ):
+                    raise GateValidationError(
+                        f"{evidence_label} summary and raw CSV must be siblings"
+                    )
+                try:
+                    raw_result = pilot_run_validator(evidence)
+                except GateValidationError:
+                    raise
+                except Exception as error:
+                    raise GateValidationError(
+                        f"{evidence_label} independent validation failed: {error}"
+                    ) from error
+                completed_row = _validate_pilot_run_result(
+                    raw_result,
+                    evidence=evidence,
+                    summary_ref=summary_ref,
+                    raw_ref=raw_ref,
+                    receipt_ref=receipt_ref,
+                )
+                completed_rows.append(completed_row)
+                all_completed_outcomes.append(
                     {
-                        "metric_branch",
-                        "requested_samples",
-                        "nfe",
-                        "quality",
-                        "diversity",
-                    },
-                    f"pilot evidence {relative_path} evaluation",
-                )
-                metric_branch = evaluation.get("metric_branch")
-                if metric_branch not in {"released_comparable", "strict"}:
-                    raise GateValidationError("pilot metric branch is invalid")
-                requested_samples = _integer(
-                    evaluation.get("requested_samples"),
-                    f"pilot evidence {relative_path} requested samples",
-                    minimum=1,
-                )
-                nfe = _integer(
-                    evaluation.get("nfe"),
-                    f"pilot evidence {relative_path} NFE",
-                    minimum=1,
-                )
-                quality = _finite(
-                    evaluation.get("quality"),
-                    f"pilot evidence {relative_path} quality",
-                )
-                diversity = _finite(
-                    evaluation.get("diversity"),
-                    f"pilot evidence {relative_path} diversity",
-                )
-                if not 0.0 <= quality <= 1.0:
-                    raise GateValidationError("pilot quality must be in [0, 1]")
-                if not 0.0 <= diversity <= 1.0:
-                    raise GateValidationError("pilot diversity must be in [0, 1]")
-                qualities.append(quality)
-                diversities.append(diversity)
-                observed_operating_points.append(
-                    {
+                        "attempt_id": attempt_id,
                         "pilot_seed": ref_seed,
-                        "requested_samples": requested_samples,
-                        "nfe": nfe,
-                        "metric_branch": metric_branch,
+                        "benchmark_revision": completed_row["benchmark_revision"],
+                        "completed_at_utc": completed_row["completed_at"].isoformat(),
                     }
                 )
             else:
-                failure = _mapping(
-                    evidence.get("failure"),
-                    f"pilot evidence {relative_path} failure",
+                failure_ref = _artifact_reference(
+                    evidence.get("failure_receipt"),
+                    label=f"{evidence_label} failure receipt",
+                    suffix=".json",
+                    require_schema=True,
                 )
-                _exact_keys(
-                    failure,
-                    {"stage", "reason"},
-                    f"pilot evidence {relative_path} failure",
-                )
-                if failure.get("stage") not in {
-                    "training",
-                    "sampling",
-                    "evaluation",
-                    "infrastructure",
-                }:
-                    raise GateValidationError("pilot failure stage is invalid")
+                failure_path = failure_ref["relative_path"]
                 if (
-                    not isinstance(failure.get("reason"), str)
-                    or not failure["reason"].strip()
+                    failure_ref["schema_version"]
+                    != PILOT_FAILURE_RECEIPT_SCHEMA_VERSION
+                    or len(failure_path.parts) < 4
+                    or failure_path.parts[0] != "output"
+                    or failure_path.parent.name != f"seed_{ref_seed}"
+                    or failure_path.parent.parent.name != attempt_id
+                    or failure_path.name != "failure_receipt.json"
                 ):
-                    raise GateValidationError("pilot failure reason must be nonempty")
+                    raise GateValidationError(
+                        "pilot failure receipt must be exactly output/.../"
+                        "<attempt_id>/seed_<pilot_seed>/failure_receipt.json"
+                    )
+                try:
+                    failure_blob = artifact_loader(failure_path)
+                except GateValidationError:
+                    raise
+                except Exception as error:
+                    raise GateValidationError(
+                        f"pilot failure receipt is unavailable: {failure_path}"
+                    ) from error
+                if (
+                    not isinstance(failure_blob, bytes)
+                    or _sha256_bytes(failure_blob) != failure_ref["sha256"]
+                ):
+                    raise GateValidationError(
+                        f"pilot failure receipt digest differs: {failure_path}"
+                    )
+                failure_document = _mapping(
+                    strict_json_loads(
+                        failure_blob,
+                        label=f"pilot failure receipt {failure_path.as_posix()}",
+                    ),
+                    f"pilot failure receipt {failure_path.as_posix()}",
+                )
+                failure_result = _validate_pilot_failure_receipt(
+                    failure_document,
+                    receipt_path=failure_path,
+                    attempt_id=attempt_id,
+                    candidate_id=attempt_candidate_id,
+                    pilot_seed=ref_seed,
+                    artifact_loader=artifact_loader,
+                )
+                all_failed_outcomes.append(failure_result)
+                failed_outcomes += 1
             artifact_count += 1
+
         if evidence_seeds != set(seeds):
             raise GateValidationError(
                 f"candidate attempt {attempt_id} lacks evidence for a pilot seed"
             )
-        if status == "completed":
-            if len(checkpoint_shas) != 1:
-                raise GateValidationError(
-                    "all seed evidence for one attempt must use one checkpoint"
-                )
-            derived_eligible = tuple(seeds) == REGISTERED_SELECTION_PILOT_SEEDS and all(
-                point["requested_samples"] == REGISTERED_SELECTION_SAMPLES_PER_SEED
-                and point["nfe"] == REGISTERED_SELECTION_NFE
-                and point["metric_branch"] == REGISTERED_SELECTION_METRIC_BRANCH
-                for point in observed_operating_points
+        derived_status = "failed" if failed_outcomes else "completed"
+        if attempt.get("status") != derived_status:
+            raise GateValidationError(
+                "pilot attempt status disagrees with its per-seed outcomes"
             )
-            if eligible is not derived_eligible:
+        if completed_rows:
+            identity_fields = (
+                "checkpoint",
+                "evaluation_config",
+                "sampling",
+                "inference_weights",
+                "runner_sha256",
+                "sampler_source_sha256",
+                "implementation_inputs_sha256",
+                "metric_inputs_sha256",
+                "benchmark_revision",
+                "training_exit_receipt",
+            )
+            first_identity = {
+                field: completed_rows[0][field] for field in identity_fields
+            }
+            for row in completed_rows[1:]:
+                if {field: row[field] for field in identity_fields} != first_identity:
+                    raise GateValidationError(
+                        "all completed seed outcomes for one attempt must use one "
+                        "checkpoint, config, implementation, and training receipt"
+                    )
+        else:
+            first_identity = None
+
+        if failed_outcomes:
+            if (
+                attempt.get("eligible_for_selection") is not False
+                or attempt.get("selection_score") is not None
+                or attempt.get("ineligibility_reason") != FAILED_PILOT_REASON
+            ):
                 raise GateValidationError(
-                    "completed pilot eligibility disagrees with the frozen "
-                    "registered operating point"
+                    "any failed seed makes the complete attempt ineligible with the "
+                    "fixed failure reason and a null score"
                 )
-            recomputed_quality = statistics.fmean(qualities)
-            recomputed_diversity = statistics.fmean(diversities)
-            if derived_eligible:
-                _close(
-                    declared_quality,
-                    recomputed_quality,
-                    f"candidate attempt {attempt_id} mean released quality",
+            failed_attempt_count += 1
+            if completed_rows:
+                partially_failed_attempt_count += 1
+            continue
+
+        registered_operating_point = tuple(
+            seeds
+        ) == REGISTERED_SELECTION_PILOT_SEEDS and all(
+            row["requested_samples"] == REGISTERED_SELECTION_SAMPLES_PER_SEED
+            and row["nfe"] == REGISTERED_SELECTION_NFE
+            and row["metric_branch"] == REGISTERED_SELECTION_METRIC_BRANCH
+            for row in completed_rows
+        )
+        undefined_selection_metric = any(
+            row["diversity"] is None for row in completed_rows
+        )
+        derived_eligible = registered_operating_point and not undefined_selection_metric
+        if attempt.get("eligible_for_selection") is not derived_eligible:
+            raise GateValidationError(
+                "completed pilot eligibility disagrees with the registered operating point"
+            )
+        if not derived_eligible:
+            expected_reason = (
+                UNDEFINED_SELECTION_METRIC_REASON
+                if registered_operating_point and undefined_selection_metric
+                else NONREGISTERED_OPERATING_POINT_REASON
+            )
+            if (
+                attempt.get("selection_score") is not None
+                or attempt.get("ineligibility_reason") != expected_reason
+            ):
+                raise GateValidationError(
+                    "nonregistered completed pilots must have a null score and the "
+                    "derived fixed ineligibility reason"
                 )
-                _close(
-                    declared_diversity,
-                    recomputed_diversity,
-                    f"candidate attempt {attempt_id} mean released diversity",
-                )
-                eligible_attempts.append(
-                    {
-                        "attempt_id": attempt_id,
-                        "candidate_id": attempt_candidate_id,
-                        "quality": recomputed_quality,
-                        "diversity": recomputed_diversity,
-                    }
-                )
-            else:
-                ineligible_completed_attempt_count += 1
+            ineligible_completed_attempt_count += 1
+            if undefined_selection_metric:
+                undefined_selection_metric_attempt_count += 1
+            continue
+
+        if attempt.get("ineligibility_reason") is not None:
+            raise GateValidationError(
+                "eligible pilot attempts must have a null ineligibility reason"
+            )
+        score = _mapping(
+            attempt.get("selection_score"),
+            f"candidate ledger attempt {attempt_id} selection score",
+        )
+        _exact_keys(
+            score,
+            {"mean_released_quality", "mean_released_diversity"},
+            f"candidate ledger attempt {attempt_id} selection score",
+        )
+        recomputed_quality = statistics.fmean(row["quality"] for row in completed_rows)
+        recomputed_diversity = statistics.fmean(
+            row["diversity"] for row in completed_rows
+        )
+        _close(
+            score.get("mean_released_quality"),
+            recomputed_quality,
+            f"candidate attempt {attempt_id} mean released quality",
+        )
+        _close(
+            score.get("mean_released_diversity"),
+            recomputed_diversity,
+            f"candidate attempt {attempt_id} mean released diversity",
+        )
+        eligible_attempts.append(
+            {
+                "attempt_id": attempt_id,
+                "candidate_id": attempt_candidate_id,
+                "quality": recomputed_quality,
+                "diversity": recomputed_diversity,
+                "identity": first_identity,
+                "completed_at": max(row["completed_at"] for row in completed_rows),
+            }
+        )
+
     selection = _mapping(ledger.get("selection"), "candidate ledger selection")
     _exact_keys(
         selection,
@@ -3597,11 +6439,7 @@ def validate_candidate_ledger(
         raise GateValidationError("candidate ledger has no eligible completed attempt")
     expected_selected = min(
         eligible_attempts,
-        key=lambda item: (
-            -item["quality"],
-            -item["diversity"],
-            item["attempt_id"],
-        ),
+        key=lambda item: (-item["quality"], -item["diversity"], item["attempt_id"]),
     )
     if selected_attempt_id != expected_selected["attempt_id"]:
         raise GateValidationError(
@@ -3613,19 +6451,53 @@ def validate_candidate_ledger(
         )
     if expected_selected["candidate_id"] != candidate_id:
         raise GateValidationError("candidate lock does not name the pilot-score winner")
+    selected_identity = expected_selected["identity"]
+    if not isinstance(
+        selected_identity, Mapping
+    ):  # pragma: no cover - eligible invariant
+        raise GateValidationError("selected attempt has no completed run identity")
     return {
         "attempt_count": len(attempts),
         "eligible_attempt_count": len(eligible_attempts),
         "ineligible_completed_attempt_count": ineligible_completed_attempt_count,
+        "undefined_selection_metric_attempt_count": (
+            undefined_selection_metric_attempt_count
+        ),
         "failed_attempt_count": failed_attempt_count,
+        "partially_failed_attempt_count": partially_failed_attempt_count,
         "committed_pilot_artifact_count": artifact_count,
+        "completed_outcomes": sorted(
+            all_completed_outcomes,
+            key=lambda row: (row["attempt_id"], row["pilot_seed"]),
+        ),
+        "failed_outcomes": sorted(
+            all_failed_outcomes,
+            key=lambda row: (row["attempt_id"], row["pilot_seed"]),
+        ),
         "selected_attempt_id": expected_selected["attempt_id"],
         "selected_candidate_id": expected_selected["candidate_id"],
+        "selected_checkpoint": selected_identity["checkpoint"],
+        "selected_checkpoint_sha256": selected_identity["checkpoint"]["sha256"],
+        "selected_evaluation_config": selected_identity["evaluation_config"],
+        "selected_sampling": selected_identity["sampling"],
+        "selected_inference_weights": selected_identity["inference_weights"],
+        "selected_runner_sha256": selected_identity["runner_sha256"],
+        "selected_sampler_source_sha256": selected_identity["sampler_source_sha256"],
+        "selected_implementation_inputs_sha256": selected_identity[
+            "implementation_inputs_sha256"
+        ],
+        "selected_metric_inputs_sha256": selected_identity["metric_inputs_sha256"],
+        "selected_benchmark_revision": selected_identity["benchmark_revision"],
+        "selected_training_exit_receipt": selected_identity["training_exit_receipt"],
+        "selected_pilot_completed_at_utc": expected_selected[
+            "completed_at"
+        ].isoformat(),
         "selected_score": {
             "mean_released_quality": expected_selected["quality"],
             "mean_released_diversity": expected_selected["diversity"],
         },
         "selection_recomputed_from_pilot_evidence": True,
+        "selection_recomputed_from_raw_model_text": True,
     }
 
 
@@ -3655,6 +6527,7 @@ def validate_git_lock_firewall(
     candidate_lock_path: Path,
     candidate_lock_bytes: bytes,
     lock: Mapping[str, Any],
+    pilot_run_validator: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Prove the benchmark revision already contained the lock and ledger."""
 
@@ -3713,13 +6586,116 @@ def validate_git_lock_firewall(
     )
     if ledger.get("schema_version") != ledger_ref["schema_version"]:
         raise GateValidationError("candidate ledger schema disagrees with lock")
+    live_pilot_validator = (
+        _validate_completed_pilot_evidence_live
+        if pilot_run_validator is None
+        else pilot_run_validator
+    )
+
+    def committed_pilot_validator(evidence: Mapping[str, Any]) -> Mapping[str, Any]:
+        _require_completed_pilot_references_at_revision(evidence, benchmark_revision)
+        return live_pilot_validator(evidence)
+
     ledger_evidence = validate_candidate_ledger(
         ledger,
         candidate_id=lock["candidate_id"],
         artifact_loader=lambda relative_path: _git_blob(
             benchmark_revision, relative_path
         ),
+        pilot_run_validator=committed_pilot_validator,
     )
+    for outcome in ledger_evidence["completed_outcomes"]:
+        if (
+            not _timestamp(
+                outcome["completed_at_utc"],
+                f"pilot {outcome['attempt_id']} seed {outcome['pilot_seed']} completion",
+            )
+            < lock["locked_at"]
+        ):
+            raise GateValidationError(
+                "every disclosed completed pilot outcome must strictly predate "
+                "the candidate lock"
+            )
+        try:
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(REPOSITORY_ROOT),
+                    "merge-base",
+                    "--is-ancestor",
+                    outcome["benchmark_revision"],
+                    benchmark_revision,
+                ],
+                check=True,
+                capture_output=True,
+            )
+        except (OSError, subprocess.CalledProcessError) as error:
+            raise GateValidationError(
+                "a disclosed pilot benchmark revision is not an ancestor of the "
+                "final benchmark revision"
+            ) from error
+    for outcome in ledger_evidence["failed_outcomes"]:
+        if not outcome["failed_at"] < lock["locked_at"]:
+            raise GateValidationError(
+                "every disclosed failed pilot outcome must strictly predate "
+                "the candidate lock"
+            )
+        checkpoint_snapshot = _project_checkpoint_snapshot(
+            outcome["checkpoint"]["path"],
+            label=(
+                f"failed pilot {outcome['attempt_id']} seed "
+                f"{outcome['pilot_seed']} checkpoint"
+            ),
+        )
+        if (
+            checkpoint_snapshot["sha256"] != outcome["checkpoint"]["sha256"]
+            or checkpoint_snapshot["size_bytes"] != outcome["checkpoint"]["size_bytes"]
+        ):
+            raise GateValidationError(
+                "failed pilot checkpoint bytes differ from its producer receipt"
+            )
+        if (
+            outcome["launcher_source_sha256"]
+            != lock["benchmark_launcher_source_sha256"]
+        ):
+            raise GateValidationError(
+                "failed pilot launcher source differs from the candidate lock"
+            )
+        failure_revision = outcome["source_revision"]
+        try:
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(REPOSITORY_ROOT),
+                    "merge-base",
+                    "--is-ancestor",
+                    failure_revision,
+                    benchmark_revision,
+                ],
+                check=True,
+                capture_output=True,
+            )
+        except (OSError, subprocess.CalledProcessError) as error:
+            raise GateValidationError(
+                "a disclosed failed-pilot source revision is not an ancestor of "
+                "the final benchmark revision"
+            ) from error
+        if (
+            _sha256_bytes(_git_blob(failure_revision, DENOVO_LAUNCHER_RELATIVE_PATH))
+            != outcome["launcher_source_sha256"]
+        ):
+            raise GateValidationError(
+                "failed pilot source revision does not contain the receipt launcher"
+            )
+        if (
+            _sha256_bytes(_git_blob(failure_revision, outcome["config_relative_path"]))
+            != outcome["config_sha256"]
+        ):
+            raise GateValidationError(
+                "failed pilot source revision does not contain the receipt config"
+            )
     if ledger["selection"]["rule"] != lock["selection_rule"]:
         raise GateValidationError("candidate-lock and ledger selection rules disagree")
     if (
@@ -3729,6 +6705,81 @@ def validate_git_lock_firewall(
         raise GateValidationError(
             "candidate-lock and ledger checkpoint-selection rules disagree"
         )
+    locked_checkpoint_identity = {
+        key: lock["checkpoint"][key] for key in ("sha256", "size_bytes", "global_step")
+    }
+    if ledger_evidence["selected_checkpoint"] != locked_checkpoint_identity:
+        raise GateValidationError(
+            "candidate-lock checkpoint identity is not the pilot-ledger winner checkpoint"
+        )
+    if ledger_evidence["selected_evaluation_config"] != {
+        "relative_path": lock["evaluation_config_relative_path"],
+        "sha256": lock["evaluation_config_sha256"],
+    }:
+        raise GateValidationError(
+            "candidate-lock evaluation config is not the pilot-ledger winner config"
+        )
+    if ledger_evidence["selected_sampling"] != {
+        "config": lock["sampling_config"],
+        "sha256": lock["sampling_sha256"],
+    }:
+        raise GateValidationError(
+            "candidate-lock sampling config is not the pilot-ledger winner config"
+        )
+    selected_identity_checks = {
+        "selected_inference_weights": lock["inference_weights"],
+        "selected_runner_sha256": lock["benchmark_runner_sha256"],
+        "selected_sampler_source_sha256": lock["sampler_source_sha256"],
+        "selected_implementation_inputs_sha256": lock["implementation_inputs_sha256"],
+        "selected_metric_inputs_sha256": lock["metric_inputs_sha256"],
+    }
+    for evidence_field, expected in selected_identity_checks.items():
+        if ledger_evidence[evidence_field] != expected:
+            raise GateValidationError(
+                f"candidate-lock {evidence_field.removeprefix('selected_')} "
+                "is not the pilot-ledger winner identity"
+            )
+    selected_receipt = ledger_evidence["selected_training_exit_receipt"]
+    selected_receipt_ref = {
+        key: selected_receipt[key]
+        for key in ("relative_path", "sha256", "schema_version")
+    }
+    if selected_receipt_ref != lock["receipt"]:
+        raise GateValidationError(
+            "candidate-lock training receipt is not the pilot-ledger winner receipt"
+        )
+    if (
+        not _timestamp(
+            ledger_evidence["selected_pilot_completed_at_utc"],
+            "selected pilot completion",
+        )
+        < lock["locked_at"]
+    ):
+        raise GateValidationError(
+            "selected pilot evidence must strictly predate the candidate lock"
+        )
+    selected_pilot_revision = ledger_evidence["selected_benchmark_revision"]
+    selected_revision_blobs = {
+        lock["evaluation_config_relative_path"]: lock["evaluation_config_sha256"],
+        Path("scripts/exps/denovo/benchmark.py"): lock["benchmark_runner_sha256"],
+        Path("src/genmol/sampler.py"): lock["sampler_source_sha256"],
+        Path("scripts/exps/denovo/report.py"): lock["report_source_sha256"],
+        DENOVO_LAUNCHER_RELATIVE_PATH: lock["benchmark_launcher_source_sha256"],
+        PILOT_EVIDENCE_WRITER_RELATIVE_PATH: lock[
+            "pilot_evidence_writer_source_sha256"
+        ],
+        DENOVO_RESCORE_RELATIVE_PATH: lock["rescore_source_sha256"],
+        DENOVO_RESCORE_DEPENDENCY_RELATIVE_PATH: lock["rescore_dependency_sha256"],
+    }
+    for relative_path, expected_digest in selected_revision_blobs.items():
+        if (
+            _sha256_bytes(_git_blob(selected_pilot_revision, relative_path))
+            != expected_digest
+        ):
+            raise GateValidationError(
+                "selected pilot revision does not contain its locked evaluation "
+                f"source/config bytes: {relative_path.as_posix()}"
+            )
     config_blob = _git_blob(benchmark_revision, lock["evaluation_config_relative_path"])
     if _sha256_bytes(config_blob) != lock["evaluation_config_sha256"]:
         raise GateValidationError("benchmark revision evaluation-config blob differs")
@@ -3740,12 +6791,34 @@ def validate_git_lock_firewall(
     )
     if _sha256_bytes(runner_blob) != lock["benchmark_runner_sha256"]:
         raise GateValidationError("benchmark revision runner source blob differs")
+    launcher_blob = _git_blob(benchmark_revision, DENOVO_LAUNCHER_RELATIVE_PATH)
+    if _sha256_bytes(launcher_blob) != lock["benchmark_launcher_source_sha256"]:
+        raise GateValidationError("benchmark revision launcher source blob differs")
+    pilot_writer_blob = _git_blob(
+        benchmark_revision, PILOT_EVIDENCE_WRITER_RELATIVE_PATH
+    )
+    if _sha256_bytes(pilot_writer_blob) != lock["pilot_evidence_writer_source_sha256"]:
+        raise GateValidationError(
+            "benchmark revision pilot-evidence-writer source blob differs"
+        )
     gate_blob = _git_blob(benchmark_revision, Path("scripts/udlm/superiority_gate.py"))
     if _sha256_bytes(gate_blob) != lock["gate_source_sha256"]:
         raise GateValidationError("benchmark revision superiority-gate blob differs")
     report_blob = _git_blob(benchmark_revision, Path("scripts/exps/denovo/report.py"))
     if _sha256_bytes(report_blob) != lock["report_source_sha256"]:
         raise GateValidationError("benchmark revision de-novo-report blob differs")
+    rescore_blob = _git_blob(benchmark_revision, DENOVO_RESCORE_RELATIVE_PATH)
+    if _sha256_bytes(rescore_blob) != lock["rescore_source_sha256"]:
+        raise GateValidationError(
+            "benchmark revision independent-rescore source blob differs"
+        )
+    rescore_dependency_blob = _git_blob(
+        benchmark_revision, DENOVO_RESCORE_DEPENDENCY_RELATIVE_PATH
+    )
+    if _sha256_bytes(rescore_dependency_blob) != lock["rescore_dependency_sha256"]:
+        raise GateValidationError(
+            "benchmark revision independent-rescore dependency blob differs"
+        )
     try:
         subprocess.run(
             [
@@ -3804,7 +6877,11 @@ def validate_git_lock_firewall(
         "evaluation_config_exact_blob_at_benchmark_revision": True,
         "ema_sampler_source_exact_blob_at_benchmark_revision": True,
         "benchmark_runner_exact_blob_at_benchmark_revision": True,
+        "benchmark_launcher_exact_blob_at_benchmark_revision": True,
+        "pilot_evidence_writer_exact_blob_at_benchmark_revision": True,
         "analysis_sources_exact_blobs_at_benchmark_revision": True,
+        "independent_rescore_source_exact_blob_at_benchmark_revision": True,
+        "independent_rescore_dependency_exact_blob_at_benchmark_revision": True,
         "committed_pilot_artifact_count": ledger_evidence[
             "committed_pilot_artifact_count"
         ],
@@ -3812,7 +6889,13 @@ def validate_git_lock_firewall(
         "ineligible_completed_pilot_attempt_count": ledger_evidence[
             "ineligible_completed_attempt_count"
         ],
+        "undefined_selection_metric_pilot_attempt_count": ledger_evidence[
+            "undefined_selection_metric_attempt_count"
+        ],
         "failed_pilot_attempt_count": ledger_evidence["failed_attempt_count"],
+        "partially_failed_pilot_attempt_count": ledger_evidence[
+            "partially_failed_attempt_count"
+        ],
         "registered_selection_operating_point": {
             "generation_seeds": list(REGISTERED_SELECTION_PILOT_SEEDS),
             "requested_samples_per_seed": REGISTERED_SELECTION_SAMPLES_PER_SEED,
@@ -3820,8 +6903,14 @@ def validate_git_lock_firewall(
             "metric_branch": REGISTERED_SELECTION_METRIC_BRANCH,
         },
         "selected_attempt_id": ledger_evidence["selected_attempt_id"],
+        "selected_checkpoint_sha256": ledger_evidence["selected_checkpoint_sha256"],
+        "selected_training_exit_receipt": selected_receipt,
+        "selected_pilot_completed_at_utc": ledger_evidence[
+            "selected_pilot_completed_at_utc"
+        ],
         "selected_score": ledger_evidence["selected_score"],
         "selection_recomputed_from_committed_pilot_evidence": True,
+        "selection_recomputed_from_raw_model_text": True,
         "training_revision_is_ancestor": True,
     }
 
@@ -3986,8 +7075,10 @@ def _candidate_series(
         )
     if len(revisions) != 1:
         raise GateValidationError("candidate final seeds used different revisions")
-    if any(timestamp < lock["locked_at"] for timestamp in started_at):
-        raise GateValidationError("a final candidate run predates the candidate lock")
+    if any(not lock["locked_at"] < timestamp for timestamp in started_at):
+        raise GateValidationError(
+            "every final candidate run must start strictly after the candidate lock"
+        )
     if len(set(raw_hashes)) != 3 or len(set(summary_hashes)) != 3:
         raise GateValidationError("candidate final evidence hashes are not distinct")
 
@@ -4068,12 +7159,297 @@ def _candidate_series(
     }
 
 
+def independently_rescore_candidate_runs(
+    candidate_report: Mapping[str, Any],
+    lock: Mapping[str, Any],
+    *,
+    worker_invoker: Callable[..., Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Recompute every final seed from raw model text in isolated CPU workers."""
+
+    if worker_invoker is None:
+        from scripts.udlm.rescore_denovo_run import invoke_rescore_worker
+
+        worker_invoker = invoke_rescore_worker
+    checkpoint = _mapping(
+        candidate_report.get("checkpoint"), "candidate rescore checkpoint"
+    )
+    config = _mapping(candidate_report.get("config"), "candidate rescore config")
+    implementation_inputs = _mapping(
+        candidate_report.get("implementation_inputs"),
+        "candidate rescore implementation inputs",
+    )
+    metric_inputs = _mapping(
+        candidate_report.get("metric_inputs"), "candidate rescore metric inputs"
+    )
+    if {
+        key: checkpoint.get(key) for key in ("sha256", "size_bytes", "global_step")
+    } != {
+        key: lock["checkpoint"][key] for key in ("sha256", "size_bytes", "global_step")
+    }:
+        raise GateValidationError("candidate rescore checkpoint differs from lock")
+    if (
+        config.get("sha256") != lock["evaluation_config_sha256"]
+        or config.get("sampling") != lock["sampling_config"]
+        or config.get("sampling_sha256") != lock["sampling_sha256"]
+        or canonical_json_sha256(implementation_inputs)
+        != lock["implementation_inputs_sha256"]
+        or canonical_json_sha256(metric_inputs) != lock["metric_inputs_sha256"]
+    ):
+        raise GateValidationError("candidate rescore inputs differ from lock")
+    ema_source = _mapping(
+        implementation_inputs.get("ema_source"),
+        "candidate rescore EMA implementation input",
+    )
+    ema_source_sha256 = _sha256(
+        ema_source.get("sha256"), "candidate rescore EMA source digest"
+    )
+    ordered = _ordered_seed_rows(
+        candidate_report.get("seed_runs"), label="candidate rescore seed runs"
+    )
+    seed_results: list[dict[str, Any]] = []
+    for expected_seed, run in zip(EXPECTED_SEEDS, ordered, strict=True):
+        summary_path = Path(run.get("summary_path", ""))
+        raw_path = Path(run.get("raw_samples_path", ""))
+        if not summary_path.is_absolute() or not raw_path.is_absolute():
+            raise GateValidationError(
+                f"candidate seed {expected_seed} rescore paths must be absolute"
+            )
+        if summary_path.parent != raw_path.parent:
+            raise GateValidationError(
+                f"candidate seed {expected_seed} summary/raw files are not siblings"
+            )
+        git = _mapping(run.get("git"), f"candidate seed {expected_seed} Git evidence")
+        try:
+            result = worker_invoker(
+                summary_path=summary_path,
+                raw_samples_path=raw_path,
+                allowed_root=REPOSITORY_ROOT,
+                expected_summary_sha256=run["summary_sha256"],
+                expected_raw_samples_sha256=run["raw_samples_sha256"],
+                expected_seed=expected_seed,
+                expected_sample_count=EXPECTED_SAMPLES_PER_SEED,
+                expected_checkpoint_sha256=lock["checkpoint"]["sha256"],
+                expected_config_sha256=lock["evaluation_config_sha256"],
+                expected_source_revision=git["commit"],
+                expected_runner_sha256=lock["benchmark_runner_sha256"],
+                expected_sampler_source_sha256=lock["sampler_source_sha256"],
+                expected_ema_source_sha256=ema_source_sha256,
+                expected_implementation_inputs_sha256=lock[
+                    "implementation_inputs_sha256"
+                ],
+                expected_metric_inputs_sha256=lock["metric_inputs_sha256"],
+            )
+        except (OSError, ValueError) as error:
+            raise GateValidationError(
+                f"candidate seed {expected_seed} independent rescore failed: {error}"
+            ) from error
+        result = _validate_rescore_worker_proof(
+            result,
+            label=f"candidate seed {expected_seed} independent rescore",
+            expected_seed=expected_seed,
+            expected_sample_count=EXPECTED_SAMPLES_PER_SEED,
+            expected_summary_path=summary_path,
+            expected_raw_path=raw_path,
+            expected_summary_sha256=run["summary_sha256"],
+            expected_raw_sha256=run["raw_samples_sha256"],
+        )
+        identity = _mapping(
+            result.get("identity"), f"candidate seed {expected_seed} rescore identity"
+        )
+        identity_checkpoint = _mapping(
+            identity.get("checkpoint"),
+            f"candidate seed {expected_seed} rescore checkpoint",
+        )
+        identity_config = _mapping(
+            identity.get("config"), f"candidate seed {expected_seed} rescore config"
+        )
+        identity_generation = _mapping(
+            identity.get("generation"),
+            f"candidate seed {expected_seed} rescore generation",
+        )
+        identity_source = _mapping(
+            identity.get("source"), f"candidate seed {expected_seed} rescore source"
+        )
+        if {
+            key: identity_checkpoint.get(key)
+            for key in ("sha256", "size_bytes", "global_step")
+        } != {
+            key: lock["checkpoint"][key]
+            for key in ("sha256", "size_bytes", "global_step")
+        }:
+            raise GateValidationError(
+                f"candidate seed {expected_seed} rescored checkpoint differs from lock"
+            )
+        if (
+            identity_config.get("sha256") != lock["evaluation_config_sha256"]
+            or identity_config.get("sampling") != lock["sampling_config"]
+            or identity_config.get("sampling_sha256") != lock["sampling_sha256"]
+            or identity_generation.get("nfe") != EXPECTED_NFE
+            or identity_generation.get("inference_weights") != lock["inference_weights"]
+        ):
+            raise GateValidationError(
+                f"candidate seed {expected_seed} rescored inference identity differs"
+            )
+        if (
+            identity_source.get("revision") != git["commit"]
+            or identity_source.get("runner_sha256") != lock["benchmark_runner_sha256"]
+            or identity_source.get("sampler_source_sha256")
+            != lock["sampler_source_sha256"]
+            or identity_source.get("ema_source_sha256") != ema_source_sha256
+            or identity_source.get("implementation_inputs_sha256")
+            != lock["implementation_inputs_sha256"]
+            or identity_source.get("metric_inputs_sha256")
+            != lock["metric_inputs_sha256"]
+        ):
+            raise GateValidationError(
+                f"candidate seed {expected_seed} rescored source identity differs"
+            )
+        rescored_metrics = _mapping(
+            result.get("metrics"), f"candidate seed {expected_seed} rescored metrics"
+        )
+        reported_metrics = _mapping(
+            run.get("metrics"), f"candidate seed {expected_seed} reported metrics"
+        )
+        for branch_name in ("released_comparable", "strict"):
+            rescored_branch = _mapping(
+                rescored_metrics.get(branch_name),
+                f"candidate seed {expected_seed} rescored {branch_name}",
+            )
+            reported_branch = _mapping(
+                reported_metrics.get(branch_name),
+                f"candidate seed {expected_seed} reported {branch_name}",
+            )
+            for metric in METRICS:
+                label = (
+                    f"candidate seed {expected_seed} rescored "
+                    f"{branch_name}.{metric}"
+                )
+                rescored_value = rescored_branch.get(metric)
+                reported_value = reported_branch.get(metric)
+                if rescored_value is None or reported_value is None:
+                    if rescored_value is not None or reported_value is not None:
+                        raise GateValidationError(f"{label} null status differs")
+                    if metric != "diversity":
+                        raise GateValidationError(f"{label} may not be null")
+                    continue
+                _close(rescored_value, _finite(reported_value, label), label)
+        if result.get("failure_counts") != run.get("failure_counts"):
+            raise GateValidationError(
+                f"candidate seed {expected_seed} rescored failure counts differ"
+            )
+        seed_results.append(
+            {
+                "seed": expected_seed,
+                "summary_sha256": run["summary_sha256"],
+                "raw_samples_sha256": run["raw_samples_sha256"],
+                "worker_environment": result.get("worker_environment"),
+                "all_21_fields_match": True,
+                "both_metric_branches_match": True,
+                "failure_counts_match": True,
+            }
+        )
+    return {
+        "status": "completed_exact_match",
+        "seed_results": seed_results,
+        "fresh_seed_specific_cpu_workers": True,
+        "raw_model_text_redecoded": True,
+        "qed_sa_and_diversity_recomputed": True,
+    }
+
+
+def validate_candidate_rescore_attestation(
+    value: object, candidate_report: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Bind the public statistical decision to the preceding raw-text rescore."""
+
+    attestation = _mapping(value, "candidate independent-rescore attestation")
+    _exact_keys(
+        attestation,
+        {
+            "status",
+            "seed_results",
+            "fresh_seed_specific_cpu_workers",
+            "raw_model_text_redecoded",
+            "qed_sa_and_diversity_recomputed",
+        },
+        "candidate independent-rescore attestation",
+    )
+    if attestation.get("status") != "completed_exact_match":
+        raise GateValidationError("candidate independent rescore is not complete")
+    for field in (
+        "fresh_seed_specific_cpu_workers",
+        "raw_model_text_redecoded",
+        "qed_sa_and_diversity_recomputed",
+    ):
+        _required_true(attestation.get(field), f"candidate rescore {field}")
+    report_rows = _ordered_seed_rows(
+        candidate_report.get("seed_runs"), label="candidate report seed runs"
+    )
+    rescore_rows = _ordered_seed_rows(
+        attestation.get("seed_results"), label="candidate rescore seed results"
+    )
+    normalized_rows: list[dict[str, Any]] = []
+    for expected_seed, (report_row, rescore_row) in enumerate(
+        zip(report_rows, rescore_rows, strict=True)
+    ):
+        _exact_keys(
+            rescore_row,
+            {
+                "seed",
+                "summary_sha256",
+                "raw_samples_sha256",
+                "worker_environment",
+                "all_21_fields_match",
+                "both_metric_branches_match",
+                "failure_counts_match",
+            },
+            f"candidate rescore seed {expected_seed}",
+        )
+        if rescore_row.get("summary_sha256") != report_row.get(
+            "summary_sha256"
+        ) or rescore_row.get("raw_samples_sha256") != report_row.get(
+            "raw_samples_sha256"
+        ):
+            raise GateValidationError(
+                f"candidate rescore seed {expected_seed} artifact hashes differ"
+            )
+        for field in (
+            "all_21_fields_match",
+            "both_metric_branches_match",
+            "failure_counts_match",
+        ):
+            _required_true(
+                rescore_row.get(field),
+                f"candidate rescore seed {expected_seed} {field}",
+            )
+        environment = _mapping(
+            rescore_row.get("worker_environment"),
+            f"candidate rescore seed {expected_seed} worker environment",
+        )
+        expected_environment = {
+            "python_hash_seed": str(expected_seed),
+            "device": "cpu",
+            "cuda_visible_devices": "",
+            "nvidia_visible_devices": "",
+        }
+        for field, expected in expected_environment.items():
+            if environment.get(field) != expected:
+                raise GateValidationError(
+                    f"candidate rescore seed {expected_seed} worker environment differs"
+                )
+        normalized_rows.append(dict(rescore_row))
+    return {**dict(attestation), "seed_results": normalized_rows}
+
+
 def evaluate_candidate_report(
     candidate_report: Mapping[str, Any],
     baseline_manifest: Mapping[str, Any],
     baseline_rescore_attestation: Mapping[str, Any],
     protocol: Mapping[str, Any],
     candidate_lock: Mapping[str, Any],
+    *,
+    independent_candidate_rescore: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Return a deterministic registered decision from validated report data."""
 
@@ -4084,6 +7460,9 @@ def evaluate_candidate_report(
     )
     lock = validate_candidate_lock(candidate_lock, protocol)
     candidate = _candidate_series(candidate_report, lock)
+    candidate_rescore = validate_candidate_rescore_attestation(
+        independent_candidate_rescore, candidate_report
+    )
 
     point_protocol = protocol["point_estimate_gates"]
     baseline_means = baseline["means"]
@@ -4194,6 +7573,7 @@ def evaluate_candidate_report(
                 )
             ],
         },
+        "independent_candidate_rescore": candidate_rescore,
         "metrics": metrics,
         "claim": {
             "scope": lock["claim_scope"],
@@ -4222,10 +7602,48 @@ def validate_analysis_runtime(lock: Mapping[str, Any]) -> dict[str, Any]:
     report_bytes = _repository_artifact_bytes(
         Path("scripts/exps/denovo/report.py"), label="de-novo report source"
     )
+    rescore_bytes = _repository_artifact_bytes(
+        DENOVO_RESCORE_RELATIVE_PATH,
+        label="independent de-novo rescore source",
+    )
+    rescore_dependency_bytes = _repository_artifact_bytes(
+        DENOVO_RESCORE_DEPENDENCY_RELATIVE_PATH,
+        label="independent de-novo rescore dependency source",
+    )
+    benchmark_launcher_bytes = _repository_artifact_bytes(
+        DENOVO_LAUNCHER_RELATIVE_PATH,
+        label="de-novo benchmark launcher source",
+    )
+    pilot_evidence_writer_bytes = _repository_artifact_bytes(
+        PILOT_EVIDENCE_WRITER_RELATIVE_PATH,
+        label="pilot evidence writer source",
+    )
     if _sha256_bytes(gate_bytes) != lock["gate_source_sha256"]:
         raise GateValidationError("runtime superiority-gate source differs from lock")
     if _sha256_bytes(report_bytes) != lock["report_source_sha256"]:
         raise GateValidationError("runtime de-novo report source differs from lock")
+    if _sha256_bytes(rescore_bytes) != lock["rescore_source_sha256"]:
+        raise GateValidationError(
+            "runtime independent de-novo rescore source differs from lock"
+        )
+    if _sha256_bytes(rescore_dependency_bytes) != lock["rescore_dependency_sha256"]:
+        raise GateValidationError(
+            "runtime independent de-novo rescore dependency differs from lock"
+        )
+    if (
+        _sha256_bytes(benchmark_launcher_bytes)
+        != lock["benchmark_launcher_source_sha256"]
+    ):
+        raise GateValidationError(
+            "runtime de-novo benchmark launcher source differs from lock"
+        )
+    if (
+        _sha256_bytes(pilot_evidence_writer_bytes)
+        != lock["pilot_evidence_writer_source_sha256"]
+    ):
+        raise GateValidationError(
+            "runtime pilot evidence writer source differs from lock"
+        )
     import scipy
 
     if scipy.__version__ != lock["scipy_version"]:
@@ -4233,6 +7651,12 @@ def validate_analysis_runtime(lock: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "gate_source_sha256": lock["gate_source_sha256"],
         "report_source_sha256": lock["report_source_sha256"],
+        "rescore_source_sha256": lock["rescore_source_sha256"],
+        "rescore_dependency_sha256": lock["rescore_dependency_sha256"],
+        "benchmark_launcher_source_sha256": lock["benchmark_launcher_source_sha256"],
+        "pilot_evidence_writer_source_sha256": lock[
+            "pilot_evidence_writer_source_sha256"
+        ],
         "scipy_version": scipy.__version__,
         "sources_match_prelocked_bytes": True,
     }
@@ -4335,9 +7759,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     lock = validate_candidate_lock(lock_json, protocol)
     training_evidence = validate_training_evidence(lock)
+    matched_panel_completion = validate_completed_matched_panel(lock, training_evidence)
     analysis_evidence = validate_analysis_runtime(lock)
     candidate_report = denovo_report.collect_report(args.runs_dir)
     candidate = _candidate_series(candidate_report, lock)
+    independent_candidate_rescore = independently_rescore_candidate_runs(
+        candidate_report, lock
+    )
     clean_source = denovo_report.require_clean_pushed_source(
         candidate["benchmark_revision"]
     )
@@ -4348,11 +7776,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         lock=lock,
     )
     decision = evaluate_candidate_report(
-        candidate_report, baseline, baseline_rescore, protocol, lock_json
+        candidate_report,
+        baseline,
+        baseline_rescore,
+        protocol,
+        lock_json,
+        independent_candidate_rescore=independent_candidate_rescore,
     )
     decision["generated_at_utc"] = datetime.now(timezone.utc).isoformat()
     decision["candidate_lock"] = firewall
     decision["training_evidence"] = training_evidence
+    decision["matched_panel_completion"] = matched_panel_completion
     decision["analysis_evidence"] = analysis_evidence
     decision["analysis_evidence"]["clean_pushed_source"] = clean_source
     decision["candidate_runs_root"] = candidate_report["input_root"]

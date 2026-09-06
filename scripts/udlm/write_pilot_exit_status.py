@@ -24,9 +24,11 @@ from pathlib import Path
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+RUN_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}\Z")
+LAUNCH_MANIFEST_SCHEMA_VERSION = 2
 RUNTIME_CONFIG_SCHEMA_VERSION = 2
 TRAINING_SUMMARY_SCHEMA_VERSION = 4
-EXIT_STATUS_SCHEMA_VERSION = 4
+EXIT_STATUS_SCHEMA_VERSION = 5
 INCOMPLETE_EXIT_STATUS = 97
 HOSTED_STREAM_RANK_PARTITION_POLICY = (
     "huggingface_split_dataset_by_node_disjoint_rank_streams"
@@ -135,6 +137,18 @@ def canonical_json_sha256(value: object) -> str:
         allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _utc_timestamp(value: object, *, label: str) -> datetime:
+    if not isinstance(value, str):
+        raise ValueError(f"{label} must be an ISO-8601 string")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as error:
+        raise ValueError(f"{label} must be ISO-8601") from error
+    if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
+        raise ValueError(f"{label} must carry an explicit UTC offset")
+    return parsed
 
 
 def _artifact_path(value: Path, *, suffix: str, label: str) -> Path:
@@ -467,6 +481,1669 @@ def _validate_launch_manifest_content(
         label="launch manifest selected GPU count",
     )
     return manifest
+
+
+_PREDECESSOR_BINDING_KEYS = {
+    "schema_version",
+    "state",
+    "current_training_variant",
+    "current_variant_position",
+    "expected_predecessor_training_variant",
+    "expected_predecessor_variant_position",
+    "matched_panel_spec_sha256",
+    "common_training_contract_sha256",
+    "receipt_artifact",
+    "predecessor_launch_manifest_artifact",
+    "predecessor_training_summary_artifact",
+    "predecessor_run_name",
+    "chronology",
+    "validated_before_gpu_probe",
+}
+_MATCHED_PANEL_VARIANT_ORDER = (
+    "udlm",
+    "schedule_uniform",
+    "udlm_categorical",
+)
+_MATCHED_PANEL_VARIANT_METADATA = {
+    "udlm": ("udlm", "release_uniform", "faithful_release_control"),
+    "schedule_uniform": (
+        "udlm",
+        "schedule_uniform",
+        "schedule_repair_uniform_control",
+    ),
+    "udlm_categorical": (
+        "udlm_categorical",
+        "empirical_frequency",
+        "empirical_prior_treatment",
+    ),
+}
+_STABLE_ARTIFACT_SNAPSHOT_KEYS = {
+    "path",
+    "device",
+    "inode",
+    "mode",
+    "link_count",
+    "size_bytes",
+    "mtime_ns",
+    "ctime_ns",
+    "sha256",
+    "stable_regular_file_verified",
+}
+_PILOT_EXIT_RECEIPT_KEYS = {
+    "schema_version",
+    "status",
+    "overall_status",
+    "recorded_at_utc",
+    "process_exit_status",
+    "expected_contract",
+    "pipeline",
+    "source_at_receipt",
+    "launch_manifest",
+    "predecessor_receipt_binding",
+    "training_job_lock",
+    "training_summary",
+    "runtime_config",
+    "final_checkpoint",
+    "completion_requirements",
+}
+_PILOT_EXIT_COMPLETION_KEYS = {
+    "training_exit_zero",
+    "tee_exit_zero",
+    "training_summary_valid_and_launch_bound",
+    "launch_manifest_matches_summary_runtime_and_launch",
+    "predecessor_receipt_binding_unchanged_and_valid",
+    "training_job_lock_valid_before_receipt_publication",
+    "runtime_config_matches_summary_and_launch",
+    "final_checkpoint_matches_training_summary",
+    "clean_pushed_source_still_matches_launch",
+    "all_must_hold",
+}
+_PILOT_LAUNCH_MANIFEST_KEYS = {
+    "launch_manifest_schema_version",
+    "created_at",
+    "purpose",
+    "gpu_selection_schema_version",
+    "git_sha",
+    "source_revision_before_final_gpu_probe",
+    "run_name",
+    "training_variant",
+    "hydra_config_name",
+    "udlm_prior_variant",
+    "udlm_comparison_role",
+    "matched_panel_spec",
+    "matched_panel_spec_sha256",
+    "matched_panel_variant_position",
+    "predecessor_receipt_binding",
+    "single_training_job_lock",
+    "tmux_session",
+    "user_requested_gpu_count",
+    "gpu_selection_method",
+    "gpu_inventory_scope",
+    "inventory_snapshot_completed_at_utc",
+    "gpu_inventory_at_selection",
+    "initially_selected_gpu_states",
+    "logical_cuda_devices",
+    "physical_gpu_indices",
+    "cuda_visible_device_uuids",
+    "final_uuid_probes_completed_at_utc",
+    "gpu_states_at_final_uuid_probe",
+    "gpu_safety_policy",
+    "training_argv",
+    "training_argv_sha256",
+    "resolved_training_config",
+    "resolved_training_config_sha256",
+    "runtime_config_path",
+    "training_summary_path",
+    "training_summary_schema_version",
+    "pilot_exit_status_path",
+    "pilot_exit_status_schema_version",
+    "expected_final_checkpoint_path",
+    "launch_manifest_path",
+    "launch_manifest_raw_sha256_transport",
+    "completion_contract",
+    "log_path",
+    "log_reserved_exclusively_before_manifest",
+    "checkpoint",
+    "checkpoint_sha256",
+    "seed",
+    "max_steps",
+    "global_batch_size",
+    "micro_batch_size_per_process",
+    "accumulate_grad_batches",
+    "effective_global_batch_size",
+    "exclude_special_tokens",
+    "dry_run",
+}
+_PILOT_TRAINING_SUMMARY_KEYS = {
+    "schema_version",
+    "status",
+    "completed_at_utc",
+    "source_revision",
+    "source",
+    "resolved_training_config_sha256",
+    "training_argv_sha256",
+    "launch_manifest",
+    "runtime_config",
+    "completion_contract",
+    "observed_training_state",
+    "training_accounting",
+    "training_health",
+    "conditioning_gradient_audit",
+    "screen_initialization_state_audit",
+    "final_checkpoint",
+    "tensor_finiteness",
+    "startup",
+}
+_PILOT_RUNTIME_CONFIG_KEYS = {
+    "schema_version",
+    "status",
+    "source_revision",
+    "source",
+    "training_argv",
+    "observed_training_argv",
+    "training_argv_sha256",
+    "resolved_training_config",
+    "resolved_training_config_sha256",
+    "launch_manifest",
+    "completion_contract",
+    "python_environment",
+}
+_SUMMARY_COMPLETION_CONTRACT_KEYS = {
+    "summary_schema_version",
+    "summary_path",
+    "final_checkpoint_path",
+    "expected_max_steps",
+    "expected_world_size",
+    "fail_on_nonfinite_loss",
+    "backward_anomaly_detection",
+}
+_CONTROLLED_PYTHON_ENVIRONMENT = {
+    "PYTHONNOUSERSITE": "1",
+    "PYTHONOPTIMIZE": "0",
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "PYTHONUTF8": "1",
+    "PYTHONIOENCODING": "utf-8",
+}
+
+
+def _require_exact_snapshot_claim(
+    value: object,
+    *,
+    expected_path: Path,
+    extra_keys: set[str] | None = None,
+    label: str,
+) -> dict[str, object]:
+    claim = _required_mapping(value, label=label)
+    _require_exact_keys(
+        claim,
+        _STABLE_ARTIFACT_SNAPSHOT_KEYS | (extra_keys or set()),
+        label=label,
+    )
+    return _validate_snapshot_claim(claim, expected_path=expected_path, label=label)
+
+
+def _validate_successful_pipeline(value: object) -> None:
+    pipeline = _required_mapping(value, label="predecessor receipt pipeline")
+    _require_exact_keys(
+        pipeline,
+        {"training", "tee", "pipefail_shell_exit_status"},
+        label="predecessor receipt pipeline",
+    )
+    _exact_integer(
+        pipeline.get("pipefail_shell_exit_status"),
+        0,
+        label="predecessor pipeline shell exit status",
+    )
+    component_keys = {
+        "shell_exit_status",
+        "succeeded",
+        "possible_termination_signal",
+        "shell_status_is_signal_compatible",
+        "signal_provenance",
+    }
+    for component_name in ("training", "tee"):
+        component = _required_mapping(
+            pipeline.get(component_name),
+            label=f"predecessor {component_name} pipeline component",
+        )
+        _require_exact_keys(
+            component,
+            component_keys,
+            label=f"predecessor {component_name} pipeline component",
+        )
+        expected = {
+            "shell_exit_status": 0,
+            "succeeded": True,
+            "possible_termination_signal": None,
+            "shell_status_is_signal_compatible": False,
+            "signal_provenance": None,
+        }
+        if component != expected:
+            raise ValueError(
+                f"predecessor {component_name} pipeline component is not the "
+                "successful producer value"
+            )
+
+
+def _validate_manifest_completion_contract(value: object) -> None:
+    contract = _required_mapping(
+        value, label="predecessor manifest completion contract"
+    )
+    _require_exact_keys(
+        contract,
+        {
+            "status_at_launch",
+            "complete_only_if_valid_training_summary_exists",
+            "complete_only_if_successful_exit_receipt_exists",
+            "valid_training_summary_and_successful_exit_receipt_both_required",
+            "missing_summary_after_tmux_exit_means",
+            "absent_exit_receipt_means",
+            "successful_exit_receipt_requires",
+            "training_job_lock_release",
+        },
+        label="predecessor manifest completion contract",
+    )
+    expected_scalars = {
+        "status_at_launch": "pending",
+        "complete_only_if_valid_training_summary_exists": True,
+        "complete_only_if_successful_exit_receipt_exists": True,
+        "valid_training_summary_and_successful_exit_receipt_both_required": True,
+        "missing_summary_after_tmux_exit_means": "incomplete",
+        "absent_exit_receipt_means": "incomplete",
+        "training_job_lock_release": (
+            "after_exit_receipt_publication_for_completed_or_failed_pipeline"
+        ),
+    }
+    for key, expected in expected_scalars.items():
+        if contract.get(key) != expected or type(contract.get(key)) is not type(
+            expected
+        ):
+            raise ValueError(
+                f"predecessor manifest completion contract {key} is invalid"
+            )
+    receipt_requirements = _required_mapping(
+        contract.get("successful_exit_receipt_requires"),
+        label="predecessor manifest successful-receipt requirements",
+    )
+    expected_requirements = {
+        "training_exit_status": 0,
+        "tee_exit_status": 0,
+        "valid_launch_bound_training_summary": True,
+        "exact_launch_manifest_still_matches": True,
+        "clean_pushed_source_at_receipt": True,
+        "predecessor_receipt_binding_unchanged_and_valid": True,
+    }
+    if receipt_requirements != expected_requirements:
+        raise ValueError(
+            "predecessor manifest successful-receipt requirements are invalid"
+        )
+
+
+def _validate_predecessor_gpu_state(value: object, *, label: str) -> dict[str, object]:
+    state = _required_mapping(value, label=label)
+    _require_exact_keys(
+        state,
+        {
+            "physical_index",
+            "uuid",
+            "name",
+            "memory_used_mib",
+            "memory_total_mib",
+            "utilization_percent",
+            "compute_mode",
+            "compute_processes",
+        },
+        label=label,
+    )
+    for key in (
+        "physical_index",
+        "memory_used_mib",
+        "memory_total_mib",
+        "utilization_percent",
+    ):
+        value = state.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"{label} {key} is invalid")
+    if (
+        state["memory_total_mib"] <= 0
+        or state["memory_used_mib"] > state["memory_total_mib"]
+    ):
+        raise ValueError(f"{label} memory accounting is invalid")
+    if not 0 <= state["utilization_percent"] <= 100:
+        raise ValueError(f"{label} utilization is invalid")
+    if (
+        not isinstance(state.get("uuid"), str)
+        or not state["uuid"].startswith("GPU-")
+        or not isinstance(state.get("name"), str)
+        or not state["name"]
+        or not isinstance(state.get("compute_mode"), str)
+        or not state["compute_mode"]
+        or not isinstance(state.get("compute_processes"), list)
+    ):
+        raise ValueError(f"{label} identity or compute-process evidence is invalid")
+    for process in state["compute_processes"]:
+        process = _required_mapping(process, label=f"{label} compute process")
+        _require_exact_keys(
+            process,
+            {"pid", "process_name", "used_memory_mib"},
+            label=f"{label} compute process",
+        )
+        _positive_integer_field(process, "pid", label=f"{label} compute-process PID")
+        if (
+            not isinstance(process.get("process_name"), str)
+            or not process["process_name"]
+        ):
+            raise ValueError(f"{label} compute-process name is invalid")
+        used_memory = process.get("used_memory_mib")
+        if used_memory is not None and (
+            isinstance(used_memory, bool)
+            or not isinstance(used_memory, int)
+            or used_memory < 0
+        ):
+            raise ValueError(f"{label} compute-process memory is invalid")
+    return state
+
+
+def _validate_predecessor_producer_artifacts(
+    *,
+    predecessor_manifest: dict[str, object],
+    predecessor_summary: dict[str, object],
+    predecessor_receipt: dict[str, object],
+    current_snapshots: dict[str, dict[str, object]],
+    panel: dict[str, object],
+    expected_variant: str,
+    expected_position: int,
+    predecessor_run_name: str,
+) -> None:
+    """Validate the producer-shaped envelope around immutable predecessor bytes.
+
+    The launcher performs the exhaustive semantic validation before binding these
+    artifacts.  At receipt time we repeat the writer-owned summary/runtime checks
+    and pin every producer envelope and cross-artifact binding that could otherwise
+    turn an immutable but fabricated JSON object into an accepted predecessor.
+    """
+
+    manifest_snapshot = current_snapshots["predecessor_launch_manifest_artifact"]
+    summary_snapshot = current_snapshots["predecessor_training_summary_artifact"]
+    manifest_path = Path(str(manifest_snapshot["path"]))
+    summary_path = Path(str(summary_snapshot["path"]))
+    receipt_path = Path(str(current_snapshots["receipt_artifact"]["path"]))
+    run_directory = manifest_path.parent
+
+    _require_exact_keys(
+        predecessor_receipt,
+        _PILOT_EXIT_RECEIPT_KEYS,
+        label="predecessor exit receipt",
+    )
+    _exact_integer(
+        predecessor_receipt.get("schema_version"),
+        EXIT_STATUS_SCHEMA_VERSION,
+        label="predecessor exit receipt schema",
+    )
+    for key in ("status", "overall_status"):
+        _exact_string(
+            predecessor_receipt.get(key),
+            "completed",
+            label=f"predecessor exit receipt {key}",
+        )
+    _exact_integer(
+        predecessor_receipt.get("process_exit_status"),
+        0,
+        label="predecessor exit receipt process status",
+    )
+    _validate_successful_pipeline(predecessor_receipt.get("pipeline"))
+    completion = _required_mapping(
+        predecessor_receipt.get("completion_requirements"),
+        label="predecessor receipt completion requirements",
+    )
+    _require_exact_keys(
+        completion,
+        _PILOT_EXIT_COMPLETION_KEYS,
+        label="predecessor receipt completion requirements",
+    )
+    if any(value is not True for value in completion.values()):
+        raise ValueError(
+            "every predecessor receipt completion requirement must be true"
+        )
+
+    common = _required_mapping(
+        panel.get("common_training_contract"),
+        label="matched-panel common training contract",
+    )
+    source_revision = common.get("source_revision")
+    if not isinstance(source_revision, str) or not re.fullmatch(
+        r"[0-9a-f]{40}", source_revision
+    ):
+        raise ValueError("matched-panel source revision is invalid")
+    source = _required_mapping(
+        predecessor_receipt.get("source_at_receipt"),
+        label="predecessor receipt source",
+    )
+    expected_source = {
+        "verified": True,
+        "expected_revision": source_revision,
+        "head": source_revision,
+        "upstream": source_revision,
+        "output_directory_excluded_from_cleanliness_check": True,
+    }
+    if source != expected_source:
+        raise ValueError("predecessor receipt source is not the exact producer value")
+
+    _require_exact_keys(
+        predecessor_manifest,
+        _PILOT_LAUNCH_MANIFEST_KEYS,
+        label="predecessor launch manifest",
+    )
+    _exact_integer(
+        predecessor_manifest.get("launch_manifest_schema_version"),
+        LAUNCH_MANIFEST_SCHEMA_VERSION,
+        label="predecessor launch-manifest schema",
+    )
+    _exact_string(
+        predecessor_manifest.get("purpose"),
+        "bounded UDLM training pilot",
+        label="predecessor launch-manifest purpose",
+    )
+    for key in ("git_sha", "source_revision_before_final_gpu_probe"):
+        _exact_string(
+            predecessor_manifest.get(key),
+            source_revision,
+            label=f"predecessor launch manifest {key}",
+        )
+    _exact_string(
+        predecessor_manifest.get("run_name"),
+        predecessor_run_name,
+        label="predecessor launch manifest run name",
+    )
+    if predecessor_run_name != run_directory.name:
+        raise ValueError("predecessor run name disagrees with its artifact directory")
+    _exact_string(
+        predecessor_manifest.get("training_variant"),
+        expected_variant,
+        label="predecessor launch manifest training variant",
+    )
+    _exact_integer(
+        predecessor_manifest.get("matched_panel_variant_position"),
+        expected_position,
+        label="predecessor launch manifest variant position",
+    )
+    expected_hydra, expected_prior, expected_role = _MATCHED_PANEL_VARIANT_METADATA[
+        expected_variant
+    ]
+    for key, expected in (
+        ("hydra_config_name", expected_hydra),
+        ("udlm_prior_variant", expected_prior),
+        ("udlm_comparison_role", expected_role),
+    ):
+        _exact_string(
+            predecessor_manifest.get(key),
+            expected,
+            label=f"predecessor launch manifest {key}",
+        )
+    if predecessor_manifest.get("matched_panel_spec") != panel:
+        raise ValueError("predecessor launch manifest matched-panel spec changed")
+    _exact_string(
+        predecessor_manifest.get("matched_panel_spec_sha256"),
+        canonical_json_sha256(panel),
+        label="predecessor launch manifest matched-panel digest",
+    )
+
+    expected_contract = _required_mapping(
+        predecessor_receipt.get("expected_contract"),
+        label="predecessor receipt expected contract",
+    )
+    _require_exact_keys(
+        expected_contract,
+        {
+            "training_summary_schema_version",
+            "source_revision",
+            "resolved_training_config_sha256",
+            "training_argv_sha256",
+            "launch_manifest_path",
+            "launch_manifest_sha256",
+            "selected_gpu_uuids",
+            "training_job_lock_path",
+            "training_job_lock_sha256",
+            "max_steps",
+            "world_size",
+            "training_summary_path",
+            "final_checkpoint_path",
+            "initialization_checkpoint_sha256",
+        },
+        label="predecessor receipt expected contract",
+    )
+    _exact_integer(
+        expected_contract.get("training_summary_schema_version"),
+        TRAINING_SUMMARY_SCHEMA_VERSION,
+        label="predecessor expected summary schema",
+    )
+    _exact_string(
+        expected_contract.get("source_revision"),
+        source_revision,
+        label="predecessor expected source revision",
+    )
+
+    resolved_config = _required_mapping(
+        predecessor_manifest.get("resolved_training_config"),
+        label="predecessor resolved training config",
+    )
+    config_sha256 = _sha256_field(
+        predecessor_manifest,
+        "resolved_training_config_sha256",
+        label="predecessor resolved training config digest",
+    )
+    _exact_string(
+        canonical_json_sha256(resolved_config),
+        config_sha256,
+        label="predecessor resolved training config content digest",
+    )
+    normalized_common_config = json.loads(json.dumps(resolved_config, allow_nan=False))
+    try:
+        normalized_common_config["training"]["udlm"]["prior_variant"] = (
+            "<REGISTERED_TREATMENT>"
+        )
+        normalized_common_config["callback"]["dirpath"] = (
+            "<VARIANT_RUN_DIR>/checkpoints"
+        )
+    except (KeyError, TypeError) as error:
+        raise ValueError(
+            "predecessor resolved config lacks matched-panel fields"
+        ) from error
+    _exact_string(
+        common.get("common_resolved_config_sha256"),
+        canonical_json_sha256(normalized_common_config),
+        label="predecessor common resolved-config digest",
+    )
+    _exact_string(
+        expected_contract.get("resolved_training_config_sha256"),
+        config_sha256,
+        label="predecessor expected resolved-config digest",
+    )
+    resolved_training = _required_mapping(
+        resolved_config.get("training"), label="predecessor resolved training section"
+    )
+    resolved_udlm = _required_mapping(
+        resolved_training.get("udlm"), label="predecessor resolved UDLM section"
+    )
+    _exact_string(
+        resolved_udlm.get("prior_variant"),
+        expected_prior,
+        label="predecessor resolved prior variant",
+    )
+    for section_name, section_key, common_key in (
+        ("trainer", "devices", "requested_gpu_count"),
+        ("trainer", "max_steps", "max_steps"),
+        ("trainer", "accumulate_grad_batches", "accumulate_grad_batches"),
+        ("loader", "global_batch_size", "global_batch_size"),
+        ("loader", "batch_size", "micro_batch_size_per_process"),
+        ("loader", "num_workers", "num_workers"),
+    ):
+        section = _required_mapping(
+            resolved_config.get(section_name),
+            label=f"predecessor resolved {section_name} section",
+        )
+        if section.get(section_key) != common.get(common_key):
+            raise ValueError(
+                f"predecessor resolved config {section_name}.{section_key} is unmatched"
+            )
+    trainer = _required_mapping(
+        resolved_config.get("trainer"), label="predecessor resolved trainer section"
+    )
+    _exact_integer(
+        trainer.get("num_nodes"), 1, label="predecessor resolved trainer node count"
+    )
+    callback = _required_mapping(
+        resolved_config.get("callback"), label="predecessor resolved callback section"
+    )
+    _exact_string(
+        callback.get("dirpath"),
+        str(run_directory / "checkpoints"),
+        label="predecessor resolved checkpoint directory",
+    )
+    if (
+        resolved_config.get("data") != "safe"
+        or resolved_config.get("seed") != common.get("seed")
+        or resolved_udlm.get("exclude_special_tokens")
+        != common.get("exclude_special_tokens")
+    ):
+        raise ValueError("predecessor resolved data/seed/token contract is unmatched")
+
+    training_argv = predecessor_manifest.get("training_argv")
+    reviewed_python_executables = {
+        str(REPOSITORY_ROOT.resolve(strict=True) / ".venv/bin/python"),
+        str(REPOSITORY_ROOT.resolve(strict=True).parents[1] / ".venv/bin/python"),
+    }
+    if (
+        not isinstance(training_argv, list)
+        or len(training_argv) < 5
+        or not all(isinstance(value, str) for value in training_argv)
+        or training_argv[0] not in reviewed_python_executables
+        or training_argv[1:5]
+        != [
+            "-u",
+            str(REPOSITORY_ROOT.resolve(strict=True) / "scripts/train.py"),
+            "--config-name",
+            expected_hydra,
+        ]
+    ):
+        raise ValueError(
+            "predecessor training argv does not use a reviewed producer prefix"
+        )
+    argv_sha256 = _sha256_field(
+        predecessor_manifest,
+        "training_argv_sha256",
+        label="predecessor training argv digest",
+    )
+    _exact_string(
+        canonical_json_sha256(training_argv[2:]),
+        argv_sha256,
+        label="predecessor training argv content digest",
+    )
+    _exact_string(
+        expected_contract.get("training_argv_sha256"),
+        argv_sha256,
+        label="predecessor expected training argv digest",
+    )
+
+    world_size = common.get("requested_gpu_count")
+    max_steps = common.get("max_steps")
+    _exact_integer(
+        predecessor_manifest.get("user_requested_gpu_count"),
+        world_size,
+        label="predecessor requested GPU count",
+    )
+    selected_uuids = predecessor_manifest.get("cuda_visible_device_uuids")
+    if (
+        not isinstance(selected_uuids, list)
+        or len(selected_uuids) != world_size
+        or len(set(selected_uuids)) != len(selected_uuids)
+        or any(
+            not isinstance(value, str) or not value.startswith("GPU-")
+            for value in selected_uuids
+        )
+    ):
+        raise ValueError("predecessor selected GPU UUID contract is invalid")
+    if expected_contract.get("selected_gpu_uuids") != selected_uuids:
+        raise ValueError("predecessor expected GPU UUIDs are unmatched")
+    for key, expected in (
+        ("gpu_selection_schema_version", 2),
+        ("gpu_selection_method", "dynamic_idle_discovery"),
+        ("gpu_inventory_scope", "all_nvidia_gpus"),
+    ):
+        if predecessor_manifest.get(key) != expected or type(
+            predecessor_manifest.get(key)
+        ) is not type(expected):
+            raise ValueError(f"predecessor launch manifest {key} is invalid")
+    inventory_time = _utc_timestamp(
+        predecessor_manifest.get("inventory_snapshot_completed_at_utc"),
+        label="predecessor GPU inventory timestamp",
+    )
+    final_probe_time = _utc_timestamp(
+        predecessor_manifest.get("final_uuid_probes_completed_at_utc"),
+        label="predecessor final GPU probe timestamp",
+    )
+    manifest_time = _utc_timestamp(
+        predecessor_manifest.get("created_at"),
+        label="predecessor launch manifest timestamp",
+    )
+    if not inventory_time <= final_probe_time <= manifest_time:
+        raise ValueError("predecessor GPU and manifest timestamps are out of order")
+    inventory = predecessor_manifest.get("gpu_inventory_at_selection")
+    initial_states = predecessor_manifest.get("initially_selected_gpu_states")
+    final_states = predecessor_manifest.get("gpu_states_at_final_uuid_probe")
+    if (
+        not isinstance(inventory, list)
+        or not inventory
+        or not isinstance(initial_states, list)
+        or not isinstance(final_states, list)
+        or len(initial_states) != world_size
+        or len(final_states) != world_size
+    ):
+        raise ValueError("predecessor GPU state arrays are invalid")
+    inventory_records = [
+        _validate_predecessor_gpu_state(
+            state, label=f"predecessor GPU inventory state {index}"
+        )
+        for index, state in enumerate(inventory)
+    ]
+    inventory_uuids = [state["uuid"] for state in inventory_records]
+    inventory_physical_indices = [
+        state["physical_index"] for state in inventory_records
+    ]
+    if len(set(inventory_uuids)) != len(inventory_uuids):
+        raise ValueError("predecessor GPU inventory UUIDs must be unique")
+    if len(set(inventory_physical_indices)) != len(inventory_physical_indices):
+        raise ValueError("predecessor GPU inventory physical indices must be unique")
+    inventory_by_uuid = {state["uuid"]: state for state in inventory_records}
+    if any(uuid not in inventory_by_uuid for uuid in selected_uuids):
+        raise ValueError("predecessor selected GPU UUIDs are absent from inventory")
+    parsed_initial = [
+        _validate_predecessor_gpu_state(
+            state, label=f"predecessor initial GPU state {index}"
+        )
+        for index, state in enumerate(initial_states)
+    ]
+    parsed_final = [
+        _validate_predecessor_gpu_state(
+            state, label=f"predecessor final GPU state {index}"
+        )
+        for index, state in enumerate(final_states)
+    ]
+    if [state["uuid"] for state in parsed_initial] != selected_uuids or [
+        state["uuid"] for state in parsed_final
+    ] != selected_uuids:
+        raise ValueError("predecessor selected GPU UUID order is invalid")
+    if parsed_initial != [inventory_by_uuid[uuid] for uuid in selected_uuids]:
+        raise ValueError(
+            "predecessor initially selected GPUs differ from inventory rows"
+        )
+    final_physical_indices = [state["physical_index"] for state in parsed_final]
+    if len(set(final_physical_indices)) != len(final_physical_indices):
+        raise ValueError("predecessor final GPU physical indices must be unique")
+    if (
+        predecessor_manifest.get("logical_cuda_devices") != list(range(world_size))
+        or predecessor_manifest.get("physical_gpu_indices") != final_physical_indices
+    ):
+        raise ValueError("predecessor selected GPU mapping is invalid")
+    safety = _required_mapping(
+        predecessor_manifest.get("gpu_safety_policy"),
+        label="predecessor GPU safety policy",
+    )
+    _require_exact_keys(
+        safety,
+        {
+            "max_utilization_percent",
+            "utilization_comparison",
+            "min_free_memory_mib",
+            "active_compute_processes_allowed",
+            "compute_mode_prohibited_allowed",
+        },
+        label="predecessor GPU safety policy",
+    )
+    expected_safety = _required_mapping(
+        panel.get("common_gpu_safety_policy"),
+        label="matched-panel GPU safety policy",
+    )
+    for key, value in safety.items():
+        if value != expected_safety.get(key) or type(value) is not type(
+            expected_safety.get(key)
+        ):
+            raise ValueError(f"predecessor GPU safety policy {key} is unmatched")
+    for state in (*parsed_initial, *parsed_final):
+        if (
+            state["utilization_percent"] >= safety["max_utilization_percent"]
+            or state["memory_total_mib"] - state["memory_used_mib"]
+            < safety["min_free_memory_mib"]
+            or state["compute_processes"]
+            or state["compute_mode"].strip().lower() == "prohibited"
+        ):
+            raise ValueError("predecessor selected GPU violates the safety policy")
+
+    runtime_path = run_directory / "runtime_config.json"
+    checkpoint_path = run_directory / "checkpoints" / f"{max_steps}.ckpt"
+    lock_path = REPOSITORY_ROOT.resolve(strict=True) / (
+        "output/udlm/.single_training_job.lock"
+    )
+    for key, expected in (
+        ("launch_manifest_path", str(manifest_path)),
+        ("runtime_config_path", str(runtime_path)),
+        ("training_summary_path", str(summary_path)),
+        ("pilot_exit_status_path", str(receipt_path)),
+        ("expected_final_checkpoint_path", str(checkpoint_path)),
+    ):
+        _exact_string(
+            predecessor_manifest.get(key),
+            expected,
+            label=f"predecessor launch manifest {key}",
+        )
+    for key, expected in (
+        ("training_summary_schema_version", TRAINING_SUMMARY_SCHEMA_VERSION),
+        ("pilot_exit_status_schema_version", EXIT_STATUS_SCHEMA_VERSION),
+    ):
+        _exact_integer(
+            predecessor_manifest.get(key),
+            expected,
+            label=f"predecessor launch manifest {key}",
+        )
+    if predecessor_manifest.get("dry_run") is not False:
+        raise ValueError("predecessor launch manifest must describe a real launch")
+    _exact_string(
+        predecessor_manifest.get("launch_manifest_raw_sha256_transport"),
+        "passed_out_of_band_to_training_and_receipt_to_avoid_self_hash",
+        label="predecessor launch manifest digest transport",
+    )
+    _exact_string(
+        predecessor_manifest.get("tmux_session"),
+        f"genmol_{expected_variant}_{predecessor_run_name}",
+        label="predecessor tmux session",
+    )
+    _exact_string(
+        predecessor_manifest.get("log_path"),
+        str(
+            REPOSITORY_ROOT.resolve(strict=True)
+            / f"output/logs/{predecessor_run_name}.log"
+        ),
+        label="predecessor log path",
+    )
+    if predecessor_manifest.get("log_reserved_exclusively_before_manifest") is not True:
+        raise ValueError("predecessor log reservation flag must be true")
+    for manifest_key, common_key in (
+        ("checkpoint", "initialization_checkpoint_path"),
+        ("checkpoint_sha256", "initialization_checkpoint_sha256"),
+        ("seed", "seed"),
+        ("max_steps", "max_steps"),
+        ("global_batch_size", "global_batch_size"),
+        ("micro_batch_size_per_process", "micro_batch_size_per_process"),
+        ("accumulate_grad_batches", "accumulate_grad_batches"),
+        ("effective_global_batch_size", "effective_global_batch_size"),
+        ("exclude_special_tokens", "exclude_special_tokens"),
+    ):
+        if predecessor_manifest.get(manifest_key) != common.get(common_key):
+            raise ValueError(f"predecessor launch manifest {manifest_key} is unmatched")
+    _validate_manifest_completion_contract(
+        predecessor_manifest.get("completion_contract")
+    )
+
+    lock_binding = _required_mapping(
+        predecessor_manifest.get("single_training_job_lock"),
+        label="predecessor manifest training-job lock",
+    )
+    _require_exact_keys(
+        lock_binding,
+        {
+            "path",
+            "sha256",
+            "record",
+            "acquired_before_any_gpu_probe",
+            "stale_lock_policy",
+            "release_owner",
+        },
+        label="predecessor manifest training-job lock",
+    )
+    lock_sha256 = _sha256_field(
+        lock_binding, "sha256", label="predecessor training-job lock digest"
+    )
+    _exact_string(
+        lock_binding.get("path"),
+        str(lock_path),
+        label="predecessor training-job lock path",
+    )
+    if (
+        lock_binding.get("acquired_before_any_gpu_probe") is not True
+        or lock_binding.get("stale_lock_policy")
+        != "fail_closed_and_require_manual_review"
+        or lock_binding.get("release_owner")
+        != "pilot_exit_receipt_writer_after_publication"
+    ):
+        raise ValueError("predecessor manifest training-job lock policy is invalid")
+    lock_record = _required_mapping(
+        lock_binding.get("record"), label="predecessor training-job lock record"
+    )
+    _require_exact_keys(
+        lock_record,
+        {
+            "schema_version",
+            "status",
+            "purpose",
+            "source_revision",
+            "run_name",
+            "training_variant",
+            "owner_token",
+            "launcher_pid_at_acquisition",
+            "acquired_at_utc",
+            "owner_process_exit_does_not_make_lock_stale",
+            "stale_lock_policy",
+            "release_policy",
+        },
+        label="predecessor training-job lock record",
+    )
+    _exact_integer(
+        lock_record.get("schema_version"),
+        1,
+        label="predecessor training-job lock schema",
+    )
+    for key, expected in (
+        ("status", "held"),
+        ("purpose", "enforce_one_R_S_E_pilot_training_job_at_a_time"),
+        ("source_revision", source_revision),
+        ("run_name", predecessor_run_name),
+        ("training_variant", expected_variant),
+        ("stale_lock_policy", "fail_closed_and_require_manual_review"),
+        (
+            "release_policy",
+            "exact_owner_lock_only_after_receipt_or_before_tmux_handoff_failure",
+        ),
+    ):
+        _exact_string(
+            lock_record.get(key), expected, label=f"predecessor lock record {key}"
+        )
+    owner_token = lock_record.get("owner_token")
+    if not isinstance(owner_token, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", owner_token
+    ):
+        raise ValueError("predecessor training-job lock owner token is invalid")
+    _positive_integer_field(
+        lock_record,
+        "launcher_pid_at_acquisition",
+        label="predecessor training-job lock launcher PID",
+    )
+    lock_acquired_at = _utc_timestamp(
+        lock_record.get("acquired_at_utc"),
+        label="predecessor training-job lock acquisition timestamp",
+    )
+    if lock_acquired_at > inventory_time:
+        raise ValueError("predecessor training-job lock was acquired after GPU probing")
+    _required_true(
+        lock_record,
+        "owner_process_exit_does_not_make_lock_stale",
+        label="predecessor training-job lock process-exit policy",
+    )
+    expected_lock_bytes = (
+        json.dumps(lock_record, indent=2, sort_keys=True, allow_nan=False) + "\n"
+    ).encode("utf-8")
+    _exact_string(
+        hashlib.sha256(expected_lock_bytes).hexdigest(),
+        lock_sha256,
+        label="predecessor training-job lock deterministic raw digest",
+    )
+
+    expected_values = {
+        "launch_manifest_path": str(manifest_path),
+        "launch_manifest_sha256": manifest_snapshot["sha256"],
+        "training_summary_path": str(summary_path),
+        "final_checkpoint_path": str(checkpoint_path),
+        "training_job_lock_path": str(lock_path),
+        "training_job_lock_sha256": lock_sha256,
+        "max_steps": max_steps,
+        "world_size": world_size,
+        "initialization_checkpoint_sha256": common.get(
+            "initialization_checkpoint_sha256"
+        ),
+    }
+    for key, expected in expected_values.items():
+        if expected_contract.get(key) != expected or type(
+            expected_contract.get(key)
+        ) is not type(expected):
+            raise ValueError(f"predecessor expected contract {key} is unmatched")
+
+    _require_exact_keys(
+        predecessor_summary,
+        _PILOT_TRAINING_SUMMARY_KEYS,
+        label="predecessor training summary",
+    )
+    summary_source = _required_mapping(
+        predecessor_summary.get("source"), label="predecessor training summary source"
+    )
+    if summary_source != {"head": source_revision, "upstream": source_revision}:
+        raise ValueError("predecessor training summary source is invalid")
+    summary_completion = _required_mapping(
+        predecessor_summary.get("completion_contract"),
+        label="predecessor training summary completion contract",
+    )
+    _require_exact_keys(
+        summary_completion,
+        _SUMMARY_COMPLETION_CONTRACT_KEYS,
+        label="predecessor training summary completion contract",
+    )
+    summary_manifest_claim = _require_exact_snapshot_claim(
+        predecessor_summary.get("launch_manifest"),
+        expected_path=manifest_path,
+        extra_keys={"selected_gpu_uuids"},
+        label="predecessor summary launch-manifest evidence",
+    )
+    if summary_manifest_claim != {
+        **manifest_snapshot,
+        "selected_gpu_uuids": selected_uuids,
+    }:
+        raise ValueError("predecessor summary launch-manifest evidence is unmatched")
+
+    runtime_snapshot, runtime_payload = stable_file_snapshot(
+        runtime_path, capture_bytes=True
+    )
+    if not runtime_payload:
+        raise ValueError("predecessor runtime config is empty")
+    summary_runtime_claim = _require_exact_snapshot_claim(
+        predecessor_summary.get("runtime_config"),
+        expected_path=runtime_path,
+        extra_keys={"schema_version", "record_sha256"},
+        label="predecessor summary runtime-config evidence",
+    )
+    _require_snapshot_matches_claim(
+        runtime_snapshot,
+        runtime_path,
+        summary_runtime_claim,
+        label="predecessor summary runtime-config evidence",
+    )
+    _exact_integer(
+        summary_runtime_claim.get("schema_version"),
+        RUNTIME_CONFIG_SCHEMA_VERSION,
+        label="predecessor runtime-config schema binding",
+    )
+    runtime = _required_mapping(
+        strict_json_loads(runtime_payload, label="predecessor runtime config"),
+        label="predecessor runtime config",
+    )
+    _require_exact_keys(
+        runtime, _PILOT_RUNTIME_CONFIG_KEYS, label="predecessor runtime config"
+    )
+    _exact_string(
+        canonical_json_sha256(runtime),
+        summary_runtime_claim.get("record_sha256"),
+        label="predecessor runtime-config canonical digest",
+    )
+    runtime_source = _required_mapping(
+        runtime.get("source"), label="predecessor runtime-config source"
+    )
+    if runtime_source != summary_source:
+        raise ValueError("predecessor runtime and summary source bindings differ")
+    runtime_argv = runtime.get("training_argv")
+    if (
+        runtime_argv != training_argv[2:]
+        or runtime.get("observed_training_argv") != runtime_argv
+    ):
+        raise ValueError("predecessor runtime training argv is unmatched")
+    expected_python_environment = {
+        **_CONTROLLED_PYTHON_ENVIRONMENT,
+        "PYTHONHASHSEED": str(common.get("seed")),
+        "PYTHONPATH": os.pathsep.join(
+            (
+                str(REPOSITORY_ROOT.resolve(strict=True) / "src"),
+                str(REPOSITORY_ROOT.resolve(strict=True)),
+            )
+        ),
+    }
+    if runtime.get("python_environment") != expected_python_environment:
+        raise ValueError("predecessor runtime Python environment is unmatched")
+    validate_runtime_config(
+        runtime,
+        expected_source_revision=source_revision,
+        expected_config_sha256=config_sha256,
+        expected_argv_sha256=argv_sha256,
+        expected_launch_manifest_path=manifest_path,
+        expected_launch_manifest_sha256=str(manifest_snapshot["sha256"]),
+        expected_selected_gpu_uuids=selected_uuids,
+        expected_completion_contract=summary_completion,
+    )
+
+    checkpoint_snapshot, _checkpoint_payload = stable_file_snapshot(
+        checkpoint_path, capture_bytes=False
+    )
+    summary_checkpoint_claim = _require_exact_snapshot_claim(
+        predecessor_summary.get("final_checkpoint"),
+        expected_path=checkpoint_path,
+        extra_keys={"semantic_audit"},
+        label="predecessor summary final-checkpoint evidence",
+    )
+    _require_snapshot_matches_claim(
+        checkpoint_snapshot,
+        checkpoint_path,
+        summary_checkpoint_claim,
+        label="predecessor summary final-checkpoint evidence",
+    )
+    validated_bindings = validate_training_summary(
+        predecessor_summary,
+        summary_path=summary_path,
+        expected_schema_version=TRAINING_SUMMARY_SCHEMA_VERSION,
+        expected_source_revision=source_revision,
+        expected_config_sha256=config_sha256,
+        expected_argv_sha256=argv_sha256,
+        expected_launch_manifest_path=manifest_path,
+        expected_launch_manifest_sha256=str(manifest_snapshot["sha256"]),
+        expected_selected_gpu_uuids=selected_uuids,
+        expected_max_steps=max_steps,
+        expected_world_size=world_size,
+        expected_final_checkpoint_path=checkpoint_path,
+        expected_initialization_checkpoint_sha256=common.get(
+            "initialization_checkpoint_sha256"
+        ),
+        resolved_training_config=resolved_config,
+        launch_manifest=predecessor_manifest,
+    )
+
+    manifest_evidence = _required_mapping(
+        predecessor_receipt.get("launch_manifest"),
+        label="predecessor receipt launch-manifest evidence",
+    )
+    _require_exact_keys(
+        manifest_evidence,
+        {
+            "path",
+            "present",
+            "matches_expected_raw_sha256",
+            "selected_gpu_uuids_match_expected",
+            "matches_training_summary_snapshot",
+            "matches_runtime_config_snapshot",
+            "valid_and_launch_bound",
+            "expected_selected_gpu_uuids",
+            "observed_selected_gpu_uuids",
+            "artifact",
+            "validation_error",
+        },
+        label="predecessor receipt launch-manifest evidence",
+    )
+    if (
+        manifest_evidence.get("path") != str(manifest_path)
+        or manifest_evidence.get("artifact") != manifest_snapshot
+        or manifest_evidence.get("expected_selected_gpu_uuids") != selected_uuids
+        or manifest_evidence.get("observed_selected_gpu_uuids") != selected_uuids
+        or manifest_evidence.get("validation_error") is not None
+        or any(
+            manifest_evidence.get(key) is not True
+            for key in (
+                "present",
+                "matches_expected_raw_sha256",
+                "selected_gpu_uuids_match_expected",
+                "matches_training_summary_snapshot",
+                "matches_runtime_config_snapshot",
+                "valid_and_launch_bound",
+            )
+        )
+    ):
+        raise ValueError("predecessor receipt launch-manifest evidence is invalid")
+
+    summary_evidence = _required_mapping(
+        predecessor_receipt.get("training_summary"),
+        label="predecessor receipt training-summary evidence",
+    )
+    _require_exact_keys(
+        summary_evidence,
+        {
+            "path",
+            "present",
+            "valid_and_launch_bound",
+            "artifact",
+            "validated_bindings",
+            "validation_error",
+        },
+        label="predecessor receipt training-summary evidence",
+    )
+    if (
+        summary_evidence.get("path") != str(summary_path)
+        or summary_evidence.get("artifact") != summary_snapshot
+        or summary_evidence.get("validated_bindings") != validated_bindings
+        or summary_evidence.get("present") is not True
+        or summary_evidence.get("valid_and_launch_bound") is not True
+        or summary_evidence.get("validation_error") is not None
+    ):
+        raise ValueError("predecessor receipt training-summary evidence is invalid")
+
+    runtime_evidence = _required_mapping(
+        predecessor_receipt.get("runtime_config"),
+        label="predecessor receipt runtime-config evidence",
+    )
+    _require_exact_keys(
+        runtime_evidence,
+        {
+            "path",
+            "present",
+            "matches_training_summary_snapshot",
+            "semantic_validation_passed",
+            "artifact",
+        },
+        label="predecessor receipt runtime-config evidence",
+    )
+    if runtime_evidence != {
+        "path": str(runtime_path),
+        "present": True,
+        "matches_training_summary_snapshot": True,
+        "semantic_validation_passed": True,
+        "artifact": runtime_snapshot,
+    }:
+        raise ValueError("predecessor receipt runtime-config evidence is invalid")
+
+    checkpoint_evidence = _required_mapping(
+        predecessor_receipt.get("final_checkpoint"),
+        label="predecessor receipt final-checkpoint evidence",
+    )
+    _require_exact_keys(
+        checkpoint_evidence,
+        {"path", "present", "matches_training_summary_snapshot", "artifact"},
+        label="predecessor receipt final-checkpoint evidence",
+    )
+    if checkpoint_evidence != {
+        "path": str(checkpoint_path),
+        "present": True,
+        "matches_training_summary_snapshot": True,
+        "artifact": checkpoint_snapshot,
+    }:
+        raise ValueError("predecessor receipt final-checkpoint evidence is invalid")
+
+    lock_evidence = _required_mapping(
+        predecessor_receipt.get("training_job_lock"),
+        label="predecessor receipt training-job lock evidence",
+    )
+    _require_exact_keys(
+        lock_evidence,
+        {
+            "path",
+            "present",
+            "expected_sha256",
+            "matches_expected_raw_sha256",
+            "matches_launch_manifest_binding",
+            "valid_and_launch_bound_before_receipt_publication",
+            "artifact",
+            "record",
+            "release_policy",
+            "release_result_not_claimed_inside_pre_release_receipt",
+            "validation_error",
+        },
+        label="predecessor receipt training-job lock evidence",
+    )
+    lock_snapshot = _require_exact_snapshot_claim(
+        lock_evidence.get("artifact"),
+        expected_path=lock_path,
+        label="predecessor receipt training-job lock snapshot",
+    )
+    if (
+        lock_evidence.get("path") != str(lock_path)
+        or lock_evidence.get("expected_sha256") != lock_sha256
+        or lock_snapshot.get("sha256") != lock_sha256
+        or lock_snapshot.get("size_bytes") != len(expected_lock_bytes)
+        or lock_snapshot.get("link_count") != 1
+        or lock_evidence.get("record") != lock_binding.get("record")
+        or lock_evidence.get("release_policy")
+        != "publish_receipt_then_unlink_only_same_stat_identity_and_sha256"
+        or lock_evidence.get("validation_error") is not None
+        or any(
+            lock_evidence.get(key) is not True
+            for key in (
+                "present",
+                "matches_expected_raw_sha256",
+                "matches_launch_manifest_binding",
+                "valid_and_launch_bound_before_receipt_publication",
+                "release_result_not_claimed_inside_pre_release_receipt",
+            )
+        )
+    ):
+        raise ValueError("predecessor receipt training-job lock evidence is invalid")
+
+
+def _validated_predecessor_binding_at_receipt(
+    launch_manifest: dict[str, object],
+) -> dict[str, object] | None:
+    """Revalidate the immutable predecessor artifacts immediately before receipt.
+
+    Optimization-screen manifests do not belong to the R/S/E chain and retain a
+    null binding.  Every ordinary matched-panel launch must carry the schema-v1
+    binding produced and checked by the launcher.
+    """
+
+    raw_binding = launch_manifest.get("predecessor_receipt_binding")
+    if raw_binding is None:
+        if launch_manifest.get("purpose") == "bounded UDLM training pilot":
+            raise ValueError(
+                "matched R/S/E launch manifest lacks predecessor receipt binding"
+            )
+        return None
+
+    binding = _required_mapping(raw_binding, label="predecessor receipt binding")
+    _require_exact_keys(
+        binding,
+        _PREDECESSOR_BINDING_KEYS,
+        label="predecessor receipt binding",
+    )
+    _exact_integer(
+        binding.get("schema_version"),
+        1,
+        label="predecessor receipt binding schema",
+    )
+    _required_true(
+        binding,
+        "validated_before_gpu_probe",
+        label="predecessor validation-before-GPU-probe flag",
+    )
+
+    current_variant = launch_manifest.get("training_variant")
+    current_position = launch_manifest.get("matched_panel_variant_position")
+    if (
+        current_variant not in _MATCHED_PANEL_VARIANT_ORDER
+        or type(current_position) is not int
+        or current_position != _MATCHED_PANEL_VARIANT_ORDER.index(current_variant)
+    ):
+        raise ValueError("launch manifest R/S/E treatment position is invalid")
+    _exact_string(
+        binding.get("current_training_variant"),
+        current_variant,
+        label="predecessor binding current training variant",
+    )
+    _exact_integer(
+        binding.get("current_variant_position"),
+        current_position,
+        label="predecessor binding current variant position",
+    )
+    _exact_string(
+        binding.get("matched_panel_spec_sha256"),
+        launch_manifest.get("matched_panel_spec_sha256"),
+        label="predecessor binding matched-panel digest",
+    )
+    panel = _required_mapping(
+        launch_manifest.get("matched_panel_spec"), label="matched-panel specification"
+    )
+    common_contract = _required_mapping(
+        panel.get("common_training_contract"),
+        label="matched-panel common training contract",
+    )
+    _exact_string(
+        binding.get("common_training_contract_sha256"),
+        canonical_json_sha256(common_contract),
+        label="predecessor binding common-contract digest",
+    )
+
+    artifact_fields = (
+        ("receipt_artifact", "pilot_exit_status.json"),
+        ("predecessor_launch_manifest_artifact", "launch_manifest.json"),
+        ("predecessor_training_summary_artifact", "training_summary.json"),
+    )
+    if current_position == 0:
+        if binding.get("state") != "explicit_genesis_no_predecessor":
+            raise ValueError("R launch must carry the explicit genesis binding")
+        for field in (
+            "expected_predecessor_training_variant",
+            "expected_predecessor_variant_position",
+            "predecessor_run_name",
+            "chronology",
+            *(name for name, _filename in artifact_fields),
+        ):
+            if binding.get(field) is not None:
+                raise ValueError(f"genesis predecessor binding {field} must be null")
+        return json.loads(json.dumps(binding, allow_nan=False))
+
+    if binding.get("state") != "validated_successful_predecessor":
+        raise ValueError("S/E launch must carry a validated predecessor binding")
+    expected_position = current_position - 1
+    expected_variant = _MATCHED_PANEL_VARIANT_ORDER[expected_position]
+    _exact_string(
+        binding.get("expected_predecessor_training_variant"),
+        expected_variant,
+        label="expected predecessor training variant",
+    )
+    _exact_integer(
+        binding.get("expected_predecessor_variant_position"),
+        expected_position,
+        label="expected predecessor variant position",
+    )
+    predecessor_run_name = binding.get("predecessor_run_name")
+    if not isinstance(predecessor_run_name, str) or not RUN_NAME_PATTERN.fullmatch(
+        predecessor_run_name
+    ):
+        raise ValueError("predecessor run name is invalid")
+    expected_predecessor_directory = (
+        REPOSITORY_ROOT.resolve(strict=True) / "output" / "udlm" / predecessor_run_name
+    )
+    chronology = _required_mapping(
+        binding.get("chronology"), label="predecessor chronology"
+    )
+    _require_exact_keys(
+        chronology,
+        {
+            "predecessor_launch_manifest_created_at_utc",
+            "predecessor_training_summary_completed_at_utc",
+            "predecessor_exit_receipt_recorded_at_utc",
+            "strictly_ordered_timestamps_verified",
+        },
+        label="predecessor chronology",
+    )
+    _required_true(
+        chronology,
+        "strictly_ordered_timestamps_verified",
+        label="predecessor strict chronology flag",
+    )
+
+    current_snapshots: dict[str, dict[str, object]] = {}
+    payloads: dict[str, bytes] = {}
+    predecessor_directory: Path | None = None
+    for field, filename in artifact_fields:
+        claim = _required_mapping(binding.get(field), label=field)
+        _require_exact_keys(
+            claim,
+            {
+                "path",
+                "device",
+                "inode",
+                "mode",
+                "link_count",
+                "size_bytes",
+                "mtime_ns",
+                "ctime_ns",
+                "sha256",
+                "stable_regular_file_verified",
+            },
+            label=field,
+        )
+        claim_path = claim.get("path")
+        if not isinstance(claim_path, str):
+            raise ValueError(f"{field} path must be a string")
+        path = _artifact_path(Path(claim_path), suffix=".json", label=field)
+        if path.name != filename:
+            raise ValueError(f"{field} must name {filename}")
+        if path != expected_predecessor_directory / filename:
+            raise ValueError(
+                f"{field} must belong to the direct output/udlm run named by "
+                "predecessor_run_name"
+            )
+        if predecessor_directory is None:
+            predecessor_directory = path.parent
+        elif path.parent != predecessor_directory:
+            raise ValueError("predecessor artifacts must share one run directory")
+        snapshot, payload = stable_file_snapshot(path, capture_bytes=True)
+        _require_snapshot_matches_claim(snapshot, path, claim, label=field)
+        if not payload:
+            raise ValueError(f"{field} is empty")
+        current_snapshots[field] = snapshot
+        payloads[field] = payload
+
+    predecessor_manifest = _required_mapping(
+        strict_json_loads(
+            payloads["predecessor_launch_manifest_artifact"],
+            label="predecessor launch manifest",
+        ),
+        label="predecessor launch manifest",
+    )
+    predecessor_receipt = _required_mapping(
+        strict_json_loads(
+            payloads["receipt_artifact"], label="predecessor exit receipt"
+        ),
+        label="predecessor exit receipt",
+    )
+    predecessor_summary = _required_mapping(
+        strict_json_loads(
+            payloads["predecessor_training_summary_artifact"],
+            label="predecessor training summary",
+        ),
+        label="predecessor training summary",
+    )
+    chronology_values = (
+        (
+            chronology.get("predecessor_launch_manifest_created_at_utc"),
+            predecessor_manifest.get("created_at"),
+            "predecessor launch-manifest timestamp",
+        ),
+        (
+            chronology.get("predecessor_training_summary_completed_at_utc"),
+            predecessor_summary.get("completed_at_utc"),
+            "predecessor training-summary timestamp",
+        ),
+        (
+            chronology.get("predecessor_exit_receipt_recorded_at_utc"),
+            predecessor_receipt.get("recorded_at_utc"),
+            "predecessor exit-receipt timestamp",
+        ),
+    )
+    parsed_times = []
+    for claimed, observed, label in chronology_values:
+        _exact_string(claimed, observed, label=label)
+        try:
+            parsed = datetime.fromisoformat(claimed)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"{label} must be ISO-8601") from error
+        if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(
+            parsed
+        ):
+            raise ValueError(f"{label} must carry an explicit UTC offset")
+        parsed_times.append(parsed)
+    if not parsed_times[0] < parsed_times[1] < parsed_times[2]:
+        raise ValueError("predecessor timestamps must be strictly ordered")
+    current_lock_binding = _required_mapping(
+        launch_manifest.get("single_training_job_lock"),
+        label="current launch manifest training-job lock binding",
+    )
+    current_lock_record = _required_mapping(
+        current_lock_binding.get("record"),
+        label="current launch manifest training-job lock record",
+    )
+    current_cutoff_times = (
+        (
+            _utc_timestamp(
+                current_lock_record.get("acquired_at_utc"),
+                label="current training-job lock acquisition timestamp",
+            ),
+            "current training-job lock acquisition",
+        ),
+        (
+            _utc_timestamp(
+                launch_manifest.get("inventory_snapshot_completed_at_utc"),
+                label="current GPU inventory timestamp",
+            ),
+            "current GPU inventory snapshot",
+        ),
+        (
+            _utc_timestamp(
+                launch_manifest.get("final_uuid_probes_completed_at_utc"),
+                label="current final GPU probe timestamp",
+            ),
+            "current final GPU probes",
+        ),
+    )
+    predecessor_receipt_time = parsed_times[2]
+    for cutoff_time, cutoff_label in current_cutoff_times:
+        if not predecessor_receipt_time < cutoff_time:
+            raise ValueError(
+                "predecessor exit-receipt timestamp must strictly precede "
+                f"{cutoff_label}"
+            )
+    current_manifest_created_at = launch_manifest.get("created_at")
+    if not isinstance(current_manifest_created_at, str):
+        raise ValueError("current launch-manifest timestamp must be ISO-8601")
+    try:
+        current_manifest_time = datetime.fromisoformat(current_manifest_created_at)
+    except ValueError as error:
+        raise ValueError(
+            "current launch-manifest timestamp must be ISO-8601"
+        ) from error
+    if (
+        current_manifest_time.tzinfo is None
+        or current_manifest_time.utcoffset()
+        != timezone.utc.utcoffset(current_manifest_time)
+    ):
+        raise ValueError(
+            "current launch-manifest timestamp must carry an explicit UTC offset"
+        )
+    if not parsed_times[2] < current_manifest_time:
+        raise ValueError(
+            "predecessor exit-receipt timestamp must precede the current "
+            "launch-manifest timestamp"
+        )
+    _validate_predecessor_producer_artifacts(
+        predecessor_manifest=predecessor_manifest,
+        predecessor_summary=predecessor_summary,
+        predecessor_receipt=predecessor_receipt,
+        current_snapshots=current_snapshots,
+        panel=panel,
+        expected_variant=expected_variant,
+        expected_position=expected_position,
+        predecessor_run_name=predecessor_run_name,
+    )
+    _exact_integer(
+        predecessor_receipt.get("schema_version"),
+        EXIT_STATUS_SCHEMA_VERSION,
+        label="predecessor exit receipt schema",
+    )
+    for field in ("status", "overall_status"):
+        _exact_string(
+            predecessor_receipt.get(field),
+            "completed",
+            label=f"predecessor exit receipt {field}",
+        )
+    _exact_integer(
+        predecessor_receipt.get("process_exit_status"),
+        0,
+        label="predecessor exit receipt process status",
+    )
+    completion = _required_mapping(
+        predecessor_receipt.get("completion_requirements"),
+        label="predecessor receipt completion requirements",
+    )
+    _required_true(
+        completion,
+        "predecessor_receipt_binding_unchanged_and_valid",
+        label="predecessor receipt self-chain validation",
+    )
+    if predecessor_receipt.get("predecessor_receipt_binding") != (
+        predecessor_manifest.get("predecessor_receipt_binding")
+    ):
+        raise ValueError(
+            "predecessor receipt does not mirror its launch-manifest chain binding"
+        )
+    if expected_position > 0:
+        recursively_validated = _validated_predecessor_binding_at_receipt(
+            predecessor_manifest
+        )
+        if recursively_validated != predecessor_manifest.get(
+            "predecessor_receipt_binding"
+        ):
+            raise ValueError(
+                "predecessor launch manifest carries a noncanonical transitive chain"
+            )
+    _exact_string(
+        predecessor_manifest.get("training_variant"),
+        expected_variant,
+        label="predecessor manifest training variant",
+    )
+    _exact_integer(
+        predecessor_manifest.get("matched_panel_variant_position"),
+        expected_position,
+        label="predecessor manifest variant position",
+    )
+    _exact_string(
+        predecessor_manifest.get("matched_panel_spec_sha256"),
+        binding.get("matched_panel_spec_sha256"),
+        label="predecessor matched-panel digest",
+    )
+    predecessor_panel = _required_mapping(
+        predecessor_manifest.get("matched_panel_spec"),
+        label="predecessor matched-panel specification",
+    )
+    if predecessor_panel != panel:
+        raise ValueError("predecessor matched-panel specification changed")
+    if predecessor_manifest.get("run_name") != predecessor_run_name:
+        raise ValueError("predecessor run name disagrees with its manifest")
+
+    receipt_manifest_evidence = _required_mapping(
+        predecessor_receipt.get("launch_manifest"),
+        label="predecessor receipt launch-manifest evidence",
+    )
+    if (
+        receipt_manifest_evidence.get("artifact")
+        != current_snapshots["predecessor_launch_manifest_artifact"]
+    ):
+        raise ValueError("predecessor receipt launch-manifest snapshot disagrees")
+    receipt_summary_evidence = _required_mapping(
+        predecessor_receipt.get("training_summary"),
+        label="predecessor receipt training-summary evidence",
+    )
+    if (
+        receipt_summary_evidence.get("artifact")
+        != current_snapshots["predecessor_training_summary_artifact"]
+    ):
+        raise ValueError("predecessor receipt training-summary snapshot disagrees")
+    summary_manifest_claim = _required_mapping(
+        predecessor_summary.get("launch_manifest"),
+        label="predecessor summary launch-manifest evidence",
+    )
+    for key, value in current_snapshots["predecessor_launch_manifest_artifact"].items():
+        if summary_manifest_claim.get(key) != value:
+            raise ValueError("predecessor summary launch-manifest snapshot disagrees")
+    return json.loads(json.dumps(binding, allow_nan=False))
 
 
 def _validate_finiteness_record(value: object, *, label: str) -> None:
@@ -1608,6 +3285,7 @@ def _atomic_write_json_exclusive(path: Path, value: object) -> None:
 
 
 def build_exit_receipt(args: argparse.Namespace) -> tuple[dict[str, object], int]:
+    recorded_at_utc = datetime.now(timezone.utc).isoformat()
     summary_path = _artifact_path(
         args.training_summary_path,
         suffix=".json",
@@ -1827,6 +3505,23 @@ def build_exit_receipt(args: argparse.Namespace) -> tuple[dict[str, object], int
             resolved_training_config=runtime_mapping.get("resolved_training_config"),
             launch_manifest=parsed_manifest,
         )
+        manifest_time = _utc_timestamp(
+            parsed_manifest.get("created_at"),
+            label="current launch-manifest timestamp",
+        )
+        summary_time = _utc_timestamp(
+            parsed.get("completed_at_utc"),
+            label="current training-summary timestamp",
+        )
+        receipt_time = _utc_timestamp(
+            recorded_at_utc,
+            label="current exit-receipt timestamp",
+        )
+        if not manifest_time < summary_time < receipt_time:
+            raise ValueError(
+                "current launch manifest, training summary, and exit receipt "
+                "timestamps must be strictly ordered"
+            )
         expected_runtime_record_sha256 = parsed["runtime_config"]["record_sha256"]
         _exact_string(
             canonical_json_sha256(parsed_runtime),
@@ -1888,6 +3583,37 @@ def build_exit_receipt(args: argparse.Namespace) -> tuple[dict[str, object], int
             "output_directory_excluded_from_cleanliness_check": True,
         }
 
+    predecessor_binding = None
+    predecessor_binding_valid = False
+    try:
+        if current_manifest is None or parsed_manifest is None:
+            raise ValueError(
+                "launch manifest is unavailable for predecessor validation"
+            )
+        receipt_time_manifest, receipt_time_manifest_payload = stable_file_snapshot(
+            launch_manifest_path, capture_bytes=True
+        )
+        if receipt_time_manifest != current_manifest:
+            raise ValueError(
+                "launch manifest changed before predecessor receipt validation"
+            )
+        receipt_time_parsed_manifest = _validate_launch_manifest_content(
+            receipt_time_manifest_payload,
+            expected_sha256=args.expected_launch_manifest_sha256,
+            expected_selected_gpu_uuids=args.expected_selected_gpu_uuids,
+        )
+        predecessor_binding = _validated_predecessor_binding_at_receipt(
+            receipt_time_parsed_manifest
+        )
+        predecessor_binding_valid = True
+    except (OSError, ValueError) as error:
+        if parsed_manifest is not None:
+            predecessor_binding = parsed_manifest.get("predecessor_receipt_binding")
+        predecessor_error = f"{type(error).__name__}: {error}"
+        if manifest_evidence["validation_error"] is None:
+            manifest_evidence["validation_error"] = predecessor_error
+        manifest_evidence["valid_and_launch_bound"] = False
+
     training = _pipeline_component(args.training_exit_status)
     tee = _pipeline_component(args.tee_exit_status)
     pipeline_status = (
@@ -1904,6 +3630,7 @@ def build_exit_receipt(args: argparse.Namespace) -> tuple[dict[str, object], int
         and args.tee_exit_status == 0
         and summary_valid
         and manifest_valid
+        and predecessor_binding_valid
         and lock_valid
         and source_valid
     )
@@ -1918,7 +3645,7 @@ def build_exit_receipt(args: argparse.Namespace) -> tuple[dict[str, object], int
         "schema_version": EXIT_STATUS_SCHEMA_VERSION,
         "status": overall_status,
         "overall_status": overall_status,
-        "recorded_at_utc": datetime.now(timezone.utc).isoformat(),
+        "recorded_at_utc": recorded_at_utc,
         "process_exit_status": process_exit_status,
         "expected_contract": {
             "training_summary_schema_version": args.expected_summary_schema_version,
@@ -1945,6 +3672,7 @@ def build_exit_receipt(args: argparse.Namespace) -> tuple[dict[str, object], int
         },
         "source_at_receipt": source,
         "launch_manifest": manifest_evidence,
+        "predecessor_receipt_binding": predecessor_binding,
         "training_job_lock": lock_evidence,
         "training_summary": summary_evidence,
         "runtime_config": runtime_evidence,
@@ -1954,6 +3682,9 @@ def build_exit_receipt(args: argparse.Namespace) -> tuple[dict[str, object], int
             "tee_exit_zero": args.tee_exit_status == 0,
             "training_summary_valid_and_launch_bound": summary_valid,
             "launch_manifest_matches_summary_runtime_and_launch": manifest_valid,
+            "predecessor_receipt_binding_unchanged_and_valid": (
+                predecessor_binding_valid
+            ),
             "training_job_lock_valid_before_receipt_publication": lock_valid,
             "runtime_config_matches_summary_and_launch": (
                 runtime_evidence["matches_training_summary_snapshot"] is True

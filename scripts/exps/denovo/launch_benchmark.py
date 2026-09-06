@@ -17,8 +17,11 @@ import io
 import json
 import math
 import os
+import re
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -34,6 +37,17 @@ for import_root in (REPOSITORY_ROOT, REPOSITORY_SRC):
     sys.path.insert(0, str(import_root))
 
 from scripts.exps.denovo import benchmark as benchmark_runner  # noqa: E402
+
+
+FINAL_BENCHMARK_SAMPLES_PER_SEED = 1_000
+REGISTERED_SELECTION_PILOT_SEEDS = (1000, 1001)
+REGISTERED_SELECTION_PILOT_SAMPLES_PER_SEED = 256
+ATTEMPT_ID_PATTERN = re.compile(r"[a-z0-9][a-z0-9._-]{0,95}\Z")
+CANDIDATE_ID_PATTERN = re.compile(r"[a-z0-9][a-z0-9._-]{2,95}\Z")
+PILOT_FAILURE_RECEIPT_SCHEMA_VERSION = 1
+PILOT_FAILURE_RECEIPT_KIND = "pilot_failure"
+PILOT_FAILURE_RECEIPT_FILENAME = "failure_receipt.json"
+PILOT_MODES = {"engineering", "registered_selection"}
 
 
 class CompletionArtifactError(RuntimeError):
@@ -97,6 +111,8 @@ class RunningJob:
     process: subprocess.Popen
     log_handle: Any
     log_path: Path
+    command: tuple[str, ...]
+    started_at_utc: str
 
 
 @dataclass(frozen=True)
@@ -134,12 +150,39 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--num-samples", type=int, default=1_000)
-    parser.add_argument(
+    tier = parser.add_mutually_exclusive_group()
+    tier.add_argument(
         "--pilot",
         action="store_true",
         help=(
             "Allow a deliberately small run of at most 100 samples. Without this "
             "flag, the final protocol requires exactly 1000 samples per seed."
+        ),
+    )
+    tier.add_argument(
+        "--selection-pilot",
+        action="store_true",
+        help=(
+            "Run the registered candidate-selection tier: exactly 256 samples "
+            "for each of the ordered seeds 1000 and 1001. This mode requires a "
+            "fresh --attempt-id plus --candidate-id and remains "
+            "pilot/final-ineligible evidence."
+        ),
+    )
+    parser.add_argument(
+        "--attempt-id",
+        help=(
+            "Normalized identifier for one auditable pilot attempt. It is required "
+            "with --pilot or --selection-pilot, forbidden for final runs, and "
+            "appended to the output and log roots."
+        ),
+    )
+    parser.add_argument(
+        "--candidate-id",
+        help=(
+            "Normalized candidate identity required with either pilot mode, "
+            "forbidden for final runs, and bound into producer-authored failure "
+            "receipts."
         ),
     )
     parser.add_argument("--seeds", type=int, nargs="+", required=True)
@@ -169,13 +212,29 @@ def _validate_gpu_count(gpu_count: int) -> int:
     return gpu_count
 
 
-def _validate_sample_tier(num_samples: int, *, pilot: bool) -> str:
+def _validate_sample_tier(
+    num_samples: int,
+    *,
+    pilot: bool,
+    selection_pilot: bool = False,
+) -> str:
     """Prevent a pilot from being mistaken for the final benchmark."""
 
     if type(num_samples) is not int:
         raise ValueError("num-samples must be an integer")
     if num_samples <= 0:
         raise ValueError("num-samples must be positive")
+    if pilot and selection_pilot:
+        raise ValueError("pilot and selection-pilot modes are mutually exclusive")
+    if selection_pilot:
+        if num_samples != REGISTERED_SELECTION_PILOT_SAMPLES_PER_SEED:
+            raise ValueError(
+                "selection-pilot runs require exactly "
+                f"{REGISTERED_SELECTION_PILOT_SAMPLES_PER_SEED} samples per seed"
+            )
+        # benchmark.py schema 7 deliberately labels every non-1000 run as
+        # pilot and final_protocol_eligible=false.
+        return "pilot"
     if pilot:
         if num_samples > 100:
             raise ValueError("pilot runs are capped at 100 samples per seed")
@@ -186,6 +245,131 @@ def _validate_sample_tier(num_samples: int, *, pilot: bool) -> str:
             "pass --pilot for a run of at most 100"
         )
     return "final"
+
+
+def _validate_attempt_id(attempt_id: Any) -> str:
+    """Require the candidate-ledger identifier in its canonical path-safe form."""
+
+    if (
+        not isinstance(attempt_id, str)
+        or ATTEMPT_ID_PATTERN.fullmatch(attempt_id) is None
+    ):
+        raise ValueError(
+            "attempt-id must already be normalized as 1-96 lowercase ASCII "
+            "letters, digits, dots, underscores, or hyphens, beginning with an "
+            "ASCII letter or digit"
+        )
+    return attempt_id
+
+
+def _validate_attempt_scope(
+    *,
+    pilot: bool = False,
+    selection_pilot: bool,
+    attempt_id: Any,
+    seeds: list[int],
+) -> str | None:
+    """Bind every auditable pilot to safe seeds and a unique attempt identity."""
+
+    if not pilot and not selection_pilot:
+        if attempt_id is not None:
+            raise ValueError("attempt-id is allowed only with a pilot mode")
+        return None
+    normalized = _validate_attempt_id(attempt_id)
+    if selection_pilot and seeds != list(REGISTERED_SELECTION_PILOT_SEEDS):
+        raise ValueError(
+            "selection-pilot runs require exactly the ordered seeds "
+            f"{list(REGISTERED_SELECTION_PILOT_SEEDS)}"
+        )
+    if pilot and any(type(seed) is not int or seed < 1000 for seed in seeds):
+        raise ValueError("engineering pilot seeds must be integers >=1000")
+    return normalized
+
+
+def _validate_candidate_scope(
+    *,
+    pilot: bool = False,
+    selection_pilot: bool,
+    candidate_id: Any,
+) -> str | None:
+    """Require a gate-compatible candidate identity for either pilot mode."""
+
+    if not pilot and not selection_pilot:
+        if candidate_id is not None:
+            raise ValueError("candidate-id is allowed only with a pilot mode")
+        return None
+    if (
+        not isinstance(candidate_id, str)
+        or CANDIDATE_ID_PATTERN.fullmatch(candidate_id) is None
+    ):
+        raise ValueError(
+            "candidate-id must already be normalized as 3-96 lowercase ASCII "
+            "letters, digits, dots, underscores, or hyphens, beginning with an "
+            "ASCII letter or digit"
+        )
+    return candidate_id
+
+
+def _resolve_attempt_keyed_roots(
+    output_root: Path,
+    log_root: Path,
+    *,
+    attempt_id: str | None,
+) -> tuple[Path, Path]:
+    """Resolve roots, adding one unambiguous path component per selection attempt."""
+
+    resolved_output_base = _resolve_in_repo(output_root)
+    resolved_log_base = _resolve_in_repo(log_root)
+    if attempt_id is None:
+        return resolved_output_base, resolved_log_base
+    normalized = _validate_attempt_id(attempt_id)
+    keyed_output = _resolve_in_repo(resolved_output_base / normalized)
+    keyed_logs = _resolve_in_repo(resolved_log_base / normalized)
+    if keyed_output == keyed_logs:
+        raise ValueError("pilot output and log attempt roots must differ")
+    if keyed_output.name != normalized or keyed_logs.name != normalized:
+        raise ValueError("pilot paths are not keyed by the exact attempt-id")
+    return keyed_output, keyed_logs
+
+
+def _path_exists_without_following_final_symlink(path: Path) -> bool:
+    return path.exists() or path.is_symlink()
+
+
+def _require_fresh_pilot_attempt_paths(output_root: Path, log_root: Path) -> None:
+    """Reject reuse: a retry must receive a new candidate-ledger attempt ID."""
+
+    existing = [
+        path
+        for path in (output_root, log_root)
+        if _path_exists_without_following_final_symlink(path)
+    ]
+    if existing:
+        raise FileExistsError(
+            "pilot attempt paths must be fresh; retries require a new "
+            f"attempt-id. Existing path(s): {', '.join(map(str, existing))}"
+        )
+
+
+def _reserve_pilot_attempt_paths(output_root: Path, log_root: Path) -> None:
+    """Atomically reserve the output identity before any GPU is queried."""
+
+    output_root.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        output_root.mkdir(exist_ok=False)
+    except FileExistsError as error:
+        raise FileExistsError(
+            "pilot output attempt was concurrently claimed; use a new "
+            f"attempt-id: {output_root}"
+        ) from error
+    log_root.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        log_root.mkdir(exist_ok=False)
+    except FileExistsError as error:
+        raise FileExistsError(
+            "pilot log attempt path already exists; use a new attempt-id: "
+            f"{log_root}"
+        ) from error
 
 
 def _selection_policy(
@@ -480,6 +664,298 @@ def _sha256_file(path: Path, chunk_size: int = 8 * 1024 * 1024) -> str:
         for chunk in iter(lambda: handle.read(chunk_size), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _stable_file_reference(
+    path: Path,
+    *,
+    label: str,
+    required: bool,
+    chunk_size: int = 8 * 1024 * 1024,
+) -> dict[str, Any] | None:
+    """Hash one regular file through its descriptor and reject pathname races."""
+
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(absolute, flags)
+    except FileNotFoundError:
+        if required:
+            raise FileNotFoundError(f"{label} is missing: {absolute}") from None
+        return None
+    except OSError as error:
+        raise RuntimeError(
+            f"cannot open {label} as a regular file: {absolute}: {error}"
+        ) from error
+    try:
+        descriptor_state = os.fstat(descriptor)
+        if not stat.S_ISREG(descriptor_state.st_mode):
+            raise RuntimeError(f"{label} must be a regular file: {absolute}")
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(descriptor, chunk_size)
+            if not chunk:
+                break
+            digest.update(chunk)
+        descriptor_after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    try:
+        pathname_state = os.stat(absolute, follow_symlinks=False)
+    except FileNotFoundError as error:
+        raise RuntimeError(
+            f"{label} disappeared while it was hashed: {absolute}"
+        ) from error
+    identity_fields = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns")
+    if any(
+        getattr(descriptor_state, field) != getattr(descriptor_after, field)
+        or getattr(descriptor_after, field) != getattr(pathname_state, field)
+        for field in identity_fields
+    ):
+        raise RuntimeError(f"{label} changed while it was hashed: {absolute}")
+    return {
+        "path": str(absolute),
+        "sha256": digest.hexdigest(),
+        "size_bytes": descriptor_after.st_size,
+    }
+
+
+def _validate_failure_timestamps(started_at_utc: str, failed_at_utc: str) -> None:
+    parsed: list[datetime] = []
+    for label, value in (
+        ("started_at_utc", started_at_utc),
+        ("failed_at_utc", failed_at_utc),
+    ):
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"{label} must be a nonempty ISO-8601 timestamp")
+        try:
+            timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as error:
+            raise ValueError(f"{label} must be an ISO-8601 timestamp") from error
+        if timestamp.tzinfo is None:
+            raise ValueError(f"{label} must include a timezone")
+        parsed.append(timestamp)
+    if parsed[1] < parsed[0]:
+        raise ValueError("failure timestamp cannot predate process start")
+
+
+def _build_pilot_failure_receipt(
+    *,
+    output_root: Path,
+    job: RunningJob,
+    expected: ExpectedRunIdentity,
+    attempt_id: str,
+    candidate_id: str,
+    pilot_mode: str,
+    source_revision: Mapping[str, str],
+    stage: str,
+    reason: str,
+    process_exit_status: int | None,
+    failed_at_utc: str,
+) -> dict[str, Any]:
+    """Build one fully bound producer receipt for a failed auditable pilot seed."""
+
+    attempt_id = _validate_attempt_id(attempt_id)
+    if pilot_mode not in PILOT_MODES:
+        raise ValueError("pilot failure receipt has an invalid pilot mode")
+    candidate_id_value = _validate_candidate_scope(
+        pilot=pilot_mode == "engineering",
+        selection_pilot=pilot_mode == "registered_selection",
+        candidate_id=candidate_id,
+    )
+    if output_root.name != attempt_id:
+        raise ValueError("failure receipt output root is not keyed by attempt-id")
+    if pilot_mode == "engineering":
+        if job.seed < 1000 or not 1 <= expected.num_samples <= 100:
+            raise ValueError(
+                "engineering failure receipt requires seed >=1000 and 1..100 samples"
+            )
+    elif (
+        job.seed not in REGISTERED_SELECTION_PILOT_SEEDS
+        or expected.num_samples != REGISTERED_SELECTION_PILOT_SAMPLES_PER_SEED
+    ):
+        raise ValueError(
+            "registered-selection failure receipt has an invalid seed or sample count"
+        )
+    if stage == "benchmark_child_process":
+        if type(process_exit_status) is not int or process_exit_status == 0:
+            raise ValueError("child-process failure receipt requires a nonzero status")
+    elif stage == "completion_validation":
+        if process_exit_status is not None:
+            raise ValueError(
+                "completion-validation failure receipt requires a null process status"
+            )
+    else:
+        raise ValueError("pilot failure stage is invalid")
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("pilot failure reason must be nonempty")
+    if (
+        not isinstance(job.command, tuple)
+        or not job.command
+        or any(not isinstance(value, str) or not value for value in job.command)
+    ):
+        raise ValueError("pilot failure command must be a nonempty string tuple")
+    expected_command = tuple(
+        _command(
+            checkpoint=expected.checkpoint_path,
+            expected_checkpoint_sha256=expected.checkpoint_sha256,
+            expected_source_revision=str(expected.source_revision),
+            config=expected.config_path,
+            expected_config_sha256=expected.source_config_sha256,
+            num_samples=expected.num_samples,
+            seed=job.seed,
+            output_dir=output_root / f"seed_{job.seed}",
+        )
+    )
+    if expected.source_revision is None or job.command != expected_command:
+        raise ValueError(
+            "pilot failure command differs from the launched child command"
+        )
+    if dict(source_revision) != {
+        "head": expected.source_revision,
+        "upstream": expected.source_revision,
+    }:
+        raise ValueError("pilot failure source revision differs from expected source")
+    _validate_failure_timestamps(job.started_at_utc, failed_at_utc)
+
+    run_dir = output_root / f"seed_{job.seed}"
+    launcher_source_path = Path(__file__).resolve(strict=True)
+    launcher_source = _stable_file_reference(
+        launcher_source_path,
+        label="benchmark launcher source",
+        required=True,
+    )
+    log_reference = _stable_file_reference(
+        job.log_path,
+        label="pilot benchmark log",
+        required=True,
+    )
+    assert launcher_source is not None
+    assert log_reference is not None
+    partial_artifacts = {
+        "summary_json": _stable_file_reference(
+            run_dir / benchmark_runner.SUMMARY_FILENAME,
+            label="partial benchmark summary",
+            required=False,
+        ),
+        "raw_samples_csv": _stable_file_reference(
+            run_dir / benchmark_runner.RAW_SAMPLES_FILENAME,
+            label="partial benchmark raw samples",
+            required=False,
+        ),
+    }
+    return {
+        "schema_version": PILOT_FAILURE_RECEIPT_SCHEMA_VERSION,
+        "artifact_kind": PILOT_FAILURE_RECEIPT_KIND,
+        "status": "failed",
+        "attempt_id": attempt_id,
+        "candidate_id": candidate_id_value,
+        "pilot_seed": job.seed,
+        "pilot_mode": pilot_mode,
+        "requested_samples": expected.num_samples,
+        "stage": stage,
+        "reason": reason,
+        "started_at_utc": job.started_at_utc,
+        "failed_at_utc": failed_at_utc,
+        "process_exit_status": process_exit_status,
+        "checkpoint": {
+            "path": str(expected.checkpoint_path),
+            "sha256": expected.checkpoint_sha256,
+            "size_bytes": expected.checkpoint_size_bytes,
+            "global_step": expected.checkpoint_global_step,
+        },
+        "config": {
+            "path": str(expected.config_path),
+            "sha256": expected.source_config_sha256,
+            "sampling": dict(expected.sampling_config),
+            "sampling_sha256": expected.sampling_config_sha256,
+        },
+        "command": list(job.command),
+        "source_revision": dict(source_revision),
+        "launcher_source": launcher_source,
+        "log": log_reference,
+        "partial_artifacts": partial_artifacts,
+    }
+
+
+def _atomic_write_json_exclusive(path: Path, payload: Mapping[str, Any]) -> None:
+    """Publish complete JSON via a same-directory hard link without clobbering."""
+
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    repository_root = REPOSITORY_ROOT.resolve(strict=True)
+    if (
+        absolute == repository_root
+        or repository_root not in absolute.parents
+        or absolute.suffix != ".json"
+    ):
+        raise ValueError("failure receipt must be an in-repository JSON path")
+    absolute.parent.mkdir(parents=True, exist_ok=True)
+    parent = absolute.parent.resolve(strict=True)
+    if parent != absolute.parent or not parent.is_dir():
+        raise RuntimeError("failure receipt parent must be a real directory")
+    if os.path.lexists(absolute):
+        raise FileExistsError(f"refusing to replace pilot failure receipt: {absolute}")
+    encoded = (
+        json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n"
+    ).encode("utf-8")
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=parent,
+        prefix=f".{absolute.name}.",
+        suffix=".tmp",
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            os.fchmod(handle.fileno(), 0o644)
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temporary, absolute, follow_symlinks=False)
+        except FileExistsError as error:
+            raise FileExistsError(
+                f"refusing to replace pilot failure receipt: {absolute}"
+            ) from error
+        temporary.unlink()
+        directory_descriptor = os.open(parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _write_pilot_failure_receipt(
+    *,
+    output_root: Path,
+    job: RunningJob,
+    expected: ExpectedRunIdentity,
+    attempt_id: str,
+    candidate_id: str,
+    pilot_mode: str,
+    source_revision: Mapping[str, str],
+    stage: str,
+    reason: str,
+    process_exit_status: int | None,
+    failed_at_utc: str,
+) -> Path:
+    receipt = _build_pilot_failure_receipt(
+        output_root=output_root,
+        job=job,
+        expected=expected,
+        attempt_id=attempt_id,
+        candidate_id=candidate_id,
+        pilot_mode=pilot_mode,
+        source_revision=source_revision,
+        stage=stage,
+        reason=reason,
+        process_exit_status=process_exit_status,
+        failed_at_utc=failed_at_utc,
+    )
+    receipt_path = output_root / f"seed_{job.seed}" / PILOT_FAILURE_RECEIPT_FILENAME
+    _atomic_write_json_exclusive(receipt_path, receipt)
+    return receipt_path
 
 
 def _git_text(*arguments: str) -> str:
@@ -1163,14 +1639,17 @@ def _completed(
             "relaunch into the existing directory. Inspect the artifacts or choose "
             "a fresh output root."
         )
-    if expected.num_samples == 1_000:
-        # The final tier must be consumable by the actual report validator, not
-        # merely resemble a child summary structurally.  This shares the strict
-        # raw-row arithmetic, metric, tokenizer, CUDA, and provenance contract
-        # without imposing the final-report-only 1,000-row rules on pilot runs.
+    if expected.num_samples in {
+        FINAL_BENCHMARK_SAMPLES_PER_SEED,
+        REGISTERED_SELECTION_PILOT_SAMPLES_PER_SEED,
+    }:
+        # Registered final and candidate-selection runs must be consumable by
+        # the actual report validator, not merely resemble a child summary
+        # structurally. Generic <=100 smoke pilots intentionally retain only
+        # the lighter launcher completion contract.
         if expected.source_revision is None:
             raise CompletionArtifactError(
-                f"Seed {seed} final completion lacks an expected source revision"
+                f"Seed {seed} registered completion lacks an expected source revision"
             )
         try:
             current_source_revision = _require_clean_pushed_source()
@@ -1186,11 +1665,22 @@ def _completed(
 
         from scripts.exps.denovo import report as benchmark_report
 
+        expected_tier = (
+            "final"
+            if expected.num_samples == FINAL_BENCHMARK_SAMPLES_PER_SEED
+            else "pilot"
+        )
         try:
-            benchmark_report._validate_summary_and_rows(run_dir, seed)
+            benchmark_report.validate_run_evidence(
+                run_dir,
+                seed,
+                expected_samples=expected.num_samples,
+                expected_tier=expected_tier,
+                final_protocol_eligible=expected_tier == "final",
+            )
         except benchmark_report.ReportValidationError as error:
             raise CompletionArtifactError(
-                f"Seed {seed} artifacts fail final report validation: {error}. "
+                f"Seed {seed} artifacts fail registered report validation: {error}. "
                 "Refusing to skip or relaunch into the existing directory."
             ) from error
     return True
@@ -1307,6 +1797,83 @@ def _child_environment(
     return environment
 
 
+def _finalize_finished_job(
+    *,
+    job: RunningJob,
+    return_code: int,
+    output_root: Path,
+    expected: ExpectedRunIdentity,
+    pilot_mode: str | None,
+    attempt_id: str | None,
+    candidate_id: str | None,
+    source_revision: Mapping[str, str],
+) -> tuple[bool, list[str]]:
+    """Validate one child result and publish registered failure evidence if needed."""
+
+    if type(return_code) is not int:
+        raise TypeError("benchmark child return code must be an integer")
+    failure_details: list[str] = []
+    failure_stage: str | None = None
+    failure_reason: str | None = None
+    receipt_process_status: int | None = None
+    if return_code != 0:
+        failure_stage = "benchmark_child_process"
+        failure_reason = f"benchmark child exited with status {return_code}"
+        receipt_process_status = return_code
+        failure_details.append(
+            f"seed {job.seed} exited with status {return_code}; see {job.log_path}"
+        )
+    else:
+        try:
+            child_completed = _completed(output_root, job.seed, expected)
+        except CompletionArtifactError as error:
+            child_completed = False
+            failure_reason = f"completion validation failed: {error}"
+            failure_details.append(f"seed {job.seed}: {error}")
+        if not child_completed:
+            failure_stage = "completion_validation"
+            if failure_reason is None:
+                failure_reason = (
+                    "completion validation failed: child exited successfully but "
+                    "produced no completion artifacts"
+                )
+            failure_details.append(
+                f"seed {job.seed} exited successfully but produced no valid "
+                "completion artifacts"
+            )
+
+    failed = failure_stage is not None
+    if failed and pilot_mode is not None:
+        if pilot_mode not in PILOT_MODES:
+            raise RuntimeError("finished pilot job has an invalid pilot mode")
+        if attempt_id is None or candidate_id is None or failure_reason is None:
+            raise RuntimeError("pilot failure lacks attempt/candidate provenance")
+        failed_at_utc = datetime.now(timezone.utc).isoformat()
+        try:
+            receipt_path = _write_pilot_failure_receipt(
+                output_root=output_root,
+                job=job,
+                expected=expected,
+                attempt_id=attempt_id,
+                candidate_id=candidate_id,
+                pilot_mode=pilot_mode,
+                source_revision=source_revision,
+                stage=failure_stage,
+                reason=failure_reason,
+                process_exit_status=receipt_process_status,
+                failed_at_utc=failed_at_utc,
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as error:
+            failure_details.append(
+                f"seed {job.seed} failure receipt could not be published: {error}"
+            )
+        else:
+            failure_details.append(
+                f"seed {job.seed} failure receipt published at {receipt_path}"
+            )
+    return failed, failure_details
+
+
 def main(argv: Optional[list[str]] = None) -> None:
     args = _parse_args(argv)
     if Path.cwd().resolve() != REPOSITORY_ROOT:
@@ -1318,7 +1885,27 @@ def main(argv: Optional[list[str]] = None) -> None:
         )
     _require_project_virtual_environment()
     source_revision = _require_clean_pushed_source()
-    evaluation_tier = _validate_sample_tier(args.num_samples, pilot=args.pilot)
+    evaluation_tier = _validate_sample_tier(
+        args.num_samples,
+        pilot=args.pilot,
+        selection_pilot=args.selection_pilot,
+    )
+    pilot_mode = (
+        "registered_selection"
+        if args.selection_pilot
+        else ("engineering" if args.pilot else None)
+    )
+    attempt_id = _validate_attempt_scope(
+        pilot=args.pilot,
+        selection_pilot=args.selection_pilot,
+        attempt_id=args.attempt_id,
+        seeds=args.seeds,
+    )
+    candidate_id = _validate_candidate_scope(
+        pilot=args.pilot,
+        selection_pilot=args.selection_pilot,
+        candidate_id=args.candidate_id,
+    )
     gpu_count = _validate_gpu_count(args.gpu_count)
     if args.poll_seconds <= 0:
         raise ValueError("poll-seconds must be positive")
@@ -1336,8 +1923,13 @@ def main(argv: Optional[list[str]] = None) -> None:
 
     checkpoint = _resolve_checkpoint(args.checkpoint)
     config = _resolve_in_repo(args.config)
-    output_root = _resolve_in_repo(args.output_root)
-    log_root = _resolve_in_repo(args.log_root)
+    output_root, log_root = _resolve_attempt_keyed_roots(
+        args.output_root,
+        args.log_root,
+        attempt_id=attempt_id,
+    )
+    if pilot_mode is not None:
+        _require_fresh_pilot_attempt_paths(output_root, log_root)
     if not checkpoint.is_file() or not config.is_file():
         raise FileNotFoundError("checkpoint and config must both exist")
 
@@ -1377,6 +1969,14 @@ def main(argv: Optional[list[str]] = None) -> None:
                 "sampling_config_sha256": expected.sampling_config_sha256,
                 "num_samples": args.num_samples,
                 "evaluation_tier": evaluation_tier,
+                "benchmark_mode": (
+                    "selection_pilot"
+                    if args.selection_pilot
+                    else ("generic_pilot" if args.pilot else "final")
+                ),
+                "attempt_id": attempt_id,
+                "candidate_id": candidate_id,
+                "pilot_mode": pilot_mode,
                 "seeds": args.seeds,
                 "completed_seeds": completed_at_start,
                 "pending_seeds": pending,
@@ -1448,8 +2048,11 @@ def main(argv: Optional[list[str]] = None) -> None:
         return
 
     _require_tmux_for_execution()
-    output_root.mkdir(parents=True, exist_ok=True)
-    log_root.mkdir(parents=True, exist_ok=True)
+    if pilot_mode is not None:
+        _reserve_pilot_attempt_paths(output_root, log_root)
+    else:
+        output_root.mkdir(parents=True, exist_ok=True)
+        log_root.mkdir(parents=True, exist_ok=True)
 
     running: dict[int, RunningJob] = {}
     failure_seen = False
@@ -1469,23 +2072,18 @@ def main(argv: Optional[list[str]] = None) -> None:
                 f"exit={return_code} log={job.log_path}",
                 flush=True,
             )
-            if return_code != 0:
-                failure_seen = True
-                failure_details.append(
-                    f"seed {job.seed} exited with status {return_code}; see {job.log_path}"
-                )
-                continue
-            try:
-                child_completed = _completed(output_root, job.seed, expected)
-            except CompletionArtifactError as error:
-                child_completed = False
-                failure_details.append(f"seed {job.seed}: {error}")
-            if not child_completed:
-                failure_details.append(
-                    f"seed {job.seed} exited successfully but produced neither completion "
-                    "artifact"
-                )
-            failure_seen = failure_seen or not child_completed
+            job_failed, job_failure_details = _finalize_finished_job(
+                job=job,
+                return_code=return_code,
+                output_root=output_root,
+                expected=expected,
+                pilot_mode=pilot_mode,
+                attempt_id=attempt_id,
+                candidate_id=candidate_id,
+                source_revision=source_revision,
+            )
+            failure_seen = failure_seen or job_failed
+            failure_details.extend(job_failure_details)
 
         if failure_seen:
             if not running:
@@ -1636,6 +2234,7 @@ def main(argv: Optional[list[str]] = None) -> None:
                 selection=selection,
                 run_label=run_label,
             )
+            started_at_utc = datetime.now(timezone.utc).isoformat()
             process = subprocess.Popen(
                 command,
                 cwd=REPOSITORY_ROOT,
@@ -1649,6 +2248,8 @@ def main(argv: Optional[list[str]] = None) -> None:
                 process=process,
                 log_handle=log_handle,
                 log_path=log_path,
+                command=tuple(command),
+                started_at_utc=started_at_utc,
             )
             launched_job = True
             print(

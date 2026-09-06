@@ -836,7 +836,7 @@ def _make_attempt(
         "state_audit": state_audit,
     }
     manifest = {
-        "launch_manifest_schema_version": 1,
+        "launch_manifest_schema_version": 2,
         "purpose": "registered UDLM optimization screen",
         "git_sha": source_revision,
         "optimization_screen": screen._screen_binding(
@@ -853,7 +853,7 @@ def _make_attempt(
         "cuda_visible_device_uuids": ["GPU-test-idle-1"],
     }
     manifest_ref = _artifact_json(
-        harness, output_directory, "launch_manifest", manifest, 1
+        harness, output_directory, "launch_manifest", manifest, 2
     )
     runtime = {
         "schema_version": 2,
@@ -906,10 +906,15 @@ def _make_attempt(
         harness, output_directory, "training_summary", summary, 4
     )
     receipt = {
-        "schema_version": 4,
+        "schema_version": 5,
         "status": "completed",
         "overall_status": "completed",
         "process_exit_status": 0,
+        "predecessor_receipt_binding": None,
+        "completion_requirements": {
+            "predecessor_receipt_binding_unchanged_and_valid": True,
+            "all_must_hold": True,
+        },
         "expected_contract": {
             "source_revision": source_revision,
             "resolved_training_config_sha256": config_entry["config"][
@@ -943,7 +948,7 @@ def _make_attempt(
         },
     }
     receipt_ref = _artifact_json(
-        harness, output_directory, "pilot_exit_status", receipt, 4
+        harness, output_directory, "pilot_exit_status", receipt, 5
     )
     evaluator = _make_evaluator_report(
         harness,

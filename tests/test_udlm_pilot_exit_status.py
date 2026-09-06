@@ -207,7 +207,8 @@ def _write_launch_manifest(paths):
     paths["run_dir"].mkdir(parents=True, exist_ok=True)
     lock_record, lock_sha256 = _write_training_job_lock(paths)
     manifest = {
-        "launch_manifest_schema_version": 1,
+        "launch_manifest_schema_version": receipt_writer.LAUNCH_MANIFEST_SCHEMA_VERSION,
+        "created_at": "2020-01-01T00:00:00+00:00",
         "user_requested_gpu_count": 1,
         "cuda_visible_device_uuids": EXPECTED_SELECTED_GPU_UUIDS,
         "single_training_job_lock": {
@@ -222,6 +223,974 @@ def _write_launch_manifest(paths):
     if not paths["manifest"].exists():
         paths["manifest"].write_bytes(payload)
     return hashlib.sha256(payload).hexdigest()
+
+
+def _genesis_predecessor_binding(panel):
+    return {
+        "schema_version": 1,
+        "state": "explicit_genesis_no_predecessor",
+        "current_training_variant": "udlm",
+        "current_variant_position": 0,
+        "expected_predecessor_training_variant": None,
+        "expected_predecessor_variant_position": None,
+        "matched_panel_spec_sha256": _canonical_sha256(panel),
+        "common_training_contract_sha256": _canonical_sha256(
+            panel["common_training_contract"]
+        ),
+        "receipt_artifact": None,
+        "predecessor_launch_manifest_artifact": None,
+        "predecessor_training_summary_artifact": None,
+        "predecessor_run_name": None,
+        "chronology": None,
+        "validated_before_gpu_probe": True,
+    }
+
+
+def _successful_pipeline_component():
+    return {
+        "shell_exit_status": 0,
+        "succeeded": True,
+        "possible_termination_signal": None,
+        "shell_status_is_signal_compatible": False,
+        "signal_provenance": None,
+    }
+
+
+def _predecessor_panel():
+    representative_config = {
+        "data": "safe",
+        "seed": 7,
+        "training": {
+            "ema": 0.9999,
+            "udlm": {
+                "prior_variant": "release_uniform",
+                "exclude_special_tokens": True,
+                "empirical_uniform_mix": 0.0002,
+            },
+        },
+        "loader": {"batch_size": 2, "global_batch_size": 8, "num_workers": 1},
+        "trainer": {
+            "devices": 1,
+            "num_nodes": 1,
+            "max_steps": 10,
+            "accumulate_grad_batches": 4,
+        },
+        "callback": {"dirpath": "/masked/by/matched-panel-hash"},
+    }
+    return {
+        "schema_version": 2,
+        "purpose": "matched_R_S_E_UDLM_training_pilot",
+        "execution": {
+            "mode": "single_job_lease_with_machine_enforced_predecessor_receipt_chain",
+            "maximum_concurrent_training_jobs": 1,
+            "concurrency_enforcement": "atomic_global_worktree_training_job_lock",
+            "registered_variant_order": [
+                "udlm",
+                "schedule_uniform",
+                "udlm_categorical",
+            ],
+            "advance_policy": (
+                "launcher_validates_and_binds_exact_successful_predecessor_receipt"
+            ),
+            "predecessor_receipt_bound_in_each_manifest": True,
+            "genesis_requires_explicit_declaration": True,
+            "successor_launch_requires_exact_predecessor_receipt": True,
+        },
+        "registered_treatments": [
+            {
+                "training_variant": "udlm",
+                "hydra_config_name": "udlm",
+                "udlm_prior_variant": "release_uniform",
+                "comparison_role": "faithful_release_control",
+            },
+            {
+                "training_variant": "schedule_uniform",
+                "hydra_config_name": "udlm",
+                "udlm_prior_variant": "schedule_uniform",
+                "comparison_role": "schedule_repair_uniform_control",
+            },
+            {
+                "training_variant": "udlm_categorical",
+                "hydra_config_name": "udlm_categorical",
+                "udlm_prior_variant": "empirical_frequency",
+                "comparison_role": "empirical_prior_treatment",
+            },
+        ],
+        "common_training_contract": {
+            "source_revision": "a" * 40,
+            "initialization_mode": "verified_mdlm_ema_warm_start",
+            "initialization_checkpoint_path": "/synthetic/mdlm.ckpt",
+            "initialization_checkpoint_sha256": EXPECTED_WARM_START_SHA256,
+            "requested_gpu_count": 1,
+            "max_steps": 10,
+            "global_batch_size": 8,
+            "micro_batch_size_per_process": 2,
+            "accumulate_grad_batches": 4,
+            "effective_global_batch_size": 8,
+            "num_workers": 1,
+            "seed": 7,
+            "exclude_special_tokens": True,
+            "empirical_uniform_mix": 0.0002,
+            "empirical_uniform_mix_consumed_only_by": "empirical_frequency",
+            "empirical_uniform_mix_audit": {
+                "relative_path": "experiments/udlm/prior_geometry/floor.json",
+                "sha256": "1" * 64,
+                "source_revision": "a" * 40,
+                "scope": "retrospective_training_only_engineering_selection",
+            },
+            "common_resolved_config_sha256": launcher.matched_panel_config_sha256(
+                representative_config
+            ),
+        },
+        "common_gpu_safety_policy": {
+            "max_utilization_percent": 10,
+            "utilization_comparison": "strictly_less_than",
+            "min_free_memory_mib": 30000,
+            "active_compute_processes_allowed": False,
+            "compute_mode_prohibited_allowed": False,
+            "physical_gpu_identity_is_per_run_provenance": True,
+        },
+    }
+
+
+_PREDECESSOR_VARIANTS = {
+    "udlm": ("udlm", "release_uniform", "faithful_release_control"),
+    "schedule_uniform": (
+        "udlm",
+        "schedule_uniform",
+        "schedule_repair_uniform_control",
+    ),
+}
+
+
+def _write_producer_predecessor(
+    repository,
+    *,
+    run_name,
+    training_variant,
+    variant_position,
+    panel,
+    prior_binding,
+    created_at,
+    completed_at,
+    recorded_at,
+    mutate_manifest=None,
+    mutate_summary=None,
+    mutate_receipt=None,
+):
+    run_dir = repository / "output/udlm" / run_name
+    run_dir.mkdir(parents=True)
+    manifest_path = run_dir / "launch_manifest.json"
+    runtime_path = run_dir / "runtime_config.json"
+    summary_path = run_dir / "training_summary.json"
+    receipt_path = run_dir / "pilot_exit_status.json"
+    checkpoint_path = run_dir / "checkpoints/10.ckpt"
+    checkpoint_path.parent.mkdir()
+    checkpoint_path.write_bytes(b"producer-shaped predecessor checkpoint\n")
+    checkpoint_snapshot = _snapshot(checkpoint_path)
+    source_revision = panel["common_training_contract"]["source_revision"]
+    hydra_name, prior_variant, comparison_role = _PREDECESSOR_VARIANTS[training_variant]
+    selected_gpu_uuids = [f"GPU-{run_name}-fixture"]
+    gpu_state = {
+        "physical_index": 6,
+        "uuid": selected_gpu_uuids[0],
+        "name": "Synthetic Accelerator",
+        "memory_used_mib": 1000,
+        "memory_total_mib": 81920,
+        "utilization_percent": 0,
+        "compute_mode": "Default",
+        "compute_processes": [],
+    }
+    resolved_config = {
+        "data": "safe",
+        "seed": 7,
+        "training": {
+            "ema": 0.9999,
+            "udlm": {
+                "prior_variant": prior_variant,
+                "exclude_special_tokens": True,
+                "empirical_uniform_mix": 0.0002,
+            },
+        },
+        "loader": {"batch_size": 2, "global_batch_size": 8, "num_workers": 1},
+        "trainer": {
+            "devices": 1,
+            "num_nodes": 1,
+            "max_steps": 10,
+            "accumulate_grad_batches": 4,
+        },
+        "callback": {"dirpath": str(checkpoint_path.parent)},
+    }
+    resolved_config_sha256 = _canonical_sha256(resolved_config)
+    child_argv = [
+        str(repository / "scripts/train.py"),
+        "--config-name",
+        hydra_name,
+        "seed=7",
+        "trainer.devices=1",
+    ]
+    full_argv = [str(repository / ".venv/bin/python"), "-u", *child_argv]
+    argv_sha256 = _canonical_sha256(child_argv)
+    summary_completion = {
+        "summary_schema_version": receipt_writer.TRAINING_SUMMARY_SCHEMA_VERSION,
+        "summary_path": str(summary_path),
+        "final_checkpoint_path": str(checkpoint_path),
+        "expected_max_steps": 10,
+        "expected_world_size": 1,
+        "fail_on_nonfinite_loss": True,
+        "backward_anomaly_detection": True,
+    }
+    lock_path = repository / "output/udlm/.single_training_job.lock"
+    lock_record = {
+        "schema_version": 1,
+        "status": "held",
+        "purpose": "enforce_one_R_S_E_pilot_training_job_at_a_time",
+        "source_revision": source_revision,
+        "run_name": run_name,
+        "training_variant": training_variant,
+        "owner_token": ("c" if variant_position == 0 else "d") * 64,
+        "launcher_pid_at_acquisition": 1234 + variant_position,
+        "acquired_at_utc": (
+            "2026-09-06T11:55:00+00:00"
+            if variant_position == 0
+            else "2026-09-06T11:59:05+00:00"
+        ),
+        "owner_process_exit_does_not_make_lock_stale": True,
+        "stale_lock_policy": "fail_closed_and_require_manual_review",
+        "release_policy": (
+            "exact_owner_lock_only_after_receipt_or_before_tmux_handoff_failure"
+        ),
+    }
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text(
+        json.dumps(lock_record, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    lock_snapshot = _snapshot(lock_path)
+    manifest_completion = {
+        "status_at_launch": "pending",
+        "complete_only_if_valid_training_summary_exists": True,
+        "complete_only_if_successful_exit_receipt_exists": True,
+        "valid_training_summary_and_successful_exit_receipt_both_required": True,
+        "missing_summary_after_tmux_exit_means": "incomplete",
+        "absent_exit_receipt_means": "incomplete",
+        "successful_exit_receipt_requires": {
+            "training_exit_status": 0,
+            "tee_exit_status": 0,
+            "valid_launch_bound_training_summary": True,
+            "exact_launch_manifest_still_matches": True,
+            "clean_pushed_source_at_receipt": True,
+            "predecessor_receipt_binding_unchanged_and_valid": True,
+        },
+        "training_job_lock_release": (
+            "after_exit_receipt_publication_for_completed_or_failed_pipeline"
+        ),
+    }
+    inventory_at = (
+        "2026-09-06T11:56:00+00:00"
+        if variant_position == 0
+        else ("2026-09-06T11:59:10+00:00")
+    )
+    probe_at = (
+        "2026-09-06T11:56:30+00:00"
+        if variant_position == 0
+        else ("2026-09-06T11:59:20+00:00")
+    )
+    manifest = {
+        "launch_manifest_schema_version": receipt_writer.LAUNCH_MANIFEST_SCHEMA_VERSION,
+        "created_at": created_at,
+        "purpose": "bounded UDLM training pilot",
+        "gpu_selection_schema_version": 2,
+        "git_sha": source_revision,
+        "source_revision_before_final_gpu_probe": source_revision,
+        "run_name": run_name,
+        "training_variant": training_variant,
+        "hydra_config_name": hydra_name,
+        "udlm_prior_variant": prior_variant,
+        "udlm_comparison_role": comparison_role,
+        "matched_panel_spec": panel,
+        "matched_panel_spec_sha256": _canonical_sha256(panel),
+        "matched_panel_variant_position": variant_position,
+        "predecessor_receipt_binding": prior_binding,
+        "single_training_job_lock": {
+            "path": str(lock_path),
+            "sha256": lock_snapshot["sha256"],
+            "record": lock_record,
+            "acquired_before_any_gpu_probe": True,
+            "stale_lock_policy": "fail_closed_and_require_manual_review",
+            "release_owner": "pilot_exit_receipt_writer_after_publication",
+        },
+        "tmux_session": f"genmol_{training_variant}_{run_name}",
+        "user_requested_gpu_count": 1,
+        "gpu_selection_method": "dynamic_idle_discovery",
+        "gpu_inventory_scope": "all_nvidia_gpus",
+        "inventory_snapshot_completed_at_utc": inventory_at,
+        "gpu_inventory_at_selection": [dict(gpu_state)],
+        "initially_selected_gpu_states": [dict(gpu_state)],
+        "logical_cuda_devices": [0],
+        "physical_gpu_indices": [6],
+        "cuda_visible_device_uuids": selected_gpu_uuids,
+        "final_uuid_probes_completed_at_utc": probe_at,
+        "gpu_states_at_final_uuid_probe": [dict(gpu_state)],
+        "gpu_safety_policy": {
+            "max_utilization_percent": 10,
+            "utilization_comparison": "strictly_less_than",
+            "min_free_memory_mib": 30000,
+            "active_compute_processes_allowed": False,
+            "compute_mode_prohibited_allowed": False,
+        },
+        "training_argv": full_argv,
+        "training_argv_sha256": argv_sha256,
+        "resolved_training_config": resolved_config,
+        "resolved_training_config_sha256": resolved_config_sha256,
+        "runtime_config_path": str(runtime_path),
+        "training_summary_path": str(summary_path),
+        "training_summary_schema_version": 4,
+        "pilot_exit_status_path": str(receipt_path),
+        "pilot_exit_status_schema_version": 5,
+        "expected_final_checkpoint_path": str(checkpoint_path),
+        "launch_manifest_path": str(manifest_path),
+        "launch_manifest_raw_sha256_transport": (
+            "passed_out_of_band_to_training_and_receipt_to_avoid_self_hash"
+        ),
+        "completion_contract": manifest_completion,
+        "log_path": str(repository / f"output/logs/{run_name}.log"),
+        "log_reserved_exclusively_before_manifest": True,
+        "checkpoint": "/synthetic/mdlm.ckpt",
+        "checkpoint_sha256": EXPECTED_WARM_START_SHA256,
+        "seed": 7,
+        "max_steps": 10,
+        "global_batch_size": 8,
+        "micro_batch_size_per_process": 2,
+        "accumulate_grad_batches": 4,
+        "effective_global_batch_size": 8,
+        "exclude_special_tokens": True,
+        "dry_run": False,
+    }
+    if mutate_manifest is not None:
+        mutate_manifest(manifest)
+    manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    manifest_snapshot = _snapshot(manifest_path)
+    manifest_claim = {**manifest_snapshot, "selected_gpu_uuids": selected_gpu_uuids}
+    runtime = {
+        "schema_version": 2,
+        "status": "preflight_completed",
+        "source_revision": source_revision,
+        "source": {"head": source_revision, "upstream": source_revision},
+        "training_argv": child_argv,
+        "observed_training_argv": child_argv,
+        "training_argv_sha256": argv_sha256,
+        "resolved_training_config": resolved_config,
+        "resolved_training_config_sha256": resolved_config_sha256,
+        "launch_manifest": manifest_claim,
+        "completion_contract": summary_completion,
+        "python_environment": {
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONHASHSEED": "7",
+            "PYTHONIOENCODING": "utf-8",
+            "PYTHONNOUSERSITE": "1",
+            "PYTHONOPTIMIZE": "0",
+            "PYTHONPATH": f"{repository / 'src'}:{repository}",
+            "PYTHONUTF8": "1",
+        },
+    }
+    runtime_path.write_text(
+        json.dumps(runtime, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    runtime_snapshot = _snapshot(runtime_path)
+    accounting = {
+        "training_seed": 7,
+        "optimizer_updates": 10,
+        "world_size": 1,
+        "micro_batch_size_per_rank": 2,
+        "accumulate_grad_batches": 4,
+        "effective_global_examples_per_optimizer_step": 8,
+        "total_requested_example_exposures": 80,
+        "hosted_stream_rank_partition_policy": (
+            "huggingface_split_dataset_by_node_disjoint_rank_streams"
+        ),
+        "trainable_parameter_counts": {
+            "base_backbone": 3,
+            "time_conditioner": 2,
+            "total": 5,
+        },
+    }
+    ema_metadata = {"shadow_parameter_count": 2, "decay": 0.9999, "num_updates": 10}
+    summary = {
+        "schema_version": 4,
+        "status": "completed",
+        "completed_at_utc": completed_at,
+        "source_revision": source_revision,
+        "source": {"head": source_revision, "upstream": source_revision},
+        "resolved_training_config_sha256": resolved_config_sha256,
+        "training_argv_sha256": argv_sha256,
+        "launch_manifest": manifest_claim,
+        "runtime_config": {
+            **runtime_snapshot,
+            "schema_version": 2,
+            "record_sha256": _canonical_sha256(runtime),
+        },
+        "completion_contract": summary_completion,
+        "observed_training_state": {
+            "global_rank": 0,
+            "global_step": 10,
+            "world_size": 1,
+        },
+        "training_accounting": accounting,
+        "training_health": {
+            "scope": "rank-zero counters",
+            "all_losses_finite": True,
+            "all_observed_gradients_finite": True,
+            "every_optimizer_step_had_a_nonzero_gradient": True,
+            "loss_checks": 10,
+            "optimizer_step_checks": 10,
+            "gradient_tensor_observations": 10,
+            "gradient_element_observations": 20,
+        },
+        "conditioning_gradient_audit": None,
+        "screen_initialization_state_audit": None,
+        "final_checkpoint": {
+            **checkpoint_snapshot,
+            "semantic_audit": {
+                "deserialized": True,
+                "global_step": 10,
+                "raw_model": _finite_record(),
+                "ema": _finite_record(),
+                "ema_metadata": ema_metadata,
+                "optimizer": _finite_record(),
+                "all_checkpoint_tensors": _finite_record(tensors=6, elements=12),
+                "udlm_process_identity_verified": True,
+                "live_model_match": {
+                    "exact_key_set": True,
+                    "exact_tensor_values": True,
+                    "tensor_count": 2,
+                },
+                "live_ema_match": {"exact_tensor_values": True, "tensor_count": 2},
+            },
+        },
+        "tensor_finiteness": {"raw_model": _finite_record(), "ema": _finite_record()},
+        "startup": {
+            "mode": "warm_start",
+            "verified_mdlm_warm_start_report": {
+                "source_path": "/synthetic/mdlm.ckpt",
+                "source_resolved_path": "/synthetic/mdlm.ckpt",
+                "source_sha256": EXPECTED_WARM_START_SHA256,
+                "source_size_bytes": 123,
+                "expected_source_sha256": EXPECTED_WARM_START_SHA256,
+                "byte_identity_verified_before_and_after_load": True,
+                "weights": "ema",
+                "parameter_tensors": 2,
+            },
+        },
+    }
+    if mutate_summary is not None:
+        mutate_summary(summary)
+    summary_path.write_text(
+        json.dumps(summary, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    summary_snapshot = _snapshot(summary_path)
+    validated_bindings = {
+        "schema_version": 4,
+        "source_revision": source_revision,
+        "resolved_training_config_sha256": resolved_config_sha256,
+        "training_argv_sha256": argv_sha256,
+        "launch_manifest_path": str(manifest_path),
+        "launch_manifest_sha256": manifest_snapshot["sha256"],
+        "selected_gpu_uuids": selected_gpu_uuids,
+        "observed_global_step": 10,
+        "observed_world_size": 1,
+        "training_accounting": accounting,
+        "ema_metadata": ema_metadata,
+        "final_checkpoint_path": str(checkpoint_path),
+        "final_checkpoint_sha256": checkpoint_snapshot["sha256"],
+        "startup_mode": "warm_start",
+        "conditioning_gradient_audit": None,
+        "screen_initialization_state_audit": None,
+    }
+    receipt = {
+        "schema_version": 5,
+        "status": "completed",
+        "overall_status": "completed",
+        "recorded_at_utc": recorded_at,
+        "process_exit_status": 0,
+        "expected_contract": {
+            "training_summary_schema_version": 4,
+            "source_revision": source_revision,
+            "resolved_training_config_sha256": resolved_config_sha256,
+            "training_argv_sha256": argv_sha256,
+            "launch_manifest_path": str(manifest_path),
+            "launch_manifest_sha256": manifest_snapshot["sha256"],
+            "selected_gpu_uuids": selected_gpu_uuids,
+            "training_job_lock_path": str(lock_path),
+            "training_job_lock_sha256": lock_snapshot["sha256"],
+            "max_steps": 10,
+            "world_size": 1,
+            "training_summary_path": str(summary_path),
+            "final_checkpoint_path": str(checkpoint_path),
+            "initialization_checkpoint_sha256": EXPECTED_WARM_START_SHA256,
+        },
+        "pipeline": {
+            "training": _successful_pipeline_component(),
+            "tee": _successful_pipeline_component(),
+            "pipefail_shell_exit_status": 0,
+        },
+        "source_at_receipt": {
+            "verified": True,
+            "expected_revision": source_revision,
+            "head": source_revision,
+            "upstream": source_revision,
+            "output_directory_excluded_from_cleanliness_check": True,
+        },
+        "launch_manifest": {
+            "path": str(manifest_path),
+            "present": True,
+            "matches_expected_raw_sha256": True,
+            "selected_gpu_uuids_match_expected": True,
+            "matches_training_summary_snapshot": True,
+            "matches_runtime_config_snapshot": True,
+            "valid_and_launch_bound": True,
+            "expected_selected_gpu_uuids": selected_gpu_uuids,
+            "observed_selected_gpu_uuids": selected_gpu_uuids,
+            "artifact": manifest_snapshot,
+            "validation_error": None,
+        },
+        "predecessor_receipt_binding": prior_binding,
+        "training_job_lock": {
+            "path": str(lock_path),
+            "present": True,
+            "expected_sha256": lock_snapshot["sha256"],
+            "matches_expected_raw_sha256": True,
+            "matches_launch_manifest_binding": True,
+            "valid_and_launch_bound_before_receipt_publication": True,
+            "artifact": lock_snapshot,
+            "record": lock_record,
+            "release_policy": "publish_receipt_then_unlink_only_same_stat_identity_and_sha256",
+            "release_result_not_claimed_inside_pre_release_receipt": True,
+            "validation_error": None,
+        },
+        "training_summary": {
+            "path": str(summary_path),
+            "present": True,
+            "valid_and_launch_bound": True,
+            "artifact": summary_snapshot,
+            "validated_bindings": validated_bindings,
+            "validation_error": None,
+        },
+        "runtime_config": {
+            "path": str(runtime_path),
+            "present": True,
+            "matches_training_summary_snapshot": True,
+            "semantic_validation_passed": True,
+            "artifact": runtime_snapshot,
+        },
+        "final_checkpoint": {
+            "path": str(checkpoint_path),
+            "present": True,
+            "matches_training_summary_snapshot": True,
+            "artifact": checkpoint_snapshot,
+        },
+        "completion_requirements": {
+            "training_exit_zero": True,
+            "tee_exit_zero": True,
+            "training_summary_valid_and_launch_bound": True,
+            "launch_manifest_matches_summary_runtime_and_launch": True,
+            "predecessor_receipt_binding_unchanged_and_valid": True,
+            "training_job_lock_valid_before_receipt_publication": True,
+            "runtime_config_matches_summary_and_launch": True,
+            "final_checkpoint_matches_training_summary": True,
+            "clean_pushed_source_still_matches_launch": True,
+            "all_must_hold": True,
+        },
+    }
+    if mutate_receipt is not None:
+        mutate_receipt(receipt)
+    receipt_path.write_text(
+        json.dumps(receipt, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    next_variant = ("schedule_uniform", "udlm_categorical")[variant_position]
+    next_binding = {
+        "schema_version": 1,
+        "state": "validated_successful_predecessor",
+        "current_training_variant": next_variant,
+        "current_variant_position": variant_position + 1,
+        "expected_predecessor_training_variant": training_variant,
+        "expected_predecessor_variant_position": variant_position,
+        "matched_panel_spec_sha256": _canonical_sha256(panel),
+        "common_training_contract_sha256": _canonical_sha256(
+            panel["common_training_contract"]
+        ),
+        "receipt_artifact": _snapshot(receipt_path),
+        "predecessor_launch_manifest_artifact": manifest_snapshot,
+        "predecessor_training_summary_artifact": summary_snapshot,
+        "predecessor_run_name": run_name,
+        "chronology": {
+            "predecessor_launch_manifest_created_at_utc": created_at,
+            "predecessor_training_summary_completed_at_utc": completed_at,
+            "predecessor_exit_receipt_recorded_at_utc": recorded_at,
+            "strictly_ordered_timestamps_verified": True,
+        },
+        "validated_before_gpu_probe": True,
+    }
+    return next_binding, summary_path
+
+
+def _predecessor_chain_fixture(
+    repository,
+    *,
+    mutate_manifest=None,
+    mutate_summary=None,
+    mutate_receipt=None,
+):
+    panel = _predecessor_panel()
+    current_binding, summary_path = _write_producer_predecessor(
+        repository,
+        run_name="r-run",
+        training_variant="udlm",
+        variant_position=0,
+        panel=panel,
+        prior_binding=_genesis_predecessor_binding(panel),
+        created_at="2026-09-06T11:57:00+00:00",
+        completed_at="2026-09-06T11:58:00+00:00",
+        recorded_at="2026-09-06T11:59:00+00:00",
+        mutate_manifest=mutate_manifest,
+        mutate_summary=mutate_summary,
+        mutate_receipt=mutate_receipt,
+    )
+    current_manifest = {
+        "created_at": "2026-09-06T12:00:00+00:00",
+        "purpose": "bounded UDLM training pilot",
+        "training_variant": "schedule_uniform",
+        "matched_panel_variant_position": 1,
+        "matched_panel_spec": panel,
+        "matched_panel_spec_sha256": _canonical_sha256(panel),
+        "predecessor_receipt_binding": current_binding,
+        "single_training_job_lock": {
+            "record": {"acquired_at_utc": "2026-09-06T11:59:10+00:00"}
+        },
+        "inventory_snapshot_completed_at_utc": "2026-09-06T11:59:20+00:00",
+        "final_uuid_probes_completed_at_utc": "2026-09-06T11:59:30+00:00",
+    }
+    return current_manifest, current_binding, summary_path
+
+
+def _transitive_predecessor_chain_fixture(repository):
+    panel = _predecessor_panel()
+    r_binding, r_summary_path = _write_producer_predecessor(
+        repository,
+        run_name="r-run",
+        training_variant="udlm",
+        variant_position=0,
+        panel=panel,
+        prior_binding=_genesis_predecessor_binding(panel),
+        created_at="2026-09-06T11:57:00+00:00",
+        completed_at="2026-09-06T11:58:00+00:00",
+        recorded_at="2026-09-06T11:59:00+00:00",
+    )
+    e_binding, _s_summary_path = _write_producer_predecessor(
+        repository,
+        run_name="s-run",
+        training_variant="schedule_uniform",
+        variant_position=1,
+        panel=panel,
+        prior_binding=r_binding,
+        created_at="2026-09-06T12:00:00+00:00",
+        completed_at="2026-09-06T12:01:00+00:00",
+        recorded_at="2026-09-06T12:02:00+00:00",
+    )
+    e_manifest = {
+        "created_at": "2026-09-06T12:03:00+00:00",
+        "purpose": "bounded UDLM training pilot",
+        "training_variant": "udlm_categorical",
+        "matched_panel_variant_position": 2,
+        "matched_panel_spec": panel,
+        "matched_panel_spec_sha256": _canonical_sha256(panel),
+        "predecessor_receipt_binding": e_binding,
+        "single_training_job_lock": {
+            "record": {"acquired_at_utc": "2026-09-06T12:02:10+00:00"}
+        },
+        "inventory_snapshot_completed_at_utc": "2026-09-06T12:02:20+00:00",
+        "final_uuid_probes_completed_at_utc": "2026-09-06T12:02:30+00:00",
+    }
+    return e_manifest, r_summary_path
+
+
+def test_receipt_revalidates_bound_predecessor_artifacts(tmp_path, monkeypatch):
+    monkeypatch.setattr(receipt_writer, "REPOSITORY_ROOT", tmp_path)
+    manifest, expected_binding, _summary_path = _predecessor_chain_fixture(tmp_path)
+
+    observed = receipt_writer._validated_predecessor_binding_at_receipt(manifest)
+
+    assert observed == expected_binding
+    assert observed is not expected_binding
+    predecessor_manifest = json.loads(
+        Path(
+            expected_binding["predecessor_launch_manifest_artifact"]["path"]
+        ).read_text(encoding="utf-8")
+    )
+    assert (
+        predecessor_manifest["launch_manifest_schema_version"]
+        == receipt_writer.LAUNCH_MANIFEST_SCHEMA_VERSION
+        == 2
+    )
+
+
+@pytest.mark.parametrize(
+    ("artifact", "missing_key", "error_fragment"),
+    [
+        ("manifest", "source_revision_before_final_gpu_probe", "manifest keys"),
+        ("summary", "runtime_config", "summary keys"),
+        ("receipt", "expected_contract", "receipt keys"),
+    ],
+)
+def test_receipt_rejects_sparse_nonproducer_predecessor_artifacts(
+    tmp_path, monkeypatch, artifact, missing_key, error_fragment
+):
+    monkeypatch.setattr(receipt_writer, "REPOSITORY_ROOT", tmp_path)
+
+    def remove_required_key(value):
+        value.pop(missing_key)
+
+    mutations = {f"mutate_{artifact}": remove_required_key}
+    manifest, _binding, _summary_path = _predecessor_chain_fixture(
+        tmp_path, **mutations
+    )
+
+    with pytest.raises(ValueError, match=error_fragment):
+        receipt_writer._validated_predecessor_binding_at_receipt(manifest)
+
+
+def test_receipt_rejects_legacy_predecessor_launch_manifest_schema(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(receipt_writer, "REPOSITORY_ROOT", tmp_path)
+    manifest, _binding, _summary_path = _predecessor_chain_fixture(
+        tmp_path,
+        mutate_manifest=lambda value: value.__setitem__(
+            "launch_manifest_schema_version", 1
+        ),
+    )
+
+    with pytest.raises(ValueError, match="launch-manifest schema"):
+        receipt_writer._validated_predecessor_binding_at_receipt(manifest)
+
+
+def test_receipt_accepts_project_level_reviewed_predecessor_python(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(receipt_writer, "REPOSITORY_ROOT", tmp_path)
+    alternate_python = str(tmp_path.parents[1] / ".venv/bin/python")
+    manifest, expected_binding, _summary_path = _predecessor_chain_fixture(
+        tmp_path,
+        mutate_manifest=lambda value: value["training_argv"].__setitem__(
+            0, alternate_python
+        ),
+    )
+
+    assert (
+        receipt_writer._validated_predecessor_binding_at_receipt(manifest)
+        == expected_binding
+    )
+
+
+def test_receipt_rejects_arbitrary_predecessor_python_path(tmp_path, monkeypatch):
+    monkeypatch.setattr(receipt_writer, "REPOSITORY_ROOT", tmp_path)
+    manifest, _binding, _summary_path = _predecessor_chain_fixture(
+        tmp_path,
+        mutate_manifest=lambda value: value["training_argv"].__setitem__(
+            0, "/usr/bin/python3"
+        ),
+    )
+
+    with pytest.raises(ValueError, match="reviewed producer prefix"):
+        receipt_writer._validated_predecessor_binding_at_receipt(manifest)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "error_fragment"),
+    [
+        (
+            lambda receipt: receipt["pipeline"]["training"].__setitem__(
+                "succeeded", False
+            ),
+            "successful producer value",
+        ),
+        (
+            lambda receipt: receipt["source_at_receipt"].__setitem__("head", "b" * 40),
+            "exact producer value",
+        ),
+        (
+            lambda receipt: receipt["completion_requirements"].pop("all_must_hold"),
+            "completion requirements keys",
+        ),
+        (
+            lambda receipt: receipt["training_job_lock"]["artifact"].__setitem__(
+                "link_count", 2
+            ),
+            "training-job lock evidence is invalid",
+        ),
+    ],
+)
+def test_receipt_rejects_nonproducer_predecessor_success_evidence(
+    tmp_path, monkeypatch, mutation, error_fragment
+):
+    monkeypatch.setattr(receipt_writer, "REPOSITORY_ROOT", tmp_path)
+    manifest, _binding, _summary_path = _predecessor_chain_fixture(
+        tmp_path, mutate_receipt=mutation
+    )
+
+    with pytest.raises(ValueError, match=error_fragment):
+        receipt_writer._validated_predecessor_binding_at_receipt(manifest)
+
+
+def test_receipt_rejects_predecessor_lock_record_not_matching_raw_digest(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(receipt_writer, "REPOSITORY_ROOT", tmp_path)
+
+    def replace_owner_token(manifest):
+        manifest["single_training_job_lock"]["record"]["owner_token"] = "e" * 64
+
+    manifest, _binding, _summary_path = _predecessor_chain_fixture(
+        tmp_path, mutate_manifest=replace_owner_token
+    )
+
+    with pytest.raises(ValueError, match="deterministic raw digest"):
+        receipt_writer._validated_predecessor_binding_at_receipt(manifest)
+
+
+@pytest.mark.parametrize(
+    ("tamper", "error_fragment"),
+    [
+        ("duplicate_inventory_uuid", "inventory UUIDs must be unique"),
+        ("duplicate_inventory_physical_index", "physical indices must be unique"),
+        ("selected_uuid_absent", "selected GPU UUIDs are absent"),
+        ("initial_state_differs", "initially selected GPUs differ"),
+        ("sparse_process_telemetry", "compute process keys are invalid"),
+    ],
+)
+def test_receipt_rejects_predecessor_gpu_provenance_tampering(
+    tmp_path, monkeypatch, tamper, error_fragment
+):
+    monkeypatch.setattr(receipt_writer, "REPOSITORY_ROOT", tmp_path)
+
+    def mutate_gpu_evidence(manifest):
+        inventory = manifest["gpu_inventory_at_selection"]
+        if tamper == "duplicate_inventory_uuid":
+            duplicate = dict(inventory[0])
+            duplicate["physical_index"] = 7
+            inventory.append(duplicate)
+        elif tamper == "duplicate_inventory_physical_index":
+            duplicate = dict(inventory[0])
+            duplicate["uuid"] = "GPU-distinct-fixture"
+            inventory.append(duplicate)
+        elif tamper == "selected_uuid_absent":
+            inventory[0]["uuid"] = "GPU-not-selected"
+        elif tamper == "initial_state_differs":
+            manifest["initially_selected_gpu_states"][0]["memory_used_mib"] += 1
+        else:
+            inventory[0]["compute_processes"] = [
+                {"pid": 123, "process_name": "missing-memory-field"}
+            ]
+
+    manifest, _binding, _summary_path = _predecessor_chain_fixture(
+        tmp_path, mutate_manifest=mutate_gpu_evidence
+    )
+
+    with pytest.raises(ValueError, match=error_fragment):
+        receipt_writer._validated_predecessor_binding_at_receipt(manifest)
+
+
+def test_receipt_predecessor_revalidation_detects_late_mutation(tmp_path, monkeypatch):
+    monkeypatch.setattr(receipt_writer, "REPOSITORY_ROOT", tmp_path)
+    manifest, _expected_binding, summary_path = _predecessor_chain_fixture(tmp_path)
+    summary_path.write_bytes(summary_path.read_bytes() + b" ")
+
+    with pytest.raises(ValueError, match="no longer matches"):
+        receipt_writer._validated_predecessor_binding_at_receipt(manifest)
+
+
+def test_receipt_predecessor_revalidation_requires_direct_run_directory(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(receipt_writer, "REPOSITORY_ROOT", tmp_path)
+    manifest, _expected_binding, _summary_path = _predecessor_chain_fixture(tmp_path)
+    relocated = tmp_path / "archive/r-run/pilot_exit_status.json"
+    relocated.parent.mkdir(parents=True)
+    original = Path(manifest["predecessor_receipt_binding"]["receipt_artifact"]["path"])
+    shutil.copy2(original, relocated)
+    manifest["predecessor_receipt_binding"]["receipt_artifact"] = _snapshot(relocated)
+
+    with pytest.raises(ValueError, match="direct output/udlm run"):
+        receipt_writer._validated_predecessor_binding_at_receipt(manifest)
+
+
+def test_receipt_predecessor_revalidation_requires_cross_run_chronology(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(receipt_writer, "REPOSITORY_ROOT", tmp_path)
+    manifest, _expected_binding, _summary_path = _predecessor_chain_fixture(tmp_path)
+    manifest["created_at"] = "2026-09-06T11:59:00+00:00"
+
+    with pytest.raises(ValueError, match="must precede the current"):
+        receipt_writer._validated_predecessor_binding_at_receipt(manifest)
+
+
+@pytest.mark.parametrize(
+    ("current_event", "error_fragment"),
+    [
+        ("lock", "current training-job lock acquisition"),
+        ("inventory", "current GPU inventory snapshot"),
+        ("final_probe", "current final GPU probes"),
+    ],
+)
+@pytest.mark.parametrize(
+    "current_event_timestamp",
+    ["2026-09-06T11:59:00+00:00", "2026-09-06T11:58:59+00:00"],
+    ids=("equal_to_predecessor_receipt", "before_predecessor_receipt"),
+)
+def test_receipt_predecessor_must_strictly_predate_current_lock_and_gpu_probes(
+    tmp_path,
+    monkeypatch,
+    current_event,
+    error_fragment,
+    current_event_timestamp,
+):
+    monkeypatch.setattr(receipt_writer, "REPOSITORY_ROOT", tmp_path)
+    manifest, _expected_binding, _summary_path = _predecessor_chain_fixture(tmp_path)
+    if current_event == "lock":
+        manifest["single_training_job_lock"]["record"]["acquired_at_utc"] = (
+            current_event_timestamp
+        )
+    elif current_event == "inventory":
+        manifest["inventory_snapshot_completed_at_utc"] = current_event_timestamp
+    else:
+        manifest["final_uuid_probes_completed_at_utc"] = current_event_timestamp
+
+    with pytest.raises(ValueError, match=error_fragment):
+        receipt_writer._validated_predecessor_binding_at_receipt(manifest)
+
+
+def test_receipt_predecessor_revalidation_is_transitive(tmp_path, monkeypatch):
+    monkeypatch.setattr(receipt_writer, "REPOSITORY_ROOT", tmp_path)
+    manifest, r_summary_path = _transitive_predecessor_chain_fixture(tmp_path)
+    r_summary_path.write_bytes(r_summary_path.read_bytes() + b" ")
+
+    with pytest.raises(ValueError, match="no longer matches"):
+        receipt_writer._validated_predecessor_binding_at_receipt(manifest)
+
+
+def test_receipt_requires_chain_binding_for_matched_panel_launch():
+    with pytest.raises(ValueError, match="lacks predecessor receipt binding"):
+        receipt_writer._validated_predecessor_binding_at_receipt(
+            {"purpose": "bounded UDLM training pilot"}
+        )
+    assert (
+        receipt_writer._validated_predecessor_binding_at_receipt(
+            {"purpose": "registered UDLM optimization screen"}
+        )
+        is None
+    )
 
 
 def _valid_summary(paths, revision):
@@ -265,7 +1234,7 @@ def _valid_summary(paths, revision):
     return {
         "schema_version": launcher.TRAINING_SUMMARY_SCHEMA_VERSION,
         "status": "completed",
-        "completed_at_utc": "2026-09-06T12:00:00+00:00",
+        "completed_at_utc": "2020-01-01T00:01:00+00:00",
         "source_revision": revision,
         "source": {"head": revision, "upstream": revision},
         "resolved_training_config_sha256": EXPECTED_CONFIG_SHA256,
@@ -423,7 +1392,7 @@ def test_successful_pipeline_writes_launch_bound_receipt(receipt_repository):
 
     assert result.returncode == 0, result.stderr
     receipt = json.loads(paths["receipt"].read_text(encoding="utf-8"))
-    assert receipt["schema_version"] == receipt_writer.EXIT_STATUS_SCHEMA_VERSION == 4
+    assert receipt["schema_version"] == receipt_writer.EXIT_STATUS_SCHEMA_VERSION == 5
     assert receipt["status"] == "completed"
     assert receipt["process_exit_status"] == 0
     assert receipt["pipeline"]["training"]["shell_exit_status"] == 0
@@ -436,6 +1405,13 @@ def test_successful_pipeline_writes_launch_bound_receipt(receipt_repository):
     )
     assert receipt["runtime_config"]["matches_training_summary_snapshot"] is True
     assert receipt["launch_manifest"]["valid_and_launch_bound"] is True
+    assert receipt["predecessor_receipt_binding"] is None
+    assert (
+        receipt["completion_requirements"][
+            "predecessor_receipt_binding_unchanged_and_valid"
+        ]
+        is True
+    )
     assert receipt["launch_manifest"]["matches_runtime_config_snapshot"] is True
     assert (
         receipt["training_job_lock"][
@@ -465,6 +1441,39 @@ def test_successful_pipeline_writes_launch_bound_receipt(receipt_repository):
         "final_checkpoint_path": str(paths["checkpoint"]),
         "initialization_checkpoint_sha256": EXPECTED_WARM_START_SHA256,
     }
+
+
+@pytest.mark.parametrize(
+    "completed_at_utc",
+    [
+        "2020-01-01T00:00:00+00:00",
+        "2019-12-31T23:59:59+00:00",
+        "2999-01-01T00:00:00+00:00",
+    ],
+    ids=("equal_to_manifest", "before_manifest", "after_receipt"),
+)
+def test_current_run_timestamps_must_be_strictly_ordered(
+    receipt_repository, completed_at_utc
+):
+    repository, revision = receipt_repository
+    paths = _paths(repository, f"chronology_{completed_at_utc[:4]}")
+    summary = _valid_summary(paths, revision)
+    summary["completed_at_utc"] = completed_at_utc
+    paths["summary"].write_text(json.dumps(summary) + "\n", encoding="utf-8")
+    paths["log"].parent.mkdir(parents=True, exist_ok=True)
+
+    result = _execute_shell(
+        repository,
+        _shell_command(paths, revision, training_command=["bash", "-c", "exit 0"]),
+    )
+
+    assert result.returncode == receipt_writer.INCOMPLETE_EXIT_STATUS
+    receipt = json.loads(paths["receipt"].read_text(encoding="utf-8"))
+    assert receipt["status"] == "failed"
+    assert (
+        "timestamps must be strictly ordered"
+        in receipt["training_summary"]["validation_error"]
+    )
 
 
 def test_training_failure_is_recorded_even_when_summary_is_valid(receipt_repository):
@@ -970,7 +1979,9 @@ def test_launch_manifest_change_during_final_receipt_reread_fails_closed(
     receipt, status = receipt_writer.build_exit_receipt(args)
 
     assert status == receipt_writer.INCOMPLETE_EXIT_STATUS
-    assert manifest_reads == 2
+    # Initial validation, summary/runtime join, and final pre-publication
+    # predecessor-chain validation each take an independent stable snapshot.
+    assert manifest_reads == 3
     assert receipt["launch_manifest"]["valid_and_launch_bound"] is False
     assert (
         "changed during receipt validation"

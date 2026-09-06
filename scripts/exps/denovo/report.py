@@ -258,14 +258,18 @@ def _stable_regular_file_bytes(path: Path, *, label: str) -> bytes:
             before_fd.st_mtime_ns,
             before_fd.st_ctime_ns,
         )
-        if not stat.S_ISREG(before_fd.st_mode) or (
-            before_path.st_dev,
-            before_path.st_ino,
-            before_path.st_mode,
-            before_path.st_size,
-            before_path.st_mtime_ns,
-            before_path.st_ctime_ns,
-        ) != identity:
+        if (
+            not stat.S_ISREG(before_fd.st_mode)
+            or (
+                before_path.st_dev,
+                before_path.st_ino,
+                before_path.st_mode,
+                before_path.st_size,
+                before_path.st_mtime_ns,
+                before_path.st_ctime_ns,
+            )
+            != identity
+        ):
             raise ReportValidationError(f"{label} changed before open: {path}")
         while True:
             chunk = os.read(descriptor, 8 * 1024 * 1024)
@@ -508,7 +512,11 @@ def discover_run_directories(runs_dir: Path) -> dict[int, Path]:
     return by_seed
 
 
-def _load_csv(path: Path) -> tuple[list[dict[str, str]], bytes]:
+def _load_csv(
+    path: Path,
+    *,
+    expected_samples: int = EXPECTED_SAMPLES_PER_SEED,
+) -> tuple[list[dict[str, str]], bytes]:
     payload = _stable_regular_file_bytes(path, label="raw sample CSV")
     try:
         text = payload.decode("utf-8")
@@ -522,9 +530,9 @@ def _load_csv(path: Path) -> tuple[list[dict[str, str]], bytes]:
                 f"found {reader.fieldnames}"
             )
         records = list(reader)
-    if len(records) != EXPECTED_SAMPLES_PER_SEED:
+    if len(records) != expected_samples:
         raise ReportValidationError(
-            f"{path} must contain exactly {EXPECTED_SAMPLES_PER_SEED} data rows; "
+            f"{path} must contain exactly {expected_samples} data rows; "
             f"found {len(records)}"
         )
     for expected_index, record in enumerate(records):
@@ -539,7 +547,8 @@ def _load_csv(path: Path) -> tuple[list[dict[str, str]], bytes]:
             or sample_index != expected_index
         ):
             raise ReportValidationError(
-                f"{path}: sample_index must be the ordered range 0..999; "
+                f"{path}: sample_index must be the ordered range "
+                f"0..{expected_samples - 1}; "
                 f"row {expected_index + 2} contains {record['sample_index']!r}"
             )
     return records, payload
@@ -706,9 +715,10 @@ def _validate_metric_branch(
     *,
     seed: int,
     branch_name: str,
+    expected_samples: int = EXPECTED_SAMPLES_PER_SEED,
 ) -> None:
     context = f"seed {seed} metrics.{branch_name}"
-    requested = EXPECTED_SAMPLES_PER_SEED
+    requested = expected_samples
     valid_count = derived["valid_count"]
     unique_count = derived["unique_count"]
     quality_count = derived["quality_count"]
@@ -789,6 +799,7 @@ def _validate_cuda_provenance(
     config_sha256: str,
     git_commit: Any,
     summary_path: Path,
+    expected_samples: int = EXPECTED_SAMPLES_PER_SEED,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Validate the launcher's point-in-time idle-GPU selection evidence."""
     context = f"{summary_path}: environment"
@@ -1310,7 +1321,7 @@ def _validate_cuda_provenance(
         )
     expected_command_values = {
         "--seed": str(seed),
-        "--num-samples": str(EXPECTED_SAMPLES_PER_SEED),
+        "--num-samples": str(expected_samples),
         "--device": "cuda:0",
     }
     for option, expected in expected_command_values.items():
@@ -1796,7 +1807,29 @@ def _validate_generation_protocol(
 def _validate_summary_and_rows(
     run_dir: Path,
     expected_seed: int,
+    *,
+    expected_samples: int = EXPECTED_SAMPLES_PER_SEED,
+    expected_tier: str = "final",
+    final_protocol_eligible: bool = True,
 ) -> dict[str, Any]:
+    if type(expected_samples) is not int or expected_samples <= 0:
+        raise ReportValidationError("expected_samples must be a positive integer")
+    if expected_tier not in {"pilot", "final"}:
+        raise ReportValidationError("expected_tier must be 'pilot' or 'final'")
+    if type(final_protocol_eligible) is not bool:
+        raise ReportValidationError("final_protocol_eligible must be boolean")
+    producer_tier = (
+        "final" if expected_samples == EXPECTED_SAMPLES_PER_SEED else "pilot"
+    )
+    producer_final_eligible = expected_samples == EXPECTED_SAMPLES_PER_SEED
+    if (
+        expected_tier != producer_tier
+        or final_protocol_eligible is not producer_final_eligible
+    ):
+        raise ReportValidationError(
+            "expected sample count, evaluation tier, and final-protocol eligibility "
+            "do not match the benchmark producer contract"
+        )
     summary_path = run_dir / SUMMARY_FILENAME
     samples_path = run_dir / RAW_SAMPLES_FILENAME
     summary_payload = _stable_regular_file_bytes(
@@ -1854,9 +1887,9 @@ def _validate_summary_and_rows(
             f"{summary_path} seed aliases/directory disagree: "
             f"run={nested_seed}, top-level={alias_seed}, expected={expected_seed}"
         )
-    if nested_count != alias_count or nested_count != EXPECTED_SAMPLES_PER_SEED:
+    if nested_count != alias_count or nested_count != expected_samples:
         raise ReportValidationError(
-            f"{summary_path} must describe exactly {EXPECTED_SAMPLES_PER_SEED} samples"
+            f"{summary_path} must describe exactly {expected_samples} samples"
         )
     seed_config = _mapping(
         _required(run, "seed_configuration", "run"), "run.seed_configuration"
@@ -1885,11 +1918,12 @@ def _validate_summary_and_rows(
             f"{summary_path} did not use one released-style batch"
         )
     if (
-        run.get("evaluation_tier") != "final"
-        or run.get("final_protocol_eligible") is not True
+        run.get("evaluation_tier") != expected_tier
+        or run.get("final_protocol_eligible") is not final_protocol_eligible
     ):
         raise ReportValidationError(
-            f"{summary_path} is a pilot artifact and cannot enter the final report"
+            f"{summary_path} evaluation tier or final-protocol eligibility "
+            "differs from the registered expectation"
         )
     started_at = _utc_datetime(
         run.get("started_at_utc"), f"{summary_path}: run.started_at_utc"
@@ -2117,17 +2151,20 @@ def _validate_summary_and_rows(
     expected_effective.update(
         {
             "model_path": checkpoint.get("path"),
-            "num_samples": EXPECTED_SAMPLES_PER_SEED,
+            "num_samples": expected_samples,
             "device": "cuda:0",
         }
     )
     if dict(effective) != expected_effective:
         raise ReportValidationError(
             f"{summary_path} effective config does not equal source config plus the "
-            "evaluated checkpoint, 1000 samples, and logical cuda:0"
+            f"evaluated checkpoint, {expected_samples} samples, and logical cuda:0"
         )
 
-    records, raw_payload = _load_csv(samples_path)
+    records, raw_payload = _load_csv(
+        samples_path,
+        expected_samples=expected_samples,
+    )
     raw_sha256 = hashlib.sha256(raw_payload).hexdigest()
     artifacts = _mapping(summary["artifacts"], f"{summary_path}: artifacts")
     raw_artifact = _mapping(
@@ -2139,8 +2176,10 @@ def _validate_summary_and_rows(
         != raw_sha256
     ):
         raise ReportValidationError(f"{samples_path} SHA-256 disagrees with summary")
-    if raw_artifact.get("row_count") != EXPECTED_SAMPLES_PER_SEED:
-        raise ReportValidationError(f"{samples_path} summary row_count is not 1000")
+    if raw_artifact.get("row_count") != expected_samples:
+        raise ReportValidationError(
+            f"{samples_path} summary row_count is not {expected_samples}"
+        )
     if raw_artifact.get("fields") != list(RAW_SAMPLE_FIELDS):
         raise ReportValidationError(
             f"{samples_path} summary field list disagrees with CSV"
@@ -2168,21 +2207,20 @@ def _validate_summary_and_rows(
         strict_counts,
         seed=expected_seed,
         branch_name="strict",
+        expected_samples=expected_samples,
     )
     _validate_metric_branch(
         _mapping(metrics["released_comparable"], "metrics.released_comparable"),
         released_counts,
         seed=expected_seed,
         branch_name="released_comparable",
+        expected_samples=expected_samples,
     )
 
     expected_failures = {
         **cross_counts,
-        "strict_decode_failed": EXPECTED_SAMPLES_PER_SEED
-        - strict_counts["valid_count"],
-        "released_decode_failed": (
-            EXPECTED_SAMPLES_PER_SEED - released_counts["valid_count"]
-        ),
+        "strict_decode_failed": expected_samples - strict_counts["valid_count"],
+        "released_decode_failed": (expected_samples - released_counts["valid_count"]),
         "strict_duplicates": strict_counts["valid_count"]
         - strict_counts["unique_count"],
         "released_duplicates": (
@@ -2272,6 +2310,7 @@ def _validate_summary_and_rows(
         config_sha256=config["sha256"],
         git_commit=git_commit,
         summary_path=summary_path,
+        expected_samples=expected_samples,
     )
     tokenizer = _validate_tokenizer_provenance(
         summary["tokenizer"], summary_path=summary_path
@@ -2372,6 +2411,25 @@ def _validate_summary_and_rows(
         },
         "metric_inputs": metric_inputs,
     }
+
+
+def validate_run_evidence(
+    run_dir: Path,
+    expected_seed: int,
+    *,
+    expected_samples: int = EXPECTED_SAMPLES_PER_SEED,
+    expected_tier: str = "final",
+    final_protocol_eligible: bool = True,
+) -> dict[str, Any]:
+    """Validate one registered benchmark run and return normalized evidence."""
+
+    return _validate_summary_and_rows(
+        _resolve_in_repository(run_dir),
+        expected_seed,
+        expected_samples=expected_samples,
+        expected_tier=expected_tier,
+        final_protocol_eligible=final_protocol_eligible,
+    )
 
 
 def _aggregate(values: Sequence[float]) -> dict[str, Any]:
@@ -2567,7 +2625,7 @@ def _prior_interpretation(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
 def collect_report(runs_dir: Path) -> dict[str, Any]:
     """Validate three run directories and return the report data model."""
     by_seed = discover_run_directories(runs_dir)
-    runs = [_validate_summary_and_rows(by_seed[seed], seed) for seed in EXPECTED_SEEDS]
+    runs = [validate_run_evidence(by_seed[seed], seed) for seed in EXPECTED_SEEDS]
     checkpoint, config = _common_identity(runs)
     prior_interpretation = _prior_interpretation(checkpoint)
 

@@ -310,6 +310,38 @@ def _write_summary(path: Path, payload: dict[str, object]) -> None:
     )
 
 
+def _failure_job(
+    output_root: Path,
+    log_root: Path,
+    expected: launcher.ExpectedRunIdentity,
+    *,
+    seed: int,
+    started_at_utc: str = "2026-09-06T01:00:00+00:00",
+) -> launcher.RunningJob:
+    command = launcher._command(
+        checkpoint=expected.checkpoint_path,
+        expected_checkpoint_sha256=expected.checkpoint_sha256,
+        expected_source_revision=str(expected.source_revision),
+        config=expected.config_path,
+        expected_config_sha256=expected.source_config_sha256,
+        num_samples=expected.num_samples,
+        seed=seed,
+        output_dir=output_root / f"seed_{seed}",
+    )
+    log_path = log_root / f"seed_{seed}.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_bytes(f"synthetic failure log for seed {seed}\n".encode())
+    return launcher.RunningJob(
+        seed=seed,
+        gpu=_gpu(),
+        process=mock.Mock(),
+        log_handle=mock.Mock(closed=True),
+        log_path=log_path,
+        command=tuple(command),
+        started_at_utc=started_at_utc,
+    )
+
+
 def test_gpu_request_accepts_only_a_count_capped_at_two() -> None:
     required = [
         "--checkpoint",
@@ -341,12 +373,543 @@ def test_gpu_request_accepts_only_a_count_capped_at_two() -> None:
 def test_sample_tier_requires_explicit_bounded_pilot() -> None:
     assert launcher._validate_sample_tier(1_000, pilot=False) == "final"
     assert launcher._validate_sample_tier(32, pilot=True) == "pilot"
+    assert (
+        launcher._validate_sample_tier(
+            256,
+            pilot=False,
+            selection_pilot=True,
+        )
+        == "pilot"
+    )
     with pytest.raises(ValueError, match="exactly 1000"):
         launcher._validate_sample_tier(32, pilot=False)
     with pytest.raises(ValueError, match="capped at 100"):
         launcher._validate_sample_tier(101, pilot=True)
+    with pytest.raises(ValueError, match="exactly 256"):
+        launcher._validate_sample_tier(
+            255,
+            pilot=False,
+            selection_pilot=True,
+        )
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        launcher._validate_sample_tier(
+            32,
+            pilot=True,
+            selection_pilot=True,
+        )
     with pytest.raises(ValueError, match="must be an integer"):
         launcher._validate_sample_tier(True, pilot=True)
+
+
+def test_selection_pilot_cli_modes_are_mutually_exclusive() -> None:
+    required = [
+        "--checkpoint",
+        "model.ckpt",
+        "--config",
+        "config.yaml",
+        "--num-samples",
+        "256",
+        "--seeds",
+        "1000",
+        "1001",
+        "--output-root",
+        "runs",
+        "--gpu-count",
+        "1",
+    ]
+    parsed = launcher._parse_args(
+        [
+            *required,
+            "--selection-pilot",
+            "--attempt-id",
+            "schedule-l1-a1",
+            "--candidate-id",
+            "schedule-uniform",
+        ]
+    )
+    assert parsed.selection_pilot is True
+    assert parsed.pilot is False
+    assert parsed.attempt_id == "schedule-l1-a1"
+    assert parsed.candidate_id == "schedule-uniform"
+
+    with pytest.raises(SystemExit):
+        launcher._parse_args(
+            [
+                *required,
+                "--pilot",
+                "--selection-pilot",
+                "--attempt-id",
+                "schedule-l1-a1",
+                "--candidate-id",
+                "schedule-uniform",
+            ]
+        )
+
+
+def test_selection_pilot_requires_exact_seeds_and_normalized_attempt_id() -> None:
+    assert (
+        launcher._validate_attempt_scope(
+            selection_pilot=True,
+            attempt_id="schedule-l1-a1",
+            seeds=[1000, 1001],
+        )
+        == "schedule-l1-a1"
+    )
+    for seeds in ([1001, 1000], [1000], [1000, 1001, 1002]):
+        with pytest.raises(ValueError, match="ordered seeds"):
+            launcher._validate_attempt_scope(
+                selection_pilot=True,
+                attempt_id="schedule-l1-a1",
+                seeds=seeds,
+            )
+    for attempt_id in (None, " Schedule-l1", "Schedule-l1", "a/b", "a" * 97):
+        with pytest.raises(ValueError, match="normalized"):
+            launcher._validate_attempt_scope(
+                selection_pilot=True,
+                attempt_id=attempt_id,
+                seeds=[1000, 1001],
+            )
+    assert (
+        launcher._validate_attempt_scope(
+            pilot=True,
+            selection_pilot=False,
+            attempt_id="engineering-a",
+            seeds=[1002, 1007],
+        )
+        == "engineering-a"
+    )
+    with pytest.raises(ValueError, match=">=1000"):
+        launcher._validate_attempt_scope(
+            pilot=True,
+            selection_pilot=False,
+            attempt_id="engineering-a",
+            seeds=[999],
+        )
+    with pytest.raises(ValueError, match="only with a pilot mode"):
+        launcher._validate_attempt_scope(
+            selection_pilot=False,
+            attempt_id="unregistered",
+            seeds=[7],
+        )
+    assert (
+        launcher._validate_attempt_scope(
+            selection_pilot=False,
+            attempt_id=None,
+            seeds=[7],
+        )
+        is None
+    )
+    assert (
+        launcher._validate_candidate_scope(
+            selection_pilot=True,
+            candidate_id="schedule-uniform",
+        )
+        == "schedule-uniform"
+    )
+    assert (
+        launcher._validate_candidate_scope(
+            pilot=True,
+            selection_pilot=False,
+            candidate_id="engineering-candidate",
+        )
+        == "engineering-candidate"
+    )
+    for candidate_id in (None, "ab", "Schedule-uniform", "candidate/path"):
+        with pytest.raises(ValueError, match="candidate-id must already be normalized"):
+            launcher._validate_candidate_scope(
+                selection_pilot=True,
+                candidate_id=candidate_id,
+            )
+    with pytest.raises(ValueError, match="only with a pilot mode"):
+        launcher._validate_candidate_scope(
+            selection_pilot=False,
+            candidate_id="schedule-uniform",
+        )
+
+
+def test_selection_attempt_roots_are_keyed_and_never_reused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(launcher, "REPOSITORY_ROOT", tmp_path)
+    output_root, log_root = launcher._resolve_attempt_keyed_roots(
+        Path("output/pilots"),
+        Path("output/logs/pilots"),
+        attempt_id="schedule-l1-a1",
+    )
+    assert output_root == tmp_path / "output/pilots/schedule-l1-a1"
+    assert log_root == tmp_path / "output/logs/pilots/schedule-l1-a1"
+    launcher._require_fresh_pilot_attempt_paths(output_root, log_root)
+    launcher._reserve_pilot_attempt_paths(output_root, log_root)
+    assert output_root.is_dir()
+    assert log_root.is_dir()
+    with pytest.raises(FileExistsError, match="retries require a new attempt-id"):
+        launcher._require_fresh_pilot_attempt_paths(output_root, log_root)
+    with pytest.raises(FileExistsError, match="concurrently claimed"):
+        launcher._reserve_pilot_attempt_paths(output_root, log_root)
+
+    plain_output, plain_logs = launcher._resolve_attempt_keyed_roots(
+        Path("plain-runs"),
+        Path("plain-logs"),
+        attempt_id=None,
+    )
+    assert plain_output == tmp_path / "plain-runs"
+    assert plain_logs == tmp_path / "plain-logs"
+
+
+def test_selection_pilot_completion_requires_schema7_pilot_ineligible_markers(
+    tmp_path: Path,
+) -> None:
+    from scripts.exps.denovo import report
+
+    expected = _expected(tmp_path, num_samples=256)
+    output_root = tmp_path / "selection-runs/schedule-l1-a1"
+    _, summary_path = _write_matching_artifacts(output_root, 1000, expected)
+    summary = _read_summary(summary_path)
+    assert summary["schema_version"] == 7
+    assert summary["run"]["evaluation_tier"] == "pilot"
+    assert summary["run"]["final_protocol_eligible"] is False
+    with (
+        mock.patch.object(
+            launcher,
+            "_require_clean_pushed_source",
+            return_value={
+                "head": expected.source_revision,
+                "upstream": expected.source_revision,
+            },
+        ),
+        mock.patch.object(
+            report,
+            "validate_run_evidence",
+            return_value={"validated": True},
+        ) as validate,
+    ):
+        assert launcher._completed(output_root, 1000, expected) is True
+    validate.assert_called_once_with(
+        output_root / "seed_1000",
+        1000,
+        expected_samples=256,
+        expected_tier="pilot",
+        final_protocol_eligible=False,
+    )
+
+    summary["run"]["final_protocol_eligible"] = True
+    _write_summary(summary_path, summary)
+    with pytest.raises(
+        launcher.CompletionArtifactError,
+        match="run.final_protocol_eligible",
+    ):
+        launcher._completed(output_root, 1000, expected)
+
+
+def test_selection_failure_receipt_binds_inputs_partial_artifacts_and_no_clobber(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(launcher, "REPOSITORY_ROOT", tmp_path)
+    expected = _expected(tmp_path, num_samples=256)
+    output_root = tmp_path / "output/selection/attempt-a"
+    log_root = tmp_path / "output/logs/selection/attempt-a"
+    job = _failure_job(output_root, log_root, expected, seed=1000)
+    run_dir = output_root / "seed_1000"
+    run_dir.mkdir(parents=True)
+    summary_path = run_dir / launcher.benchmark_runner.SUMMARY_FILENAME
+    raw_path = run_dir / launcher.benchmark_runner.RAW_SAMPLES_FILENAME
+    summary_path.write_bytes(b'{"status":"partial"}\n')
+    raw_path.write_bytes(b"sample_index,raw_model_text\n0,C\n")
+    source_revision = {
+        "head": expected.source_revision,
+        "upstream": expected.source_revision,
+    }
+
+    receipt_path = launcher._write_pilot_failure_receipt(
+        output_root=output_root,
+        job=job,
+        expected=expected,
+        attempt_id="attempt-a",
+        candidate_id="schedule-uniform",
+        pilot_mode="registered_selection",
+        source_revision=source_revision,
+        stage="benchmark_child_process",
+        reason="benchmark child exited with status 17",
+        process_exit_status=17,
+        failed_at_utc="2026-09-06T01:05:00+00:00",
+    )
+    original = receipt_path.read_bytes()
+    receipt = json.loads(original)
+    assert set(receipt) == {
+        "schema_version",
+        "artifact_kind",
+        "status",
+        "attempt_id",
+        "candidate_id",
+        "pilot_seed",
+        "pilot_mode",
+        "requested_samples",
+        "stage",
+        "reason",
+        "started_at_utc",
+        "failed_at_utc",
+        "process_exit_status",
+        "checkpoint",
+        "config",
+        "command",
+        "source_revision",
+        "launcher_source",
+        "log",
+        "partial_artifacts",
+    }
+    assert receipt["schema_version"] == 1
+    assert receipt["artifact_kind"] == "pilot_failure"
+    assert receipt["status"] == "failed"
+    assert receipt["attempt_id"] == "attempt-a"
+    assert receipt["candidate_id"] == "schedule-uniform"
+    assert receipt["pilot_seed"] == 1000
+    assert receipt["pilot_mode"] == "registered_selection"
+    assert receipt["requested_samples"] == 256
+    assert receipt["process_exit_status"] == 17
+    assert receipt["checkpoint"] == {
+        "path": str(expected.checkpoint_path),
+        "sha256": expected.checkpoint_sha256,
+        "size_bytes": expected.checkpoint_size_bytes,
+        "global_step": expected.checkpoint_global_step,
+    }
+    assert receipt["config"] == {
+        "path": str(expected.config_path),
+        "sha256": expected.source_config_sha256,
+        "sampling": expected.sampling_config,
+        "sampling_sha256": expected.sampling_config_sha256,
+    }
+    assert receipt["command"] == list(job.command)
+    assert receipt["source_revision"] == source_revision
+    assert receipt["launcher_source"] == {
+        "path": str(Path(launcher.__file__).resolve()),
+        "sha256": launcher._sha256_file(Path(launcher.__file__).resolve()),
+        "size_bytes": Path(launcher.__file__).stat().st_size,
+    }
+    assert receipt["log"] == {
+        "path": str(job.log_path),
+        "sha256": launcher._sha256_file(job.log_path),
+        "size_bytes": job.log_path.stat().st_size,
+    }
+    assert receipt["partial_artifacts"] == {
+        "summary_json": {
+            "path": str(summary_path),
+            "sha256": launcher._sha256_file(summary_path),
+            "size_bytes": summary_path.stat().st_size,
+        },
+        "raw_samples_csv": {
+            "path": str(raw_path),
+            "sha256": launcher._sha256_file(raw_path),
+            "size_bytes": raw_path.stat().st_size,
+        },
+    }
+
+    with pytest.raises(FileExistsError, match="refusing to replace"):
+        launcher._write_pilot_failure_receipt(
+            output_root=output_root,
+            job=job,
+            expected=expected,
+            attempt_id="attempt-a",
+            candidate_id="schedule-uniform",
+            pilot_mode="registered_selection",
+            source_revision=source_revision,
+            stage="benchmark_child_process",
+            reason="different reason must not replace the original",
+            process_exit_status=9,
+            failed_at_utc="2026-09-06T01:06:00+00:00",
+        )
+    assert receipt_path.read_bytes() == original
+
+
+def test_selection_failure_receipt_enforces_stage_exit_status_semantics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(launcher, "REPOSITORY_ROOT", tmp_path)
+    expected = _expected(tmp_path, num_samples=256)
+    output_root = tmp_path / "output/selection/attempt-a"
+    job = _failure_job(
+        output_root,
+        tmp_path / "output/logs/selection/attempt-a",
+        expected,
+        seed=1000,
+    )
+    common = {
+        "output_root": output_root,
+        "job": job,
+        "expected": expected,
+        "attempt_id": "attempt-a",
+        "candidate_id": "schedule-uniform",
+        "source_revision": {
+            "head": expected.source_revision,
+            "upstream": expected.source_revision,
+        },
+        "reason": "synthetic failure",
+        "failed_at_utc": "2026-09-06T01:05:00+00:00",
+    }
+    with pytest.raises(ValueError, match="nonzero status"):
+        launcher._build_pilot_failure_receipt(
+            **common,
+            pilot_mode="registered_selection",
+            stage="benchmark_child_process",
+            process_exit_status=None,
+        )
+    with pytest.raises(ValueError, match="null process status"):
+        launcher._build_pilot_failure_receipt(
+            **common,
+            pilot_mode="registered_selection",
+            stage="completion_validation",
+            process_exit_status=1,
+        )
+
+
+def test_finished_selection_job_emits_failure_receipts_for_both_failure_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(launcher, "REPOSITORY_ROOT", tmp_path)
+    expected = _expected(tmp_path, num_samples=256)
+    source_revision = {
+        "head": expected.source_revision,
+        "upstream": expected.source_revision,
+    }
+
+    child_output = tmp_path / "output/selection/child-failure"
+    child_job = _failure_job(
+        child_output,
+        tmp_path / "output/logs/selection/child-failure",
+        expected,
+        seed=1000,
+    )
+    validation_output = tmp_path / "output/selection/validation-failure"
+    validation_job = _failure_job(
+        validation_output,
+        tmp_path / "output/logs/selection/validation-failure",
+        expected,
+        seed=1001,
+    )
+    engineering_fixture = tmp_path / "engineering"
+    engineering_fixture.mkdir()
+    engineering_expected = _expected(engineering_fixture, num_samples=32)
+    engineering_output = tmp_path / "output/selection/engineering-failure"
+    engineering_job = _failure_job(
+        engineering_output,
+        tmp_path / "output/logs/selection/engineering-failure",
+        engineering_expected,
+        seed=1007,
+    )
+    engineering_source_revision = {
+        "head": engineering_expected.source_revision,
+        "upstream": engineering_expected.source_revision,
+    }
+    with (
+        mock.patch.object(
+            launcher,
+            "_snapshot",
+            side_effect=AssertionError("failure finalization must not inventory GPUs"),
+        ),
+        mock.patch.object(
+            launcher,
+            "_probe_gpu",
+            side_effect=AssertionError("failure finalization must not probe a GPU"),
+        ),
+    ):
+        failed, details = launcher._finalize_finished_job(
+            job=child_job,
+            return_code=17,
+            output_root=child_output,
+            expected=expected,
+            pilot_mode="registered_selection",
+            attempt_id="child-failure",
+            candidate_id="schedule-uniform",
+            source_revision=source_revision,
+        )
+        assert failed is True
+        assert any("failure receipt published" in detail for detail in details)
+
+        failed, details = launcher._finalize_finished_job(
+            job=engineering_job,
+            return_code=9,
+            output_root=engineering_output,
+            expected=engineering_expected,
+            pilot_mode="engineering",
+            attempt_id="engineering-failure",
+            candidate_id="engineering-candidate",
+            source_revision=engineering_source_revision,
+        )
+        assert failed is True
+        assert any("failure receipt published" in detail for detail in details)
+
+        with mock.patch.object(
+            launcher,
+            "_completed",
+            side_effect=launcher.CompletionArtifactError("synthetic invalid summary"),
+        ):
+            failed, details = launcher._finalize_finished_job(
+                job=validation_job,
+                return_code=0,
+                output_root=validation_output,
+                expected=expected,
+                pilot_mode="registered_selection",
+                attempt_id="validation-failure",
+                candidate_id="schedule-uniform",
+                source_revision=source_revision,
+            )
+        assert failed is True
+        assert any("failure receipt published" in detail for detail in details)
+
+    child_receipt = json.loads(
+        (child_output / "seed_1000/failure_receipt.json").read_text()
+    )
+    validation_receipt = json.loads(
+        (validation_output / "seed_1001/failure_receipt.json").read_text()
+    )
+    engineering_receipt = json.loads(
+        (engineering_output / "seed_1007/failure_receipt.json").read_text()
+    )
+    assert child_receipt["stage"] == "benchmark_child_process"
+    assert child_receipt["process_exit_status"] == 17
+    assert child_receipt["partial_artifacts"] == {
+        "summary_json": None,
+        "raw_samples_csv": None,
+    }
+    assert validation_receipt["stage"] == "completion_validation"
+    assert validation_receipt["process_exit_status"] is None
+    assert "synthetic invalid summary" in validation_receipt["reason"]
+    assert engineering_receipt["pilot_mode"] == "engineering"
+    assert engineering_receipt["requested_samples"] == 32
+    assert engineering_receipt["pilot_seed"] == 1007
+
+
+def test_finished_nonselection_job_never_emits_selection_failure_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(launcher, "REPOSITORY_ROOT", tmp_path)
+    expected = _expected(tmp_path, num_samples=3)
+    output_root = tmp_path / "output/generic-pilot"
+    job = _failure_job(
+        output_root,
+        tmp_path / "output/logs/generic-pilot",
+        expected,
+        seed=7,
+    )
+    failed, _ = launcher._finalize_finished_job(
+        job=job,
+        return_code=4,
+        output_root=output_root,
+        expected=expected,
+        pilot_mode=None,
+        attempt_id=None,
+        candidate_id=None,
+        source_revision={
+            "head": expected.source_revision,
+            "upstream": expected.source_revision,
+        },
+    )
+    assert failed is True
+    assert not (output_root / "seed_7/failure_receipt.json").exists()
 
 
 def test_checkpoint_may_be_shared_from_project_but_not_escape_it(
@@ -714,20 +1277,26 @@ def test_final_completion_delegates_to_report_consumability_validator(
     ):
         with mock.patch.object(
             report,
-            "_validate_summary_and_rows",
+            "validate_run_evidence",
             return_value={"validated": True},
         ) as validate:
             assert launcher._completed(output_root, 7, expected) is True
-        validate.assert_called_once_with(output_root / "seed_7", 7)
+        validate.assert_called_once_with(
+            output_root / "seed_7",
+            7,
+            expected_samples=1_000,
+            expected_tier="final",
+            final_protocol_eligible=True,
+        )
 
         with mock.patch.object(
             report,
-            "_validate_summary_and_rows",
+            "validate_run_evidence",
             side_effect=report.ReportValidationError("synthetic report rejection"),
         ):
             with pytest.raises(
                 launcher.CompletionArtifactError,
-                match="fail final report validation.*synthetic report rejection",
+                match="fail registered report validation.*synthetic report rejection",
             ):
                 launcher._completed(output_root, 7, expected)
 
@@ -1024,7 +1593,9 @@ def test_main_skips_matching_run_without_probing_gpus(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    expected = _expected(tmp_path)
+    from scripts.exps.denovo import report
+
+    expected = _expected(tmp_path, num_samples=1_000)
     output_root = tmp_path / "runs"
     monkeypatch.setattr(launcher, "REPOSITORY_ROOT", tmp_path)
     monkeypatch.setattr(
@@ -1054,6 +1625,11 @@ def test_main_skips_matching_run_without_probing_gpus(
         "_snapshot",
         lambda *_: pytest.fail("matching completed runs must not probe GPUs"),
     )
+    monkeypatch.setattr(
+        report,
+        "validate_run_evidence",
+        lambda *_args, **_kwargs: {"validated": True},
+    )
 
     launcher.main(
         [
@@ -1063,7 +1639,6 @@ def test_main_skips_matching_run_without_probing_gpus(
             expected.config_path.name,
             "--num-samples",
             str(expected.num_samples),
-            "--pilot",
             "--seeds",
             "4",
             "--output-root",
@@ -1117,8 +1692,12 @@ def test_main_requires_tmux_only_for_real_execution(
         "--num-samples",
         str(expected.num_samples),
         "--pilot",
+        "--attempt-id",
+        "engineering-tmux-a",
+        "--candidate-id",
+        "engineering-candidate",
         "--seeds",
-        "4",
+        "1004",
         "--gpu-count",
         "1",
         "--log-root",
@@ -1126,7 +1705,10 @@ def test_main_requires_tmux_only_for_real_execution(
     ]
 
     launcher.main([*common, "--output-root", "dry-runs", "--dry-run"])
-    assert "DRY RUN" in capsys.readouterr().out
+    dry_output = capsys.readouterr().out
+    assert "DRY RUN" in dry_output
+    assert '"pilot_mode": "engineering"' in dry_output
+    assert str(tmp_path / "dry-runs/engineering-tmux-a/seed_1004") in dry_output
     assert not (tmp_path / "dry-runs").exists()
     assert not (tmp_path / "logs").exists()
 
@@ -1141,11 +1723,81 @@ def test_main_requires_tmux_only_for_real_execution(
     assert not (tmp_path / "logs").exists()
 
 
+def test_selection_pilot_dry_run_uses_attempt_keyed_schema7_pilot_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    expected = _expected(tmp_path, num_samples=256)
+    monkeypatch.setattr(launcher, "REPOSITORY_ROOT", tmp_path)
+    monkeypatch.setattr(
+        launcher,
+        "_require_project_virtual_environment",
+        lambda: tmp_path / ".venv/bin/python",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.setattr(
+        launcher,
+        "_require_clean_pushed_source",
+        lambda: {
+            "head": expected.source_revision,
+            "upstream": expected.source_revision,
+        },
+    )
+    monkeypatch.setattr(
+        launcher,
+        "_build_expected_run_identity",
+        lambda checkpoint, config, num_samples, **_kwargs: expected,
+    )
+    monkeypatch.setattr(launcher, "_snapshot", lambda: [_gpu()])
+
+    launcher.main(
+        [
+            "--checkpoint",
+            expected.checkpoint_path.name,
+            "--config",
+            expected.config_path.name,
+            "--num-samples",
+            "256",
+            "--selection-pilot",
+            "--attempt-id",
+            "schedule-l1-a1",
+            "--candidate-id",
+            "schedule-uniform",
+            "--seeds",
+            "1000",
+            "1001",
+            "--output-root",
+            "selection-runs",
+            "--gpu-count",
+            "1",
+            "--log-root",
+            "selection-logs",
+            "--dry-run",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    controller_event = json.loads(output.splitlines()[0])
+    assert controller_event["benchmark_mode"] == "selection_pilot"
+    assert controller_event["evaluation_tier"] == "pilot"
+    assert controller_event["attempt_id"] == "schedule-l1-a1"
+    assert controller_event["candidate_id"] == "schedule-uniform"
+    assert controller_event["pilot_mode"] == "registered_selection"
+    assert controller_event["seeds"] == [1000, 1001]
+    assert str(tmp_path / "selection-runs/schedule-l1-a1/seed_1000") in output
+    assert str(tmp_path / "selection-runs/schedule-l1-a1/seed_1001") in output
+    assert not (tmp_path / "selection-runs").exists()
+    assert not (tmp_path / "selection-logs").exists()
+
+
 def test_main_rejects_partial_output_before_probing_gpus(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    expected = _expected(tmp_path)
+    expected = _expected(tmp_path, num_samples=1_000)
     output_root = tmp_path / "runs"
     raw_path, summary_path = _write_matching_artifacts(output_root, 6, expected)
     summary_path.unlink()
@@ -1188,7 +1840,6 @@ def test_main_rejects_partial_output_before_probing_gpus(
                 expected.config_path.name,
                 "--num-samples",
                 str(expected.num_samples),
-                "--pilot",
                 "--seeds",
                 "6",
                 "--output-root",
@@ -1205,7 +1856,7 @@ def test_main_rejects_mismatched_completion_before_probing_gpus(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    expected = _expected(tmp_path)
+    expected = _expected(tmp_path, num_samples=1_000)
     output_root = tmp_path / "runs"
     _, summary_path = _write_matching_artifacts(output_root, 8, expected)
     summary = _read_summary(summary_path)
@@ -1249,7 +1900,6 @@ def test_main_rejects_mismatched_completion_before_probing_gpus(
                 expected.config_path.name,
                 "--num-samples",
                 str(expected.num_samples),
-                "--pilot",
                 "--seeds",
                 "8",
                 "--output-root",

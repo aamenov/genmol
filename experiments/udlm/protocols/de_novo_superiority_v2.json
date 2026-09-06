@@ -1,0 +1,171 @@
+{
+  "schema_version": 2,
+  "protocol_id": "genmol_udlm_de_novo_superiority_v2",
+  "status": "frozen_before_gpu_pilots",
+  "amends": {
+    "relative_path": "experiments/udlm/protocols/de_novo_superiority_v1.json",
+    "raw_sha256": "d734e2771e94b54f3bdb2e86e6da496d855a3eb7a7bd07abbbcdfbf406ab4a20",
+    "canonical_sha256": "3b36fc1df19d4fdce4e522b3f9963eb55a9a136575bab361362b114dae25f53d",
+    "reason": "Replace operator-only R-to-S-to-E ordering with launch-bound, receipt-revalidated predecessor evidence and bind the audited empirical-prior floor before any GPU pilot.",
+    "gpu_pilots_executed_before_amendment": false,
+    "scientific_decision_thresholds_changed": false
+  },
+  "primary_claim": "A locked UDLM checkpoint and sampling configuration beats the audited local GenMol MDLM checkpoint on the released-compatible de-novo metric gate.",
+  "baseline": {
+    "manifest_relative_path": "experiments/udlm/baselines/mdlm_50000.json",
+    "manifest_sha256": "6da46fc615dedbcca436da087a2c1e9145f5d110036e0c15bb431ded3c2e5539",
+    "rescore_attestation_relative_path": "experiments/udlm/baselines/mdlm_50000_rescore_attestation.json",
+    "rescore_attestation_sha256": "6326b63c38c7052d0b47282d611618f77637496da2785779af69097fc1441323",
+    "rescore_source_revision": "74482c2742ab5ad15def122c809a6b4e403e94cf",
+    "rescore_status": "completed_exact_match",
+    "checkpoint_sha256": "8d00aa47b02f64bf39ff6b0b2e786f213587366fc2c3d29712a00f3f84108dd6",
+    "metric_branch": "released_comparable",
+    "status": "audited_local_control_not_exact_paper_reproduction"
+  },
+  "final_operating_point": {
+    "candidate_diffusion_type": "udlm",
+    "generation_seeds": [
+      0,
+      1,
+      2
+    ],
+    "requested_samples_per_seed": 1000,
+    "seed_count": 3,
+    "total_requested_samples": 3000,
+    "nfe": 128,
+    "nfe_definition": "one full backbone forward evaluation per reverse step",
+    "inference_weights": "ema",
+    "metric_branch": "released_comparable",
+    "strict_diagnostic_branch_required": true
+  },
+  "selection_firewall": {
+    "pilot_seed_minimum_inclusive": 1000,
+    "final_seeds_forbidden_during_selection": true,
+    "candidate_ledger_required": true,
+    "candidate_ledger_must_disclose_all_pilot_attempts": true,
+    "candidate_lock_must_be_a_git_blob_at_benchmark_revision": true,
+    "candidate_must_be_selected_without_final_seed_results": true,
+    "selection_rule": "maximize_mean_released_quality_then_mean_released_diversity_then_lexicographically_smallest_attempt_id",
+    "checkpoint_selection_rule": "last_completed_optimizer_step",
+    "eligible_pilot_generation_seeds": [
+      1000,
+      1001
+    ],
+    "eligible_requested_samples_per_seed": 256,
+    "eligible_nfe": 128,
+    "eligible_metric_branch": "released_comparable",
+    "nonregistered_completed_pilots_are_disclosed_but_ineligible": true,
+    "final_attempts_per_seed": 1,
+    "final_retry_policy": "No selection, tuning, deletion, replacement, or retry based on a final-seed outcome; infrastructure failures remain disclosed and make the registered three-seed claim incomplete until separately adjudicated."
+  },
+  "point_estimate_gates": {
+    "validity": {
+      "comparison": "candidate_mean_greater_than_or_equal_to_baseline_mean",
+      "threshold": 1.0
+    },
+    "uniqueness": {
+      "comparison": "candidate_mean_greater_than_or_equal_to_baseline_mean",
+      "threshold": 0.9986666666666667
+    },
+    "quality": {
+      "comparison": "candidate_mean_strictly_greater_than_baseline_mean",
+      "threshold": 0.858
+    },
+    "diversity": {
+      "comparison": "candidate_mean_minus_baseline_mean_greater_than_or_equal_to_margin",
+      "margin": -0.005,
+      "threshold": 0.8180213192558725
+    }
+  },
+  "uncertainty_gates": {
+    "confidence_level_one_sided": 0.95,
+    "normal_quantile": 1.6448536269514722,
+    "validity": {
+      "method": "newcombe_wilson_method_10_independent_proportions",
+      "inputs": "pooled valid counts over pooled requested counts",
+      "candidate_minus_baseline_lower_bound_strictly_greater_than": -0.005
+    },
+    "uniqueness": {
+      "method": "welch_t_independent_seed_level_estimates",
+      "inputs": "three seed-level uniqueness fractions per method",
+      "candidate_minus_baseline_lower_bound_strictly_greater_than": -0.005
+    },
+    "quality": {
+      "method": "welch_t_independent_seed_level_estimates",
+      "inputs": "three seed-level quality fractions per method",
+      "candidate_minus_baseline_lower_bound_strictly_greater_than": 0.0
+    },
+    "diversity": {
+      "method": "welch_t_independent_seed_level_estimates",
+      "inputs": "three seed-level diversity scores per method",
+      "candidate_minus_baseline_lower_bound_strictly_greater_than": -0.005
+    },
+    "multiple_metric_decision": "intersection_union_all_four_point_gates_and_all_four_interval_gates_must_pass",
+    "forbidden_method": "row bootstrap that re-deduplicates resampled molecule identities"
+  },
+  "candidate_lock_requirements": {
+    "candidate_lock_schema_version": 2,
+    "candidate_ledger_schema_version": 2,
+    "pilot_evidence_schema_version": 2,
+    "pilot_failure_receipt_schema_version": 1,
+    "training_summary_and_successful_exit_receipt_hashes_required": true,
+    "runtime_config_resolved_config_and_training_argv_hashes_required": true,
+    "accepted_training_artifact_schema_versions": {
+      "launch_manifest": 2,
+      "runtime_config": 2,
+      "training_summary": 4,
+      "successful_exit_receipt": 5
+    },
+    "immutable_launch_manifest_relative_path_raw_hash_and_schema_required": true,
+    "exact_selected_gpu_uuids_and_final_idle_telemetry_bound_through_launch_runtime_summary_and_receipt_required": true,
+    "global_single_training_job_lease_acquired_before_gpu_probe_and_validated_before_receipt_publication_required": true,
+    "matched_r_s_e_registered_order_and_receipt_gated_advancement_machine_enforced": true,
+    "predecessor_receipt_chain_is_machine_enforced_by_each_per_run_launch_manifest": true,
+    "predecessor_artifacts_revalidated_unchanged_before_successful_exit_receipt": true,
+    "predecessor_receipt_must_predate_successor_lock_and_gpu_probe": true,
+    "terminal_e_successful_exit_receipt_hash_and_full_chain_required": true,
+    "terminal_e_receipt_must_predate_candidate_lock": true,
+    "selected_candidate_receipt_must_predate_candidate_lock": true,
+    "selected_candidate_receipt_must_be_exact_member_of_terminal_r_s_e_chain": true,
+    "terminal_e_and_selected_candidate_must_share_matched_panel": true,
+    "audited_empirical_prior_floor": {
+      "empirical_uniform_mix": 0.0002,
+      "consumed_only_by_prior_variant": "empirical_frequency",
+      "audit_relative_path": "experiments/udlm/prior_geometry/floor_selection_train_rows_10001_30000.json",
+      "audit_raw_sha256": "02908dafaf589ca9a49e560aa1eab470a18d6bfe616b781164784c489f54a9f1",
+      "audit_source_revision": "6424b323084358ea050ba22d7e13ef8d45962496",
+      "selection_scope": "retrospective_training_only_engineering_selection"
+    },
+    "checkpoint_hash_size_step_and_ema_required": true,
+    "initialization_mode_and_checkpoint_hash_required": true,
+    "training_seed_updates_data_exposure_and_parameter_counts_required": true,
+    "sampling_config_and_config_hash_required": true,
+    "benchmark_runner_and_sampler_source_hashes_with_runtime_ema_application_required": true,
+    "full_implementation_and_metric_input_map_hashes_required": true,
+    "gate_report_rescore_launcher_writer_source_hashes_plus_scipy_version_required": true,
+    "exact_final_output_directory_per_seed_required": true,
+    "candidate_ledger_hash_and_selection_rule_required": true,
+    "per_seed_success_failure_outcomes_and_partial_failure_retention_required": true,
+    "completed_pilot_summary_raw_receipt_hashes_required": true,
+    "completed_pilot_training_receipt_full_validation_required": true,
+    "pilot_quality_diversity_independently_recomputed_from_raw_model_text": true,
+    "producer_authored_failure_receipt_command_source_log_and_partial_hashes_required": true,
+    "pilot_failure_receipt_mode_and_requested_samples_required": true,
+    "all_pilot_outcomes_must_predate_lock_and_source_revisions_be_ancestors": true,
+    "selected_pilot_checkpoint_config_sampling_ema_source_metric_and_receipt_identity_must_equal_lock": true,
+    "final_candidate_qed_sa_diversity_independently_recomputed_from_raw_model_text": true,
+    "independent_rescore_source_and_dependency_hashes_required": true,
+    "candidate_ledger_winner_checkpoint_must_equal_locked_training_checkpoint": true,
+    "benchmark_revision_must_contain_exact_lock_and_ledger_blobs": true
+  },
+  "decision": {
+    "pass_condition": "Every point-estimate gate and every one-sided uncertainty gate passes for the one pre-locked candidate.",
+    "failure_condition": "Any failed or unverifiable gate, provenance binding, final operating-point requirement, or selection-firewall requirement prevents the superiority claim."
+  },
+  "claim_boundaries": {
+    "warm_start": "Passing supports only a locked operational MDLM-to-UDLM continuation-system claim on these molecular metrics. It does not isolate diffusion-method causality and is not an inference-speed claim.",
+    "scratch": "Passing supports a locked single-training-trajectory checkpoint comparison. One training seed does not establish population-level diffusion-method superiority.",
+    "method_only_requirement": "A causal method claim additionally requires a from-scratch matched training panel or an equal-extra-update MDLM continuation control under a separately frozen protocol.",
+    "uncertainty_limitation": "Welch intervals use only three generation seeds per method and condition on each locked checkpoint; they do not measure training-seed uncertainty."
+  }
+}

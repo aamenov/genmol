@@ -108,10 +108,10 @@ EXPECTED_ARM_ORDER = {
 }
 EXPECTED_UPDATES = {"scheduler": 100, "conditioning": 500}
 EXPECTED_ARTIFACT_SCHEMA_VERSIONS = {
-    "launch_manifest": 1,
+    "launch_manifest": 2,
     "runtime_config": 2,
     "training_summary": 4,
-    "exit_receipt": 4,
+    "exit_receipt": 5,
     "denoising_report": DENOISING_REPORT_SCHEMA_VERSION,
 }
 INCOMPLETE_EXIT_STATUS = 97
@@ -2052,6 +2052,20 @@ def _validate_exit_receipt(
         or receipt.get("process_exit_status") != 0
     ):
         raise ScreenValidationError("exit receipt does not certify completion")
+    if receipt.get("predecessor_receipt_binding") is not None:
+        raise ScreenValidationError(
+            "optimization-screen receipt must not claim an R/S/E predecessor"
+        )
+    completion = _mapping(
+        receipt.get("completion_requirements"),
+        "receipt completion requirements",
+    )
+    if (
+        completion.get("predecessor_receipt_binding_unchanged_and_valid") is not True
+        or not completion
+        or any(value is not True for value in completion.values())
+    ):
+        raise ScreenValidationError("receipt completion requirements are not all true")
     contract = _mapping(receipt.get("expected_contract"), "receipt expected contract")
     expected_fields = {
         "source_revision": source_revision,

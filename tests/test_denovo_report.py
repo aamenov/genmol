@@ -87,12 +87,18 @@ class DenovoReportTests(unittest.TestCase):
 
     @staticmethod
     def _branch_metrics(
-        *, valid: int, unique: int, quality: int, diversity: float, definition: str
+        *,
+        valid: int,
+        unique: int,
+        quality: int,
+        diversity: float,
+        definition: str,
+        requested: int = 1_000,
     ) -> dict:
         return {
-            "validity": valid / 1_000,
+            "validity": valid / requested,
             "valid_count": valid,
-            "validity_denominator": 1_000,
+            "validity_denominator": requested,
             "uniqueness": unique / valid if valid else None,
             "unique_count": unique,
             "uniqueness_denominator": valid,
@@ -101,9 +107,9 @@ class DenovoReportTests(unittest.TestCase):
             "diversity_undefined_reason": None
             if unique
             else "no_unique_valid_molecules",
-            "quality": quality / 1_000,
+            "quality": quality / requested,
             "quality_count": quality,
-            "quality_denominator": 1_000,
+            "quality_denominator": requested,
             "quality_thresholds": {
                 "qed_min_inclusive": 0.6,
                 "sa_max_inclusive": 4.0,
@@ -194,9 +200,10 @@ class DenovoReportTests(unittest.TestCase):
         released_unique: int,
         released_quality: int,
         component_count: int,
+        num_samples: int = 1_000,
     ) -> list[dict]:
         records = []
-        for index in range(1_000):
+        for index in range(num_samples):
             record = {field: None for field in report.RAW_SAMPLE_FIELDS}
             record.update(
                 {
@@ -269,6 +276,7 @@ class DenovoReportTests(unittest.TestCase):
         released_diversity: float,
         component_count: int = 4,
         effective_extra: dict | None = None,
+        num_samples: int = 1_000,
     ) -> Path:
         run_dir = root / f"seed_{seed}"
         run_dir.mkdir(parents=True)
@@ -281,6 +289,7 @@ class DenovoReportTests(unittest.TestCase):
             released_unique=released_unique,
             released_quality=released_quality,
             component_count=component_count,
+            num_samples=num_samples,
         )
         raw_path = run_dir / "raw_samples.csv"
         with raw_path.open("w", encoding="utf-8", newline="") as handle:
@@ -295,7 +304,7 @@ class DenovoReportTests(unittest.TestCase):
             "model_path": str(
                 report.REPOSITORY_ROOT / "outputs/paper_v1/checkpoints/50000.ckpt"
             ),
-            "num_samples": 1_000,
+            "num_samples": num_samples,
             "device": "cuda:0",
             **(effective_extra or {}),
         }
@@ -305,6 +314,7 @@ class DenovoReportTests(unittest.TestCase):
             quality=strict_quality,
             diversity=strict_diversity,
             definition="strict unit-test path",
+            requested=num_samples,
         )
         released_metrics = self._branch_metrics(
             valid=released_valid,
@@ -312,11 +322,12 @@ class DenovoReportTests(unittest.TestCase):
             quality=released_quality,
             diversity=released_diversity,
             definition="released-comparable unit-test path",
+            requested=num_samples,
         )
         failure_counts = {
             "raw_safe_conversion_failed": 0,
-            "strict_decode_failed": 1_000 - strict_valid,
-            "released_decode_failed": 1_000 - released_valid,
+            "strict_decode_failed": num_samples - strict_valid,
+            "released_decode_failed": num_samples - released_valid,
             "released_recovered_strict_failure": released_valid - strict_valid,
             "strict_valid_but_released_failed": 0,
             "released_largest_component_applied": component_count,
@@ -473,7 +484,7 @@ class DenovoReportTests(unittest.TestCase):
             "--expected-config-sha256",
             "3" * 64,
             "--num-samples",
-            "1000",
+            str(num_samples),
             "--seed",
             str(seed),
             "--device",
@@ -496,7 +507,7 @@ class DenovoReportTests(unittest.TestCase):
                 "name": "NVIDIA RTX A6000",
                 "memory_used_mib": 8 + seed,
                 "memory_total_mib": 49_140,
-                "utilization_percent": seed,
+                "utilization_percent": seed % 3,
                 "compute_mode": "Default",
                 "compute_processes": [],
             },
@@ -507,7 +518,7 @@ class DenovoReportTests(unittest.TestCase):
                     "name": "NVIDIA RTX A6000",
                     "memory_used_mib": 8 + seed,
                     "memory_total_mib": 49_140,
-                    "utilization_percent": seed,
+                    "utilization_percent": seed % 3,
                     "compute_mode": "Default",
                     "compute_processes": [],
                 }
@@ -528,12 +539,12 @@ class DenovoReportTests(unittest.TestCase):
             "schema_version": report.RUN_SCHEMA_VERSION,
             "status": "completed",
             "seed": seed,
-            "num_samples": 1_000,
+            "num_samples": num_samples,
             "run": {
                 "seed": seed,
-                "requested_sample_count": 1_000,
-                "evaluation_tier": "final",
-                "final_protocol_eligible": True,
+                "requested_sample_count": num_samples,
+                "evaluation_tier": "final" if num_samples == 1_000 else "pilot",
+                "final_protocol_eligible": num_samples == 1_000,
                 "started_at_utc": "2026-09-05T00:00:00+00:00",
                 "completed_at_utc": "2026-09-05T00:01:00+00:00",
                 "one_seed_per_invocation": True,
@@ -684,7 +695,7 @@ class DenovoReportTests(unittest.TestCase):
                 "raw_samples_csv": {
                     "path": str(raw_path),
                     "sha256": report._sha256_file(raw_path),
-                    "row_count": 1_000,
+                    "row_count": num_samples,
                     "fields": list(report.RAW_SAMPLE_FIELDS),
                 },
                 "summary_json": {"path": str(run_dir / "summary.json")},
@@ -709,6 +720,98 @@ class DenovoReportTests(unittest.TestCase):
                 released_quality=(840, 850, 830)[seed],
                 released_diversity=(0.817, 0.819, 0.818)[seed],
             )
+
+    def _pilot_run(self, root: Path, *, seed: int = 17) -> Path:
+        return self._completed_run(
+            root,
+            seed,
+            num_samples=256,
+            strict_valid=240,
+            strict_unique=230,
+            strict_quality=190,
+            strict_diversity=0.79,
+            released_valid=250,
+            released_unique=245,
+            released_quality=210,
+            released_diversity=0.82,
+        )
+
+    def test_validate_run_evidence_accepts_registered_256_sample_pilot(self):
+        with self._workspace() as directory:
+            run_dir = self._pilot_run(Path(directory))
+
+            evidence = report.validate_run_evidence(
+                run_dir,
+                17,
+                expected_samples=256,
+                expected_tier="pilot",
+                final_protocol_eligible=False,
+            )
+
+            self.assertEqual(evidence["seed"], 17)
+            self.assertEqual(
+                evidence["metrics"]["released_comparable"]["quality_count"],
+                210,
+            )
+            self.assertEqual(
+                evidence["metrics"]["released_comparable"]["quality_denominator"],
+                256,
+            )
+            self.assertEqual(evidence["failure_counts"]["strict_decode_failed"], 16)
+            self.assertEqual(evidence["summary"]["run"]["evaluation_tier"], "pilot")
+            self.assertFalse(evidence["summary"]["run"]["final_protocol_eligible"])
+
+    def test_validate_run_evidence_rejects_pilot_summary_metric_tamper(self):
+        with self._workspace() as directory:
+            run_dir = self._pilot_run(Path(directory))
+            summary_path = run_dir / report.SUMMARY_FILENAME
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            summary["metrics"]["released_comparable"]["quality_count"] += 1
+            summary_path.write_text(json.dumps(summary) + "\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                report.ReportValidationError,
+                r"released_comparable\.quality_count=.*disagrees with raw rows",
+            ):
+                report.validate_run_evidence(
+                    run_dir,
+                    17,
+                    expected_samples=256,
+                    expected_tier="pilot",
+                    final_protocol_eligible=False,
+                )
+
+    def test_validate_run_evidence_rejects_pilot_raw_metric_tamper(self):
+        with self._workspace() as directory:
+            run_dir = self._pilot_run(Path(directory))
+            raw_path = run_dir / report.RAW_SAMPLES_FILENAME
+            with raw_path.open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            rows[0]["released_qed"] = "0.5"
+            rows[0]["released_quality_pass"] = "False"
+            rows[0]["released_quality_counted"] = "False"
+            with raw_path.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=report.RAW_SAMPLE_FIELDS)
+                writer.writeheader()
+                writer.writerows(rows)
+            summary_path = run_dir / report.SUMMARY_FILENAME
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            summary["artifacts"]["raw_samples_csv"]["sha256"] = report._sha256_file(
+                raw_path
+            )
+            summary_path.write_text(json.dumps(summary) + "\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                report.ReportValidationError,
+                r"released_comparable\.quality_count=.*disagrees with raw rows",
+            ):
+                report.validate_run_evidence(
+                    run_dir,
+                    17,
+                    expected_samples=256,
+                    expected_tier="pilot",
+                    final_protocol_eligible=False,
+                )
 
     def _three_udlm_runs(
         self,
@@ -862,8 +965,7 @@ class DenovoReportTests(unittest.TestCase):
             )
             self.assertTrue(
                 all(
-                    run["inference_weights"]
-                    == report.EXPECTED_MDLM_INFERENCE_WEIGHTS
+                    run["inference_weights"] == report.EXPECTED_MDLM_INFERENCE_WEIGHTS
                     for run in payload["seed_runs"]
                 )
             )

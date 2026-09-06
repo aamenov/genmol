@@ -1129,25 +1129,36 @@ $|U|=W$, the UUID order in the final telemetry is exactly $U$, and only one
 reviewed pilot may hold the lease.
 
 The raw bytes of `launch_manifest.json` are frozen by repository-relative path,
-SHA-256, and schema 1. Training receives that digest out of band so the manifest
+SHA-256, and schema 2. Training receives that digest out of band so the manifest
 need not hash itself. Runtime-config schema 2, training-summary schema 4, and
-successful-exit-receipt schema 4 must each repeat the same stable manifest
+successful-exit-receipt schema 5 must each repeat the same stable manifest
 snapshot and exact $U$. The receipt also validates the still-held lease before
 publication; after tmux handoff, only its writer may then unlink that exact
 unchanged lease. Before handoff, the launcher may release only its own exact
 lease if launch fails. Unexplained or stale leases fail closed for manual
 review. A candidate lock that lacks any link in
 `launch -> runtime -> summary -> receipt -> checkpoint` is inadmissible.
+Candidate-lock schema 2 additionally binds one terminal E successful receipt.
+The final gate reconstructs that receipt's transitive R→S→E chain, requires
+both the E receipt and selected training receipt to predate the lock, and
+requires its matched-panel digest to equal the selected checkpoint's panel
+digest. The selected receipt must be the exact R/S/E member of that chain, not
+a separate run sharing its panel digest. The pilot ledger's winning checkpoint
+must also equal the lock's training checkpoint. Thus R or S may still win pilot
+selection, but the superiority claim cannot proceed from an incomplete or
+cherry-picked panel.
 
 **Progressive experiment gate and motivation.** First run the warm-start R/S/E
 panel for only 10 optimizer updates: R is the released schedule with a uniform
 prior, S is the schedule-consistent uniform control, and E is the
 schedule-consistent empirical-frequency prior. Their canonical matched-panel
-specification registers sequential R, S, then E execution, with the operator
-advancing only after a validated successful receipt. The global lease
-machine-enforces one-job concurrency, but each per-run manifest lacks a
-predecessor-receipt chain; order and receipt-gated advancement therefore still
-need post-run audit. The health panel checks memory, throughput, checkpoint
+specification registers sequential R, S, then E execution. R requires an
+explicit genesis declaration. S and E cannot reach a GPU probe without a
+validated successful receipt from the immediately preceding arm; the exact
+receipt, manifest, and summary snapshots are bound into the successor manifest
+and revalidated before its successful exit receipt. The predecessor receipt
+must predate the successor's lease acquisition and first GPU inventory query.
+The global lease separately machine-enforces one-job concurrency. The health panel checks memory, throughput, checkpoint
 save/load, finiteness, and evidence plumbing. It cannot rank the variants: the
 current constant schedule has 2,500 linear-warmup
 updates, so at peak learning rate $3\times10^{-4}$ its value by update 10 is
@@ -1280,8 +1291,8 @@ The exact production observation topology is frozen in
 `b2a666a23351eb0882a179f7ae5d09fafd2188fee924313cdf60ee94888e7ac5` and
 canonical SHA-256
 `ff45961276df75f445221fd1aa4629262d21fdb852bd9b226ad56fe2559315d5`.
-It binds all 24 FiLM and four timestep-MLP tensor names and shapes. Summary and
-receipt schema 4 require an explicit null for non-A1 arms or a contract-bound
+It binds all 24 FiLM and four timestep-MLP tensor names and shapes. Summary
+schema 4 and receipt schema 5 require an explicit null for non-A1 arms or a contract-bound
 A1 gradient certificate.
 
 **Exact initialization-state attestation.** Immediately after each verified
@@ -1294,7 +1305,7 @@ SHA-256 frames each tensor name, dtype, shape, and exact raw bytes. The ten-fiel
 alongside the checkpoint, resolved config, seed, phase, and conditioning
 variant. L0/L1 must match in both $H(S)$ and $H(C)$; A0/A1 must match in
 $H(C)$ even though their conditioning topology makes $H(S)$ differ. Summary
-and receipt schema 4 carry the exact same object, preventing evidence assembly
+and receipt schema 5 carry the exact same object, preventing evidence assembly
 from inventing initial-state hashes.
 
 For a two-tensor toy state containing one shared BERT weight and one timestep
@@ -1349,11 +1360,33 @@ attempt ID. For example, attempts A and B with scores $(0.86,0.82)$ and
 $(0.86,0.825)$ select B; even a seed-1100 diagnostic with quality 1.0 is
 disclosed but cannot enter this ordering.
 
+Schema-2 pilot envelopes contain references, not trusted scores. For every
+completed seed, the collector and final gate validate the schema-7 summary,
+successful schema-5 training receipt, and raw CSV, then use a fresh CPU process
+to re-decode `raw_model_text` and recompute QED, SA, and both diversity
+branches. For a failed seed, the envelope instead binds the launcher's
+schema-1 no-clobber failure receipt, exact command and source revision, log,
+checkpoint/config identity, pilot mode, requested sample count, and any partial
+artifacts. The same CPU-only writer publishes completed envelopes with
+`--outcome completed` and failed envelopes with `--outcome failed`; envelopes
+are never hand-authored. A failed sibling makes the attempt ineligible without
+deleting a seed that completed. Every outcome must predate the candidate lock
+and its producer revision must be an ancestor of the final benchmark revision.
+Because `output/` is ignored, all referenced summaries, raw CSVs, receipts,
+logs, and partials must be force-added and verified as Git-tracked before the
+ledger is committed; the revision-time gate rejects any missing Git blob.
+This authenticates every disclosed outcome but cannot independently establish
+ledger completeness: without a host-wide append-only launch registry, the
+absence of an omitted or deleted pilot remains a cooperative operator/launcher
+assumption that the final decision records explicitly.
+
 Before final generation, one checkpoint and sampling configuration must be
 frozen in a committed, pushed candidate lock using only training, the fixed
 validation panel, and registered pilot seeds. The three final seeds are then
 evaluated once, with 1,000 requests each, under the same repaired definitions
 as the audited MDLM control.
+The final gate independently repeats raw-text rescoring for all three candidate
+seeds before it can publish a decision.
 
 **Baseline recomputation evidence.** The immutable rescore attestation does not
 regenerate molecules. Three fresh CPU interpreters re-decode and re-score the
@@ -1404,7 +1437,7 @@ from-scratch UDLM comparison or an equal-extra-update MDLM continuation control.
 **Difference from released code.** The full-vocabulary artifact is the faithful
 UDLM prior control. Excluding UNK/CLS/SEP/PAD/MASK is a GenMol-specific ablation;
 the committed semantic pilot ledger, immutable MDLM rescore, launch-evidence
-chain, global lease, sequential R/S/E operator protocol, and intersection-union
+chain, global lease, machine-enforced R/S/E predecessor protocol, and intersection-union
 publication gate are local reproducibility controls, not features of released
 GenMol or UDLM. The implemented per-layer FiLM/AdaLN-style plumbing is a
 prospective BERT experiment: official UDLM uses richer per-block modulation in
@@ -1427,10 +1460,10 @@ reasoning: a launch-time idle snapshot is useful only if the process and
 completed artifacts are cryptographically joined to exactly that launch. Why
 is the 10-update R/S/E panel health-only? Expected reasoning: at roughly
 $1.2\times10^{-6}$ by update 10 under the 2,500-step warmup, meaningful learning
-has barely started. Why does the global lease not prove R-to-S-to-E order?
-Expected reasoning: it prevents concurrent jobs, but no per-run artifact binds
-its predecessor receipt, so order still needs operator discipline and post-run
-audit. Why is L1 an optimizer-schedule bundle rather than a clean cosine
+has barely started. Why are both a global lease and predecessor receipts needed?
+Expected reasoning: the lease prevents concurrent reviewed jobs, while each
+successor's immutable predecessor binding proves R-to-S-to-E order and successful
+advancement. Why is L1 an optimizer-schedule bundle rather than a clean cosine
 ablation? Expected reasoning: shortening warmup changes its first-100-update
 cumulative learning-rate exposure by about 37.57 times, so early exposure and
 curve shape cannot be separated. Why must both 500-update arms freshly reload
@@ -1462,33 +1495,65 @@ stage20_superiority_protocol_path = (
     / "experiments"
     / "udlm"
     / "protocols"
-    / "de_novo_superiority_v1.json"
+    / "de_novo_superiority_v2.json"
 )
 stage20_superiority_protocol_bytes = stage20_superiority_protocol_path.read_bytes()
 assert stage20_hashlib.sha256(stage20_superiority_protocol_bytes).hexdigest() == (
-    "d734e2771e94b54f3bdb2e86e6da496d855a3eb7a7bd07abbbcdfbf406ab4a20"
+    "f845429dae7ca889c09aad3af7946d20a5a05c189d2a19ec5ad8da7fff075a66"
 )
 stage20_superiority_protocol = stage20_json.loads(stage20_superiority_protocol_bytes)
 assert stage20_superiority_protocol["status"] == "frozen_before_gpu_pilots"
 stage20_candidate_lock_requirements = stage20_superiority_protocol[
     "candidate_lock_requirements"
 ]
+assert stage20_candidate_lock_requirements["candidate_lock_schema_version"] == 2
+assert stage20_candidate_lock_requirements["candidate_ledger_schema_version"] == 2
+assert stage20_candidate_lock_requirements["pilot_evidence_schema_version"] == 2
+assert stage20_candidate_lock_requirements[
+    "pilot_failure_receipt_schema_version"
+] == 1
 assert stage20_candidate_lock_requirements[
     "accepted_training_artifact_schema_versions"
 ] == {{
-    "launch_manifest": 1,
+    "launch_manifest": 2,
     "runtime_config": 2,
     "training_summary": 4,
-    "successful_exit_receipt": 4,
+    "successful_exit_receipt": 5,
 }}
 for stage20_required_launch_binding in (
     "immutable_launch_manifest_relative_path_raw_hash_and_schema_required",
     "exact_selected_gpu_uuids_and_final_idle_telemetry_bound_through_launch_runtime_summary_and_receipt_required",
     "global_single_training_job_lease_acquired_before_gpu_probe_and_validated_before_receipt_publication_required",
-    "matched_r_s_e_registered_order_and_receipt_gated_advancement_operator_policy_required",
-    "predecessor_receipt_chain_is_not_machine_enforced_by_each_per_run_launch_manifest",
+    "matched_r_s_e_registered_order_and_receipt_gated_advancement_machine_enforced",
+    "predecessor_receipt_chain_is_machine_enforced_by_each_per_run_launch_manifest",
+    "predecessor_artifacts_revalidated_unchanged_before_successful_exit_receipt",
+    "predecessor_receipt_must_predate_successor_lock_and_gpu_probe",
+    "terminal_e_successful_exit_receipt_hash_and_full_chain_required",
+    "terminal_e_receipt_must_predate_candidate_lock",
+    "selected_candidate_receipt_must_predate_candidate_lock",
+    "selected_candidate_receipt_must_be_exact_member_of_terminal_r_s_e_chain",
+    "terminal_e_and_selected_candidate_must_share_matched_panel",
+    "candidate_ledger_winner_checkpoint_must_equal_locked_training_checkpoint",
+    "per_seed_success_failure_outcomes_and_partial_failure_retention_required",
+    "completed_pilot_summary_raw_receipt_hashes_required",
+    "completed_pilot_training_receipt_full_validation_required",
+    "pilot_quality_diversity_independently_recomputed_from_raw_model_text",
+    "producer_authored_failure_receipt_command_source_log_and_partial_hashes_required",
+    "pilot_failure_receipt_mode_and_requested_samples_required",
+    "all_pilot_outcomes_must_predate_lock_and_source_revisions_be_ancestors",
+    "selected_pilot_checkpoint_config_sampling_ema_source_metric_and_receipt_identity_must_equal_lock",
+    "final_candidate_qed_sa_diversity_independently_recomputed_from_raw_model_text",
+    "independent_rescore_source_and_dependency_hashes_required",
+    "gate_report_rescore_launcher_writer_source_hashes_plus_scipy_version_required",
 ):
     assert stage20_candidate_lock_requirements[stage20_required_launch_binding] is True
+stage20_protocol_prior_floor = stage20_candidate_lock_requirements[
+    "audited_empirical_prior_floor"
+]
+assert stage20_protocol_prior_floor["empirical_uniform_mix"] == 0.0002
+assert stage20_protocol_prior_floor["selection_scope"] == (
+    "retrospective_training_only_engineering_selection"
+)
 stage20_selection_firewall = stage20_superiority_protocol["selection_firewall"]
 assert stage20_selection_firewall["eligible_pilot_generation_seeds"] == [1000, 1001]
 assert stage20_selection_firewall["eligible_requested_samples_per_seed"] == 256
@@ -1536,7 +1601,7 @@ stage20_future_pilot_plan = {{
         "optimizer_updates_each": 10,
         "purpose": "health_and_provenance_only",
         "single_job_concurrency_machine_enforced": True,
-        "order_and_predecessor_receipt_gate_require_operator_and_post_run_audit": True,
+        "order_and_predecessor_receipt_gate_machine_enforced": True,
     }},
     "scheduler_screen": {{
         "variant": "E_only",
@@ -1974,7 +2039,11 @@ stage20_success_criteria = {{
             "immutable launch_manifest.json repository-relative path, raw SHA-256, and schema",
             "exact ordered selected UUIDs and final idle telemetry cross-bound through runtime, summary, and receipt",
             "global single-job lease acquired before GPU probing and validated before receipt publication",
-            "registered operator policy for R/S/E order and receipt-gated advancement; no predecessor chain is bound",
+            "machine-enforced R/S/E genesis/predecessor chain with exact predecessor artifacts",
+            "schema-2 candidate lock binds a terminal E receipt proving the full matched panel before lock",
+            "selected receipt is an exact member of that chain and the ledger winner checkpoint equals the training lock",
+            "schema-2 per-seed success/failure envelopes retain partial failures and bind producer receipts",
+            "completed pilot and final candidate metrics are independently recomputed from raw_model_text",
         ],
         "required_matching": [
             "training data and tokenizer",
@@ -1992,8 +2061,9 @@ stage20_success_criteria = {{
             "base and adapter parameter counts",
             "checkpoint-selection rule",
             "sampling temperature, NFE, seeds, source and checkpoint hashes",
+            "summary/raw/receipt hashes plus launcher/rescore/evidence-writer source hashes",
             "launch-manifest path/hash/schema and exact selected UUID/final-idle telemetry chain",
-            "global lease evidence, declared R/S/E operator-order policy, and wall time",
+            "global lease evidence, machine-enforced R/S/E predecessor chain, and wall time",
         ],
     }},
     "local_mdlm_baseline_exact_fractions": stage20_exact_mdlm_means,
@@ -2089,9 +2159,11 @@ stage20_decision_gate_report_rows = [
     (
         "Final-candidate lock",
         "Commit and push the candidate manifest before seeds 0,1,2; bind launch "
-        "manifest schema 1, runtime schema 2, summary/receipt schema 4, exact UUIDs, "
-        "final-idle telemetry, global-lease evidence, and checkpoint; evaluate each "
-        "final seed once; do not select or tune from final-seed results.",
+        "candidate-lock schema 2, terminal-E full-chain receipt, launch manifest schema 2, "
+        "runtime schema 2, summary schema 4, receipt schema 5, exact UUIDs, "
+        "final-idle telemetry, global-lease evidence, checkpoint, schema-2 pilot "
+        "envelopes, and schema-1 failure receipts; evaluate and independently "
+        "re-score each final seed once; do not select or tune from final-seed results.",
     ),
     (
         "Registered pilot selector",
@@ -2101,7 +2173,8 @@ stage20_decision_gate_report_rows = [
         "conditioning arms at 500 updates, seed 17, with post-init reseeding; "
         "selected matched R/S/E at 1000 updates. Seed 1100 x 32 is ineligible. "
         "Selection uses seeds 1000,1001 x 256 requests at 128 NFE; released-"
-        "compatible quality then diversity then lexical attempt ID.",
+        "compatible quality then diversity then lexical attempt ID. Scores are "
+        "recomputed from raw model text; failed siblings remain disclosed.",
     ),
     (
         "Final evaluation protocol",
@@ -2178,9 +2251,9 @@ stage20_summary = {{
     "training_artifact_schemas": stage20_candidate_lock_requirements[
         "accepted_training_artifact_schema_versions"
     ],
-    "r_s_e_order_evidence_limitation": (
-        "single-job concurrency is machine-enforced; predecessor receipt chaining "
-        "still requires operator discipline and post-run audit"
+    "r_s_e_order_evidence": (
+        "single-job concurrency and exact predecessor-receipt chaining are "
+        "independently machine-enforced"
     ),
     "registered_selection_operating_point": {{
         "seeds": [1000, 1001],
@@ -3447,15 +3520,20 @@ def _update_completion_gate(notebook: dict) -> None:
   inspecting those blocks, so it is retrospective training-only engineering,
   not confirmatory or molecular-quality evidence; historical/manual artifacts
   remain at 0.01.
-- Candidate training must bind launch-manifest schema 1, runtime schema 2, and
-  summary/receipt schema 4, including the exact selected UUIDs, final-idle
-  telemetry, and repository-global single-job lease. The lease machine-enforces
-  one-job concurrency; R/S/E order remains an operator/post-run audit until a
-  predecessor-receipt chain is implemented.
+- Candidate training must bind launch-manifest schema 2, runtime schema 2,
+  summary schema 4, and receipt schema 5, including the exact selected UUIDs,
+  final-idle telemetry, repository-global single-job lease, and exact R/S/E
+  predecessor artifacts. The lease machine-enforces one-job concurrency; the
+  genesis/predecessor chain independently machine-enforces registered order.
 - The prospective small-first ladder is a 10-update R/S/E health panel, an
   E-only 100-update scheduler screen, an E-only 500-update conditioning screen,
   then selected matched R/S/E runs at 1,000 updates. Seed 1100 x 32 requests is
   ineligible; only seeds 1000/1001 x 256 requests at 128 NFE may select.
+- Completed selection seeds publish schema-2 reference-only envelopes after
+  structural validation and fresh-process raw-text rescoring. Failed seeds use
+  launcher-authored schema-1 receipts; a partial failure retains the completed
+  sibling while making the attempt ineligible. All outcomes must predate the
+  lock and descend into the final benchmark revision.
 - CPU plumbing exists for the two prospective screens, but their exact arm
   registry is not frozen, the reviewed launcher does not authorize them, and
   no GPU screen has run. L1 is an optimizer-schedule bundle with about 37.57x
@@ -3464,8 +3542,9 @@ def _update_completion_gate(notebook: dict) -> None:
   the same MDLM EMA and reseed after initialization; A1 is the outer-SiLU,
   zero-FiLM warm-start hypothesis with staged conditioner gradients.
 - The final success gate is three matched 1,000-request seeds with repaired and
-  strict metrics, checkpoint/seeds/device/runtime provenance, and thresholds
-  recorded in `stage20_success_criteria`.
+  strict metrics, checkpoint/seeds/device/runtime provenance, independent
+  raw-text rescoring of all three CSVs, and thresholds recorded in
+  `stage20_success_criteria`.
 - Final checkpoint: why is clean-logit interpolation not valid UDLM
   classifier-free guidance? Expected reasoning: clean probabilities are
   transformed nonlinearly into the reverse posterior, so guidance must combine

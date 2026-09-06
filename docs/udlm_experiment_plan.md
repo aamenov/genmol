@@ -14,10 +14,11 @@ For a single operating point, success means:
 - quality is above the local MDLM mean of 85.80%; and
 - diversity is no more than 0.005 below the local MDLM mean of 0.8230.
 
-Final evidence requires three independent 1,000-sample seeds and uncertainty;
-a 32- or 100-sample pilot is only a gate. Generation speed is reported but is
-hardware-dependent. A second, independent target is higher PMO top-10 AUC at
-the same oracle-call budget.
+Final evidence requires three independent 1,000-sample seeds and uncertainty.
+Runs of at most 100 samples are engineering diagnostics; registered selection
+instead requires 256 samples for each of seeds 1000 and 1001. Generation speed
+is reported but is hardware-dependent. A second, independent target is higher
+PMO top-10 AUC at the same oracle-call budget.
 
 The registered final decision uses one-sided 95% intervals: quality's lower
 bound must exceed the MDLM control, diversity's lower delta bound must exceed
@@ -29,8 +30,14 @@ over the three seed-level estimates per method. A molecule-row bootstrap is
 forbidden: re-deduplicating resampled rows manufactures duplicates and does not
 represent the uncertainty of these nonlinear per-run set metrics.
 
-The frozen machine-readable protocol is
-`experiments/udlm/protocols/de_novo_superiority_v1.json`. Its decision is an
+The current frozen machine-readable protocol is
+`experiments/udlm/protocols/de_novo_superiority_v2.json` (raw SHA-256
+`f845429dae7ca889c09aad3af7946d20a5a05c189d2a19ec5ad8da7fff075a66`,
+canonical SHA-256
+`b3b890ba19368e0caefda7a6ca9b082c9d7c2911ddd92eba1d83d1cf91408396`).
+It preserves v1 as a historical pre-pilot record and leaves every scientific decision threshold
+unchanged; v2 strengthens the launch/receipt chain and binds the audited
+training-only empirical-prior floor. Its decision is an
 intersection-union gate: all four point requirements and all four interval
 requirements must pass for one candidate that was locked before final seeds
 0, 1, and 2. The lock binds the completed training summary and exit receipt,
@@ -41,7 +48,8 @@ inventory, initial selection, and final just-before-launch telemetry. The final
 UUID probes must still satisfy the registered idle-device policy. Runtime
 config, training summary, and successful exit receipt must all bind the same
 manifest snapshot and exact UUID list. The lock also binds source/config/
-sampler/runner hashes, all disclosed pilot evidence, exact 128-NFE sampling
+sampler/runner/launcher/rescore/evidence-writer hashes, all disclosed pilot evidence, the winning pilot's exact
+checkpoint digest (which must equal the locked training checkpoint), exact 128-NFE sampling
 configuration, and one predeclared output directory per final seed.
 
 A repository-global single-training-job lease is acquired before any GPU probe.
@@ -53,10 +61,21 @@ fail closed for manual review. The matched R/S/E specification registers
 sequential order
 `release_uniform` (R), `schedule_uniform` (S), then `empirical_frequency` (E),
 at most one training job at a time, and a validated successful receipt before
-advancing. The global lease machine-enforces the one-job ceiling. Until a
-predecessor-chain artifact is implemented, however, R-to-S-to-E ordering and
-receipt-gated advancement remain an operator protocol that needs post-run
-audit; an individual run manifest does not prove its predecessor completed.
+advancing. R requires explicit genesis; S requires R's successful receipt; E
+requires S's. Each successor binds exact stable snapshots of its predecessor's
+receipt, manifest, and summary, validates the transitive chain before any GPU
+probe, and revalidates the snapshots before manifest and successful-receipt
+publication. Every predecessor receipt must strictly predate its successor's
+lease acquisition and GPU inventory probe. The global lease separately
+machine-enforces the one-job ceiling.
+The schema-2 candidate lock also binds the terminal E successful receipt by
+path, raw SHA-256, and schema. The final gate reconstructs that terminal
+receipt's complete R→S→E chain, requires both the terminal receipt and selected
+training receipt to predate the candidate lock, and requires the terminal
+matched-panel digest to equal the selected checkpoint's panel digest. This
+exact chain must contain the selected R/S/E receipt itself, rather than merely
+a separate run with the same panel digest. This proves that all three controls
+completed without forcing the selected pilot winner itself to be E.
 This is cooperative host/worktree serialization, not a cluster-wide scheduler
 reservation.
 
@@ -69,8 +88,10 @@ released-compatible quality and diversity metrics. Smaller 32-sample or
 selection score. The machine-readable winner is the highest mean quality,
 then highest mean diversity, then lexicographically smallest attempt ID.
 Artifacts using benchmark-run schema 6 or aggregate-report schema 5 are
-rejected; the required versions are benchmark 7, report 6, launch manifest 1,
-training runtime config 2, training summary 4, and successful exit receipt 4.
+rejected; the required versions are candidate lock 2, candidate ledger 2,
+pilot envelope 2, launcher failure receipt 1, benchmark 7, report 6, launch
+manifest 2, training runtime config 2, training summary 4, and successful exit
+receipt 5.
 
 The MDLM side of the gate is independently bound to
 `experiments/udlm/baselines/mdlm_50000_rescore_attestation.json` (SHA-256
@@ -95,6 +116,36 @@ only from the fully disclosed, immutable pilot ledger using the registered
 eligible two-seed panel and the predeclared quality-then-diversity ordering; the
 winner is committed and pushed in a single candidate lock before any final seed
 is run.
+
+Candidate-ledger schema 2 binds one outcome envelope per actually launched
+pilot seed. A completed schema-2 envelope contains no selectable score: it
+points to the exact schema-7 summary, raw CSV, and successful schema-5 training
+receipt. Both the evidence writer and the final gate run the structural reporter
+and a fresh CPU worker that re-decodes `raw_model_text`, recomputes QED, SA, and
+both diversity branches, and checks all 21 row fields and failure counts. A
+failed envelope must instead point to the launcher's schema-1 no-clobber failure
+receipt. The gate validates its exact command, clean pushed source revision,
+checkpoint/config, launcher and log bytes, and any partial summary/CSV bytes;
+these supporting artifacts must be force-added when ignored by Git. A failure
+makes the whole attempt ineligible but does not erase a sibling seed that
+completed. Every success and failure timestamp must predate the candidate lock,
+and every producing revision must be an ancestor of the final benchmark
+revision. The final three candidate runs are independently re-scored from their
+raw CSVs again before a superiority decision is written.
+
+Because `output/` is ignored, publishing an envelope is not the archival step.
+Before committing the ledger, use `git add -f -- <receipt> <log> [<partial> ...]`
+for every failure and force-add each completed summary, raw CSV, and successful
+training receipt as well. Add the envelope normally, then confirm every
+referenced path with `git ls-files --error-unmatch -- <path>`. The revision-time
+gate deliberately fails if any reference or nested support artifact is absent
+from the Git object database.
+
+This authenticates every disclosed outcome; it does not independently prove
+ledger completeness. There is no host-wide, append-only launch registry, so the
+claim that every attempted pilot was disclosed still depends on the operator
+and launcher workflow not omitting or deleting an attempt. The final decision
+records this limitation explicitly.
 
 ## Faithful baseline before hypotheses
 
@@ -243,13 +294,24 @@ a schedule bundle hypothesis rather than an exact official-recipe replay.
    launcher scans the full NVIDIA inventory, dynamically selects genuinely idle
    physical GPUs, re-probes their exact UUIDs, and binds the telemetry through
    the launch/runtime/summary/receipt evidence chain.
+   For each completed seed, run `scripts/udlm/write_pilot_evidence.py
+   --outcome completed ...` to publish its reference-only envelope after
+   independent raw rescoring. If either the small engineering mode or the
+   registered-selection mode fails, retain the launcher-authored
+   `failure_receipt.json`, its log, and any partial artifacts, then run the same
+   writer with `--outcome failed --failure-receipt <path> ...`. The failure
+   receipt and envelope bind the exact pilot mode and requested sample count;
+   never hand-author an envelope or replace an attempt ID.
 7. Advance only a promising candidate to 2,000–5,000 steps if the registered
    pilot evidence justifies the cost.
-8. Close and commit the complete pilot ledger, then commit and push one
-   candidate lock. Only that locked revision may run the three 1,000-sample
-   final seeds, once each in their predeclared directories at 128 NFE. Update
-   the benchmark PDF only after the raw-row reporter and registered superiority
-   gate both validate the result.
+8. After the terminal E receipt proves the complete matched R/S/E panel, close
+   and commit the complete pilot ledger, then commit and push one schema-2
+   candidate lock. The lock binds that E receipt even when R or S wins pilot
+   selection. Only that locked revision may run the three 1,000-sample final
+   seeds, once each in their predeclared directories at 128 NFE. Update the
+   benchmark PDF only after the raw-row reporter and registered superiority
+   gate both validate the result and the final gate independently re-scores all
+   three raw candidate CSVs.
 
 The optimization screens use a three-revision firewall. Once the user chooses
 one or two GPUs, the CPU-only preparer composes two scheduler configs and four
@@ -342,7 +404,7 @@ canonical SHA-256
 `ff45961276df75f445221fd1aa4629262d21fdb852bd9b226ad56fe2559315d5`).
 It lists all 24 FiLM tensors and four timestep-MLP tensors in model order.
 Training-summary schema 4 records a contract-bound audit for A1 and explicit
-null for every other arm; exit-receipt schema 4 independently validates and
+null for every other arm; exit-receipt schema 5 independently validates and
 echoes it. Every optimization-screen arm also records
 `screen_initialization_state_audit` immediately after the verified MDLM-EMA
 warm start and before any optional RNG reseed, dataloader, trainer, optimizer,
@@ -351,7 +413,7 @@ $C\subset S$ remove every timestep-MLP and FiLM name. A domain-separated
 SHA-256 frames each tensor's name, dtype, shape, and exact raw bytes. Scheduler
 arms must have identical full-state and common-state hashes; A0/A1 must have an
 identical common-state hash, while their topology-specific full hashes may
-differ. The summary retains this ten-field certificate and receipt schema 4
+differ. The summary retains this ten-field certificate and receipt schema 5
 validates and echoes it, so free-form evidence cannot substitute arbitrary
 initial-state digest strings.
 
