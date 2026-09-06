@@ -1,6 +1,6 @@
 # GenMol v2 project context
 
-Snapshot: 2026-09-06 08:37 Asia/Dubai. Recheck dynamic state, especially Git
+Snapshot: 2026-09-06 09:25 Asia/Dubai. Recheck dynamic state, especially Git
 status, logs, tmux sessions, and GPU occupancy, before acting.
 
 ## Active objective and safe workspace
@@ -12,8 +12,13 @@ status, logs, tmux sessions, and GPU occupancy, before acting.
   `/home/aidar.alimbayev/Documents/genmolv2/run_sources/udlm_genmol_worktree`
   on branch `codex/udlm-genmol`, not in the dirty main checkout. Preserve all
   unrelated and uncommitted work.
-- The current reviewed source revision is clean and pushed at
-  `19a3e0c5c4128c0e299208e9a116d9cda2633bf6`. The distinct source revision
+- The current reviewed implementation revision is clean and pushed at
+  `3be650e3a32a0bb9fd12c7cdc684cb38ec94d953`. It adds strict optimizer-step
+  scheduler identity, prospective E-L0/E-L1 bundles, the warm-start-compatible
+  A1 post-BERT FiLM conditioner, exact conditioning checkpoint identity,
+  constructor-RNG isolation plumbing, and their teaching/tests. These screen
+  arms remain deliberately unauthorized until a separate registry, launcher,
+  and verifier are frozen. The distinct source revision
   used to produce the immutable current-code MDLM rescore is
   `74482c2742ab5ad15def122c809a6b4e403e94cf`. It contains the hardened
   completion contract, pilot-only distributed-stream repair and scheduler
@@ -88,6 +93,26 @@ parameter-independent endpoint KL is exposed separately and is not included in
 the training gradient. Immutable prior metadata, active-token mappings,
 frequency/tokenizer hashes, and checkpoint state are validated on load.
 
+Two prospective optimization screens are now implemented on CPU but have not
+been registered, launcher-authorized, or run on a GPU. E-L0 preserves the
+released constant schedule with 2,500 linear-warmup optimizer updates. E-L1 is
+a 50-update warmup followed by a half-cosine path over a 1,000-update horizon,
+clamped at `3e-6` from a `3e-4` peak. Over the first 100 used LR indices, E-L1
+has `37.571076382108664` times E-L0's cumulative LR exposure, so it is an
+optimizer-schedule bundle rather than an isolated cosine-curvature ablation.
+
+A0 retains the exact additive state-key and initialization path. A1 retains
+GenMol's stock BERT layers but applies an outer SiLU to the normally initialized
+timestep MLP, then uses a zero-initialized `H -> 2H` shift/scale projection after
+each layer. At initialization it is an exact MDLM-logit identity. Production
+`H=768`, `L=12` gives 14,174,208 FiLM parameters and 14,962,176 total
+conditioning parameters. With the actual schedulers, optimizer update one has
+LR zero: FiLM gradients exist on backward one, but the first positive-rate
+FiLM update is optimizer update two, so the timestep MLP can first receive a
+nonzero gradient on backward three. Both 500-update A arms must start
+independently from the same verified MDLM EMA and reseed after construction;
+neither may continue a scheduler-screen checkpoint.
+
 The benchmark and report pipeline now binds each run to its clean pushed source
 revision, tracked inference-config blob, checkpoint, tokenizer/data/SA inputs,
 sanitized Python environment, raw rows, and exact metric definitions. The
@@ -156,6 +181,15 @@ The non-authoritative log is exclusively reserved but later reopened by
 `tee -a`, so its inode is not evidence-bound. A crash after receipt publication
 but before lease unlink can leave a stale lease; that state deliberately fails
 closed for manual review.
+
+At implementation revision `3be650e3a32a0bb9fd12c7cdc684cb38ec94d953`, the
+exact-worktree full CPU suite passed `678` tests with `14` dependency/runtime
+warnings and no failures. The strengthened focused suite passed `194` tests;
+an independent adversarial subset passed `300`. Ruff passed with the
+repository's intentional delayed-import `E402` pattern ignored, `py_compile`,
+all 60 notebook code-cell compilations, notebook cleanliness/unique-ID checks,
+and `git diff --check` passed. No GPU API, inventory, utilization, or process
+query was used for this validation.
 
 ## Registered superiority and baseline evidence
 
@@ -258,59 +292,77 @@ UDLM-over-GenMol superiority claim.
 
 ## CPU-only launch preflight and performance risks
 
-At pushed source revision `19a3e0c5c4128c0e299208e9a116d9cda2633bf6`,
+At pushed source revision `3be650e3a32a0bb9fd12c7cdc684cb38ec94d953`,
 all six real warm-start dry-runs (`R`, `S`, and `E`, each configured for one
 and two GPUs) resolved successfully against the default full-size MDLM
 checkpoint. The checkpoint is 1,396,998,679 bytes with SHA-256
 `8d00aa47b02f64bf39ff6b0b2e786f213587366fc2c3d29712a00f3f84108dd6`.
-The dry-runs created no run directory, log, lease, tmux session, or GPU-probe
-artifact and did not query GPU state. The worktree remained clean.
+The authoritative digest pass used dry-run names `digest_{r,s,e}_{1,2}g_3be650e`.
+It created no run directory, log, lease, tmux session, or GPU-probe artifact,
+did not query GPU state, and reported
+`project_launch_artifact_mutation_performed=false`. The worktree remained clean.
 
 For one GPU, all three arms shared common-config digest
-`c87cf4ce04ca08ac1336eef2c6d87df921cd4a6e5dbccb151ec7d406f07ec15e`,
+`78da3746bd54d140fc05f8c7a75bc7ef289f531b6c0613a3c2b52115944d48eb`,
 panel digest
-`951b1ae6c4dee531e279a5db6c1ebb32e71568972aeeb034015f4110d2977c4f`,
+`c8d530b1d08f0ea9dc964f979aa0ac9fa141e6bf90295d17169355f588b43a7a`,
 gradient accumulation 8, and effective batch size 16. For two GPUs, the
 corresponding digests are
-`cf9ddfcf56f0080a05406d6061b468753ca78fe0c12170e9cc601e1775e0bc88`
-and `35e1497a69055380a583f3e61628be16365ccedab5d8777bb9094a9d59531c99`,
+`64b8aaa8139efdef9981f730d7ac5493aa3cff27359b33a48d691463642e79a3`
+and `5587891a5ca10253d9ef542df7573ceee125e6bac3a9939f3c494965d9f3731d`,
 with gradient accumulation 4 and the same effective batch size 16. The exact
 resolved-config digests were:
 
 | GPU count | `R` | `S` | `E` |
 | ---: | --- | --- | --- |
-| 1 | `dd26c878e21ecbfacb338fbfa3348de594cfdeb2cc4434bcc63c3a2d9fc09be3` | `9ba7ad3468070d22149b6cd1605c399a69cc013794016f4bede33555a73d551f` | `78651b85796fe7cdf068e4a01dfa7b51fed22d45efc2d8e0fb67e34f5af6bd69` |
-| 2 | `46633de979a15c3faf97d6b7a3f3a5e96f10b4c3f4abbd1951c6d64c73d8ce4a` | `1429bc807518df0af8d3b61a35e5f218619133894011a358741b9eab9fa7e416` | `3e9f8b41f8798ea788b58414528cb10d99d386a85de1f2da1737ceb281043d34` |
+| 1 | `5ddcba219d9f3794282eacf4addccd70bf0b0cc7df9a74b2680947cae2d923ac` | `50851bf98e2c2f4e0cd8879a691ad81648b4b8c6158a2ab67bf1ad8072c8949b` | `747f990274c3f161fc8031d266fb389c7f33f5aa856e6a4c5420fdc8ae119149` |
+| 2 | `ae1908aa11553d7bf700635aec661329264e38d542f17edcca128501ad947e25` | `c519d32abe11f06219f618f977db8f9c298524fa6117fcaffded000fe1aa40c8` | `3ca854a20658212b685ab190593801f1d4445343795509352ada9e1703dac922` |
 
-A separate full-size CPU initialization preflight loaded 202 MDLM EMA
-backbone tensors, zero-initialized the four new time-conditioner tensors, and
-created 206 EMA shadows. A comparison with the pinned official UDLM source
+A separate full-size CPU A1 warm-start smoke loaded 202 MDLM EMA base tensors,
+retained 28 new conditioning tensors, and created 230 EMA shadows. The exact
+checkpoint digest was checked before loading; the successful pass used about
+3,377,376 KiB peak RSS and 20.36 seconds wall time. The preceding A1
+construction-only check reported 102,254,168 total parameters and 14,962,176
+conditioning parameters. A comparison with the pinned official UDLM source
 `edb0f8c28b7caeb4ea7a06a2fee8d74ab6da1661` found no objective-correctness
 blocker. The principal performance risks are architectural and statistical:
-the additive BERT time conditioner is weaker than the official per-block
-adaptive normalization, the current 2,500-step warmup yields only about
-`1.2e-6` learning rate at optimizer step 10, and the 1,880-token empirical
-prior is estimated from a prefix containing only 184 observed token types.
+the additive A0 conditioner is weaker than official UDLM's per-block adaptive
+normalization, A1 is a warm-start-compatible BERT hypothesis rather than the
+official DiT, the current 2,500-step warmup yields only about `1.2e-6` learning
+rate at optimizer step 10, and the 1,880-token empirical prior is estimated
+from a prefix containing only 184 observed token types.
 The configured uniform mixture leaves about `0.0090213` stationary mass on
 training-unseen types, while the observed mass is highly concentrated.
 
 The 10-step matched `R/S/E` run is therefore a health gate only, not a ranking.
 If it succeeds, first run an `E`-only 100-update scheduler screen, then an
-`E`-only 500-update additive-versus-zero-init-FiLM conditioning screen, and
-only then a matched 1,000-update `R/S/E` comparison. Commit the exact arm
+`E`-only 500-update additive-versus-zero-projection-FiLM conditioning screen,
+and only then a matched 1,000-update `R/S/E` comparison. Commit the exact arm
 registry and selection rules before the 100-update screen. Use 32-sample
 diagnostics only for health; registered selection remains seeds 1000 and 1001,
 256 samples each, EMA weights, 128 reverse steps, and temperature 1.0. Do not
 touch final seeds 0, 1, and 2 until a registered winner satisfies the frozen
 eligibility and scientific gates.
 
+The prospective screen YAMLs intentionally do not authorize execution and
+inherit ordinary defaults such as seed 1 and 50,000 maximum steps. A separate
+screen registry/launcher must override and freeze seed 17, 100/500 updates, the
+user-chosen common GPU count, fresh verified MDLM-EMA warm starts, exact panel
+and corruption identities, and output paths. Before A1 authorization it must
+also add variant-aware receipt/gate validation for FiLM parameter counts and
+the post-init RNG policy, explicitly report conditioning metadata/hash from the
+denoising evaluator, and reject scratch A-screen launches. Missing or malformed
+screen evidence must mean incomplete/no winner, not a silent control fallback.
+
 ## GPU status and required next pilot
 
 No UDLM GPU job has been launched, and no GPU inventory or utilization probe
 has yet been run for the pending pilot. No probe or job occurred while producing
-or reviewing revision `19a3e0c5c4128c0e299208e9a116d9cda2633bf6`, the CPU-only
-MDLM rescore, the six real launch dry-runs, or this documentation update. No
-stale snapshot should be treated as authorization or availability evidence.
+or reviewing revision `3be650e3a32a0bb9fd12c7cdc684cb38ec94d953`, the CPU-only
+MDLM rescore, the twelve real launch dry-run invocations (two digest passes over
+the six R/S/E configurations), the full-size A1 CPU warm-start smoke, or this
+documentation update. No stale snapshot should be treated as authorization or
+availability evidence.
 
 Before the first GPU launch, the user must select only the GPU count: one or
 two. Recommend **one GPU** for the first matched 10-step engineering gate; the
@@ -367,8 +419,17 @@ Completed prior items:
   `py_compile`, protocol and notebook invariants, and `git diff --check` also
   passed.
 - All six full-size real-checkpoint dry-run combinations (`R/S/E` at one and
-  two GPUs) then resolved with matched common/panel digests and effective batch
-  size 16 without creating launch artifacts or making a GPU query.
+  two GPUs) then resolved at `19a3e0c` with matched common/panel digests and
+  effective batch size 16 without creating launch artifacts or making a GPU
+  query.
+- Strict L0/L1 scheduler plumbing, A0-compatible and A1 FiLM conditioning,
+  checkpoint/evaluator topology validation, RNG isolation, full teaching
+  material, and adversarial regression coverage were committed and pushed in
+  `3be650e`. The full suite passed `678` tests; full-size A1 CPU warm-start from
+  the real MDLM EMA loaded 202 base tensors and constructed 230 EMA shadows.
+- All six real-checkpoint R/S/E dry-run configurations were then re-resolved at
+  `3be650e` for one and two GPUs. Their updated digests are recorded above; no
+  project launch artifact, GPU probe, or tmux action occurred.
 
 Remaining sequence:
 
@@ -377,7 +438,13 @@ Remaining sequence:
 2. Only after that choice, perform the first fresh GPU inventory and exact-UUID
    re-probe, then launch the matched 10-step `R/S/E` engineering pilot.
 3. Review its authoritative manifests, receipts, checkpoints, and
-   non-authoritative logs before authorizing the 100-update scheduler screen.
-   Do not rank variants from 10-step losses or 32-sample health diagnostics.
-4. Update the final PDF only after the required controlled experiments and
+   non-authoritative logs. Before authorizing the 100-update scheduler screen,
+   implement and freeze the separate optimization-screen registry, launcher,
+   evidence schemas, and CPU-only selection verifier, including all deferred
+   A1 schema bindings listed above. Do not rank variants from 10-step losses or
+   32-sample health diagnostics.
+4. Run E-L0/E-L1 only under the frozen 100-update registry. If complete, use
+   its verified scheduler decision for two fresh 500-update A0/A1 warm starts;
+   never continue a scheduler-screen checkpoint or use final seeds.
+5. Update the final PDF only after the required controlled experiments and
    ablations exist; keep all caveats and paper comparisons explicit.
