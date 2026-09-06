@@ -22,19 +22,13 @@ PRESERVED_STAGE20_TAGS_BY_ID = {
     "stage-20-udlm-categorical-smoke-panel-code": frozenset(
         {"stage-20-udlm-categorical-smoke-panel-code"}
     ),
-    "stage-20-udlm-prior-geometry": frozenset(
-        {"stage-20-udlm-prior-geometry"}
-    ),
+    "stage-20-udlm-prior-geometry": frozenset({"stage-20-udlm-prior-geometry"}),
     "stage-20-udlm-prior-geometry-code": frozenset(
         {"stage-20-udlm-prior-geometry-code"}
     ),
-    "stage-20-udlm-stream-sharding": frozenset(
-        {"stage-20-udlm-stream-sharding"}
-    ),
+    "stage-20-udlm-stream-sharding": frozenset({"stage-20-udlm-stream-sharding"}),
     # The paired code cell intentionally shares the section tag.
-    "stage-20-udlm-stream-sharding-code": frozenset(
-        {"stage-20-udlm-stream-sharding"}
-    ),
+    "stage-20-udlm-stream-sharding-code": frozenset({"stage-20-udlm-stream-sharding"}),
 }
 
 
@@ -53,7 +47,9 @@ def _cell(cell_type: str, source: str, tag: str):
 def _find_cell(notebook: dict, cell_id: str) -> dict:
     matches = [cell for cell in notebook["cells"] if cell.get("id") == cell_id]
     if len(matches) != 1:
-        raise ValueError(f"expected exactly one cell with id {cell_id!r}, found {len(matches)}")
+        raise ValueError(
+            f"expected exactly one cell with id {cell_id!r}, found {len(matches)}"
+        )
     return matches[0]
 
 
@@ -1134,8 +1130,8 @@ reviewed pilot may hold the lease.
 
 The raw bytes of `launch_manifest.json` are frozen by repository-relative path,
 SHA-256, and schema 1. Training receives that digest out of band so the manifest
-need not hash itself. Runtime-config schema 2, training-summary schema 3, and
-successful-exit-receipt schema 3 must each repeat the same stable manifest
+need not hash itself. Runtime-config schema 2, training-summary schema 4, and
+successful-exit-receipt schema 4 must each repeat the same stable manifest
 snapshot and exact $U$. The receipt also validates the still-held lease before
 publication; after tmux handoff, only its writer may then unlink that exact
 unchanged lease. Before handoff, the launcher may release only its own exact
@@ -1158,11 +1154,24 @@ updates, so at peak learning rate $3\times10^{-4}$ its value by update 10 is
 only approximately $(10/2500)(3\times10^{-4})=1.2\times10^{-6}$.
 
 **Implemented CPU plumbing, not an authorized experiment.** The scheduler and
-conditioning variants below now have configuration, model, checkpoint, and CPU
-test support. Their exact comparison registry and selection record are not yet
-frozen, the reviewed launcher does not authorize these new arms, and no GPU
-screen has run. Thus every number below is a mathematical or synthetic example,
-not a training result.
+conditioning variants below now have configuration, model, checkpoint, strict
+registry preparation, registry-aware launch, evidence collection, independent
+selection, and CPU test support. Their exact GPU-count-specific resolved configs
+and registry are deliberately not materialized yet. Therefore the launcher
+cannot authorize these arms and no GPU screen has run. Every number below is a
+mathematical, synthetic, or CPU initialization diagnostic—not a training
+result.
+
+**Three-revision firewall.** After the user chooses one or two GPUs, the
+CPU-only preparer creates exactly six configs at effective global batch 16 and
+microbatch 2: L0/L1 plus A0/A1 contingent on either scheduler. Clean pushed R0
+contains those configs and the implementation but no registry. The preparer
+replays all six through Hydra, verifies their Git blobs and the streamed MDLM
+checkpoint, then writes the registry as the only prospective R0-to-R1 change.
+Pushed R1 is the scheduler-run source. Only its collected scheduler evidence
+and deterministic selection may be added in R2; pushed R2 then authorizes the
+fresh conditioning arms. The verifier recomputes this chronology and returns
+no winner for missing or unmatched evidence.
 
 **Paper correspondence and motivation.** UDLM's denoiser predicts
 $x_\theta(z_t,t)$, so it needs the noise time (implemented here through total
@@ -1246,17 +1255,57 @@ an exact conditioning manifest, and cross-topology checkpoint loads fail closed.
 **Gradient staging and fair RNG initialization.** Zeroing both the timestep MLP
 output and the FiLM projections would give $c=0$ and permanently zero FiLM
 weight gradients, so A1 rejects that dead combination. With normally initialized
-$g$, each FiLM group can receive finite nonzero gradients on backward one.
-Because $W_l=0$ then, the chain rule gives zero gradient into $g$ on backward
-one. Both registered schedules use learning-rate index zero on optimizer update
-one, so that zero-rate step leaves $W_l=0$ and backward two also gives zero
-gradient to $g$. Optimizer update two has positive learning rate and changes
-$W_l$; backward three can then give $g$ a finite nonzero gradient. The gate says
+$g$, each FiLM parameter can receive a finite nonzero gradient at optimizer-
+gradient observation one (after accumulation). Because $W_l=0$ then, the chain
+rule gives zero gradient into $g$ at that observation. Both registered schedules
+use learning-rate index zero on optimizer update one, so that zero-rate step
+leaves $W_l=0$ and observation two also gives zero gradient to $g$. Optimizer
+update two has positive learning rate and changes $W_l$; observation three can
+then give every parameter in $g$ a finite nonzero gradient. The gate says
 "after the first nonzero-learning-rate FiLM update" rather than assuming the
 first optimizer call changes weights. Both A0 and A1 reseed all training RNG
 streams to seed 17 *after* construction and MDLM-EMA loading. Otherwise A1's
 extra parameter initialization would consume random draws and shift later
 corruption/dropout randomness even under the same initial seed.
+
+The exact production observation topology is frozen in
+`experiments/udlm/protocols/film_gradient_contract_v1.json` with raw SHA-256
+`b2a666a23351eb0882a179f7ae5d09fafd2188fee924313cdf60ee94888e7ac5` and
+canonical SHA-256
+`ff45961276df75f445221fd1aa4629262d21fdb852bd9b226ad56fe2559315d5`.
+It binds all 24 FiLM and four timestep-MLP tensor names and shapes. Summary and
+receipt schema 4 require an explicit null for non-A1 arms or a contract-bound
+A1 gradient certificate.
+
+**Exact initialization-state attestation.** Immediately after each verified
+MDLM-EMA warm start, and before RNG reseeding, dataloader/trainer creation, or
+optimizer construction, the training entry point snapshots
+`backbone.state_dict()`. Let $S$ be its name-sorted tensor sequence and let
+$C\subset S$ exclude every timestep-MLP and FiLM tensor. A domain-separated
+SHA-256 frames each tensor name, dtype, shape, and exact raw bytes. The ten-field
+`screen_initialization_state_audit` records $|S|$, $H(S)$, $|C|$, and $H(C)$
+alongside the checkpoint, resolved config, seed, phase, and conditioning
+variant. L0/L1 must match in both $H(S)$ and $H(C)$; A0/A1 must match in
+$H(C)$ even though their conditioning topology makes $H(S)$ differ. Summary
+and receipt schema 4 carry the exact same object, preventing evidence assembly
+from inventing initial-state hashes.
+
+For a two-tensor toy state containing one shared BERT weight and one timestep
+weight, changing only the timestep tensor changes $H(S)$ but not $H(C)$;
+changing the shared tensor changes both. A separately pinned literal CPU probe
+checks the functional invariant: A0 and zero-FiLM A1 must produce byte-exact
+float32 logits before training. Released GenMol has no analogous attestation
+because it does not compare these two time-conditioning topologies.
+
+The full-size pre-registry CPU diagnostic exercised that invariant against the
+actual 50,000-step MDLM EMA checkpoint. Both A0 and A1 emitted shape
+`[2, 4, 1880]`, or 60,160 raw little-endian float32 bytes, with identical
+SHA-256
+`3e6ef7368f9a11d061640948ac5955fba81c2acac6546a12adc4efc5e22e15b8`.
+The sequential check took 33.55 seconds and about 3,578,044 KiB peak RSS. It is
+a topology diagnostic rather than registered screen evidence: the audit must
+run again after the GPU-count-specific registry and conditioning-authorization
+revision are frozen and pushed.
 
 Select A1 only if exact initialization equality, the staged gradient checks,
 pooled content-token fixed-panel loss improves by at least 2%, no time-bin
@@ -1381,8 +1430,8 @@ curve shape cannot be separated. Why must both 500-update arms freshly reload
 the same MDLM EMA and reseed after construction? Expected reasoning: otherwise
 one arm could inherit extra scheduler-screen exposure, and A1's extra parameter
 initialization would shift later stochastic training draws. Why are A1's FiLM
-gradients nonzero on backward one while its timestep-MLP gradients remain zero
-until backward three under either registered schedule? Expected reasoning:
+gradients nonzero at optimizer-gradient observation one while its timestep-MLP
+gradients need not be nonzero until observation three? Expected reasoning:
 nonzero $c$ enters zero projection weights directly, but the gradient returning
 to $c$ is multiplied by those zero weights; optimizer update one has zero
 learning rate, and update two is the first that makes them nonzero. Why is A1 retained only after its
@@ -1410,7 +1459,7 @@ stage20_superiority_protocol_path = (
 )
 stage20_superiority_protocol_bytes = stage20_superiority_protocol_path.read_bytes()
 assert stage20_hashlib.sha256(stage20_superiority_protocol_bytes).hexdigest() == (
-    "a44263d56a42593ca9f1b9c00c7ad8177229f0f4fa9ff941ab07481054b84848"
+    "d734e2771e94b54f3bdb2e86e6da496d855a3eb7a7bd07abbbcdfbf406ab4a20"
 )
 stage20_superiority_protocol = stage20_json.loads(stage20_superiority_protocol_bytes)
 assert stage20_superiority_protocol["status"] == "frozen_before_gpu_pilots"
@@ -1422,8 +1471,8 @@ assert stage20_candidate_lock_requirements[
 ] == {{
     "launch_manifest": 1,
     "runtime_config": 2,
-    "training_summary": 3,
-    "successful_exit_receipt": 3,
+    "training_summary": 4,
+    "successful_exit_receipt": 4,
 }}
 for stage20_required_launch_binding in (
     "immutable_launch_manifest_relative_path_raw_hash_and_schema_required",
@@ -1442,9 +1491,38 @@ assert stage20_selection_firewall["eligible_metric_branch"] == "released_compara
 stage20_future_pilot_plan = {{
     "status": "implemented_cpu_plumbing_not_registered_not_authorized_not_executed",
     "execution_authority": {{
+        "two_phase_registry_preparer_implemented": True,
+        "registry_aware_launcher_implemented": True,
+        "evidence_collector_implemented": True,
+        "independent_selection_verifier_implemented": True,
         "exact_arm_registry_frozen": False,
         "reviewed_launcher_authorizes_screen_arms": False,
         "gpu_screen_executed": False,
+    }},
+    "registry_git_firewall": {{
+        "R0": "clean pushed implementation plus six resolved configs; registry absent",
+        "R1": "registry-only pushed descendant and scheduler run source",
+        "R2": "scheduler evidence and selection-only pushed descendant authorizing conditioning",
+        "resolved_config_count": 6,
+        "effective_global_batch_size": 16,
+        "micro_batch_size_per_process": 2,
+        "gpu_count_materialized_before_R0": False,
+    }},
+    "pre_registry_full_size_initialization_diagnostic": {{
+        "device": "cpu",
+        "checkpoint_sha256": (
+            "8d00aa47b02f64bf39ff6b0b2e786f213587366fc2c3d29712a00f3f84108dd6"
+        ),
+        "arms_constructed_sequentially": ["E-A0", "E-A1"],
+        "logits_shape_each": [2, 4, 1880],
+        "raw_float32_bytes_each": 60160,
+        "raw_logits_sha256_each": (
+            "3e6ef7368f9a11d061640948ac5955fba81c2acac6546a12adc4efc5e22e15b8"
+        ),
+        "byte_exact_equal": True,
+        "wall_seconds": 33.55,
+        "peak_rss_kib": 3578044,
+        "registered_selection_evidence": False,
     }},
     "health_panel": {{
         "variant_order": ["R_release_uniform", "S_schedule_uniform", "E_empirical_frequency"],
@@ -1460,6 +1538,8 @@ stage20_future_pilot_plan = {{
         "fresh_verified_mdlm_ema_start_each_arm": True,
         "post_initialization_reseed_each_arm": False,
         "constructor_rng_path_is_identical_between_arms": True,
+        "full_and_common_backbone_state_hashes_must_match": True,
+        "state_audit_phase": "after_warm_start_before_reseed_and_optimizer",
         "fixed_noise_times": [0.1, 0.5, 0.9],
         "E_L0": {{
             "conditioning": "additive",
@@ -1492,6 +1572,9 @@ stage20_future_pilot_plan = {{
         "fresh_verified_mdlm_ema_start_each_arm": True,
         "scheduler_screen_checkpoint_continuation": False,
         "post_initialization_reseed_each_arm": True,
+        "common_backbone_state_hash_must_match": True,
+        "full_state_hash_may_differ_by_conditioning_topology": True,
+        "summary_and_receipt_echo_exact_state_audit": True,
         "E_A0": {{
             "topology": "zero_output_additive_time_conditioner",
             "legacy_state_keys_preserved": True,
@@ -1508,9 +1591,9 @@ stage20_future_pilot_plan = {{
             "pooled_content_token_loss_relative_improvement_min": 0.02,
             "per_time_bin_relative_regression_max": 0.02,
             "clean_token_accuracy_nondecreasing_by_integer_cross_product": True,
-            "each_film_group_gradient_finite_nonzero_on_backward_one": True,
+            "each_film_parameter_gradient_finite_nonzero_at_optimizer_observation_one": True,
             "timestep_mlp_gradient_finite_nonzero_after_first_nonzero_lr_film_update": True,
-            "earliest_expected_timestep_mlp_nonzero_gradient_backward": 3,
+            "required_timestep_mlp_nonzero_gradient_optimizer_observation": 3,
         }},
         "complete_valid_threshold_miss": "E_A0",
         "missing_malformed_or_unmatched_evidence": "incomplete_no_winner",
@@ -1527,6 +1610,31 @@ stage20_future_pilot_plan = {{
         }},
     }},
 }}
+stage20_screen_authority = stage20_future_pilot_plan["execution_authority"]
+for stage20_implemented_authority in (
+    "two_phase_registry_preparer_implemented",
+    "registry_aware_launcher_implemented",
+    "evidence_collector_implemented",
+    "independent_selection_verifier_implemented",
+):
+    assert stage20_screen_authority[stage20_implemented_authority] is True
+assert stage20_screen_authority["exact_arm_registry_frozen"] is False
+assert stage20_future_pilot_plan["registry_git_firewall"]["resolved_config_count"] == 6
+assert (
+    stage20_future_pilot_plan["registry_git_firewall"][
+        "effective_global_batch_size"
+    ]
+    == 16
+)
+stage20_initialization_diagnostic = stage20_future_pilot_plan[
+    "pre_registry_full_size_initialization_diagnostic"
+]
+assert stage20_initialization_diagnostic["logits_shape_each"] == [2, 4, 1880]
+assert stage20_initialization_diagnostic["raw_float32_bytes_each"] == (
+    2 * 4 * 1880 * 4
+)
+assert stage20_initialization_diagnostic["byte_exact_equal"] is True
+assert stage20_initialization_diagnostic["registered_selection_evidence"] is False
 stage20_lr_at_health_update_10 = 3e-4 * 10 / 2500
 assert stage20_math.isclose(stage20_lr_at_health_update_10, 1.2e-6)
 stage20_screen_update_indices = range(100)
@@ -1974,7 +2082,7 @@ stage20_decision_gate_report_rows = [
     (
         "Final-candidate lock",
         "Commit and push the candidate manifest before seeds 0,1,2; bind launch "
-        "manifest schema 1, runtime schema 2, summary/receipt schema 3, exact UUIDs, "
+        "manifest schema 1, runtime schema 2, summary/receipt schema 4, exact UUIDs, "
         "final-idle telemetry, global-lease evidence, and checkpoint; evaluate each "
         "final seed once; do not select or tune from final-seed results.",
     ),
@@ -2052,6 +2160,10 @@ stage20_summary = {{
         "a1_warm_start_tensor_counts": stage20_a1_warm_start_tensor_counts,
         "fresh_mdlm_ema_start_each_500_update_arm": True,
         "post_initialization_reseed_each_500_update_arm": True,
+        "two_phase_registry_preparer_implemented": True,
+        "registry_aware_launcher_implemented": True,
+        "evidence_collector_implemented": True,
+        "independent_selection_verifier_implemented": True,
         "exact_arm_registry_frozen": False,
         "launcher_authorized": False,
         "gpu_screen_executed": False,
@@ -2724,7 +2836,7 @@ released-code, and local bounded results remain separate fields.
     report_cell = _find_cell(notebook, "stage19-report")
     source = "".join(report_cell.get("source", []))
 
-    stage18_tail = '''        {
+    stage18_tail = """        {
             "id": "stage18.evaluation",
             "stage": 18,
             "title": "Generation metrics and reproduction ledger",
@@ -2736,8 +2848,8 @@ released-code, and local bounded results remain separate fields.
             "notes": "Computes bounded validity/uniqueness/quality/diversity and records all missing paper-scale work.",
             "checkpoint": "Distinguish a smoke metric from a three-run paper benchmark.",
         },
-    ]'''
-    stage20_tail = '''        {
+    ]"""
+    stage20_tail = """        {
             "id": "stage18.evaluation",
             "stage": 18,
             "title": "Generation metrics and reproduction ledger",
@@ -2769,25 +2881,25 @@ released-code, and local bounded results remain separate fields.
             "notes": "Cross-checks native equations, time conditioning, revisable sampling, two pinned CPU artifacts, and the frozen local MDLM manifest; it is not benchmark-scale UDLM evidence.",
             "checkpoint": "Explain why bounded optimization evidence cannot establish a de-novo win.",
         },
-    ]'''
+    ]"""
     source = source.replace(
         "official UDLM edb0f8c; src/genmol/diffusion.py; src/genmol/backbone.py",
         "official UDLM edb0f8c28b7caeb4ea7a06a2fee8d74ab6da1661; "
         "src/genmol/diffusion.py; src/genmol/backbone.py",
     )
     source = source.replace(
-        '''                "stage20_cpu_evidence",
-                "STAGE20_UDLM_SMOKE_TESTS_PASSED",''',
-        '''                "stage20_cpu_evidence",
+        """                "stage20_cpu_evidence",
+                "STAGE20_UDLM_SMOKE_TESTS_PASSED",""",
+        """                "stage20_cpu_evidence",
                 "stage20_ledger_record",
-                "STAGE20_UDLM_SMOKE_TESTS_PASSED",''',
+                "STAGE20_UDLM_SMOKE_TESTS_PASSED",""",
     )
     source = source.replace(
-        '''                "stage20_cpu_evidence",
-                "stage20_ledger_record",''',
-        '''                "stage20_cpu_evidence",
+        """                "stage20_cpu_evidence",
+                "stage20_ledger_record",""",
+        """                "stage20_cpu_evidence",
                 "stage20_mdlm_baseline",
-                "stage20_ledger_record",''',
+                "stage20_ledger_record",""",
     )
     source = source.replace(
         "Cross-checks native equations, time conditioning, revisable sampling, and two pinned CPU artifacts; it is not benchmark-scale evidence.",
@@ -2803,29 +2915,29 @@ released-code, and local bounded results remain separate fields.
     if '    gate_rows = payload["udlm_decision_gate"]' in source:
         source = _replace_required(
             source,
-            '''        "Comparator implementation provenance",
-        *[f"Comparator caveat {index}" for index in range(1, 6)],''',
-            '''        "Comparator implementation provenance",
+            """        "Comparator implementation provenance",
+        *[f"Comparator caveat {index}" for index in range(1, 6)],""",
+            """        "Comparator implementation provenance",
         "Comparator current-code rescore",
-        *[f"Comparator caveat {index}" for index in range(1, 6)],''',
+        *[f"Comparator caveat {index}" for index in range(1, 6)],""",
             label="current-code comparator rescore report row",
         )
         source = _replace_required(
             source,
-            '''        "Final-candidate lock",
-        "Final evaluation protocol",''',
-            '''        "Final-candidate lock",
+            """        "Final-candidate lock",
+        "Final evaluation protocol",""",
+            """        "Final-candidate lock",
         "Registered pilot selector",
-        "Final evaluation protocol",''',
+        "Final evaluation protocol",""",
             label="registered pilot selector report row",
         )
         source = source.replace(
-            '''        "device UUID mapping and wall time",
-        "MDLM-matched content-only framing control",''',
-            '''        "launch-manifest path/hash/schema",
+            """        "device UUID mapping and wall time",
+        "MDLM-matched content-only framing control",""",
+            """        "launch-manifest path/hash/schema",
         "global lease",
         "Future plan: 10-update R/S/E health",
-        "MDLM-matched content-only framing control",''',
+        "MDLM-matched content-only framing control",""",
         )
         source = _replace_required(
             source,
@@ -2841,13 +2953,13 @@ released-code, and local bounded results remain separate fields.
     source = _replace_required(
         source,
         '        failed = spec["stage"] == 18 and not bool(namespace.get("NOTEBOOK_V1_SMOKE_TESTS_PASSED", False))',
-        '''        failed = (
+        """        failed = (
             spec["stage"] == 18
             and not bool(namespace.get("NOTEBOOK_V1_SMOKE_TESTS_PASSED", False))
         ) or (
             spec["stage"] == 20
             and not bool(namespace.get("STAGE20_UDLM_SMOKE_TESTS_PASSED", False))
-        )''',
+        )""",
         label="report invariant status",
     )
 
@@ -2855,19 +2967,21 @@ released-code, and local bounded results remain separate fields.
     new_ablation = '''    ablations = [
         {"comparison": "UDLM full-vocabulary vs control-token-excluded prior", "paper_result": "Uniform over all K categories is the faithful UDLM prior; control-token exclusion is a labeled molecular ablation.", "local_result": evidence_for("stage20.udlm"), "sample_size": by_id["stage20.udlm"]["sample_size"], "status": by_id["stage20.udlm"]["status"], "interpretation": "Two seed-1 CPU toy integrations were validated; their 5/16 versus 3/16 strict-valid counts do not rank the priors."},
         {"comparison": "Equation 2 ancestral vs confidence sampling"'''
-    final_ablation_marker = '"local_result": compact_value(namespace.get("stage20_prior_ablation_summary"))'
+    final_ablation_marker = (
+        '"local_result": compact_value(namespace.get("stage20_prior_ablation_summary"))'
+    )
     if final_ablation_marker not in source:
         source = _replace_required(
             source, old_ablation, new_ablation, label="UDLM report ablation"
         )
     source = _replace_required(
         source,
-        '''    def evidence_for(record_id):
+        """    def evidence_for(record_id):
         evidence = by_id[record_id]["evidence"]
         return "; ".join(evidence[:2]) if evidence else "No local result."
 
-    ablations = [''',
-        '''    def evidence_for(record_id):
+    ablations = [""",
+        """    def evidence_for(record_id):
         evidence = by_id[record_id]["evidence"]
         return "; ".join(evidence[:2]) if evidence else "No local result."
 
@@ -2881,47 +2995,47 @@ released-code, and local bounded results remain separate fields.
     )
     udlm_decision_gate = [tuple(row) for row in udlm_decision_gate]
 
-    ablations = [''',
+    ablations = [""",
         label="raw UDLM decision-gate collection",
     )
     source = _replace_required(
         source,
-        '''        {"comparison": "UDLM full-vocabulary vs control-token-excluded prior", "paper_result": "Uniform over all K categories is the faithful UDLM prior; control-token exclusion is a labeled molecular ablation.", "local_result": evidence_for("stage20.udlm"), "sample_size": by_id["stage20.udlm"]["sample_size"], "status": by_id["stage20.udlm"]["status"], "interpretation": "Two seed-1 CPU toy integrations were validated; their 5/16 versus 3/16 strict-valid counts do not rank the priors."},''',
-        '''        {"comparison": "UDLM full-vocabulary vs control-token-excluded prior", "paper_result": "Uniform over all K categories is the faithful UDLM prior; control-token exclusion is a labeled molecular ablation.", "local_result": compact_value(namespace.get("stage20_prior_ablation_summary")), "sample_size": compact_value(namespace.get("stage20_prior_ablation_sample_scope")), "status": by_id["stage20.udlm"]["status"], "interpretation": "The paired seed-1 CPU smoke verifies both pathways only; 5/16 versus 3/16 strict-valid counts do not rank priors or estimate a population effect."},''',
+        """        {"comparison": "UDLM full-vocabulary vs control-token-excluded prior", "paper_result": "Uniform over all K categories is the faithful UDLM prior; control-token exclusion is a labeled molecular ablation.", "local_result": evidence_for("stage20.udlm"), "sample_size": by_id["stage20.udlm"]["sample_size"], "status": by_id["stage20.udlm"]["status"], "interpretation": "Two seed-1 CPU toy integrations were validated; their 5/16 versus 3/16 strict-valid counts do not rank the priors."},""",
+        """        {"comparison": "UDLM full-vocabulary vs control-token-excluded prior", "paper_result": "Uniform over all K categories is the faithful UDLM prior; control-token exclusion is a labeled molecular ablation.", "local_result": compact_value(namespace.get("stage20_prior_ablation_summary")), "sample_size": compact_value(namespace.get("stage20_prior_ablation_sample_scope")), "status": by_id["stage20.udlm"]["status"], "interpretation": "The paired seed-1 CPU smoke verifies both pathways only; 5/16 versus 3/16 strict-valid counts do not rank priors or estimate a population effect."},""",
         label="honest UDLM prior-ablation evidence",
     )
     source = _replace_required(
         source,
-        '''    return {
+        """    return {
         "records": records,
         "ablations": ablations,
-        "metadata": {''',
-        '''    return {
+        "metadata": {""",
+        """    return {
         "records": records,
         "ablations": ablations,
         "udlm_decision_gate": udlm_decision_gate,
-        "metadata": {''',
+        "metadata": {""",
         label="raw UDLM gate payload",
     )
 
-    old_metadata = '''            "upstream_commit": compact_value(namespace.get("checked_upstream_commit")),
-            "run_flags": run_flags,'''
-    new_metadata = '''            "pushed_head_commit": compact_value(namespace.get("pushed_head_commit")),
+    old_metadata = """            "upstream_commit": compact_value(namespace.get("checked_upstream_commit")),
+            "run_flags": run_flags,"""
+    new_metadata = """            "pushed_head_commit": compact_value(namespace.get("pushed_head_commit")),
             "active_branch": compact_value(namespace.get("branch")),
             "tracking_ref": compact_value(namespace.get("tracking_ref")),
             "udlm_base_commit": compact_value(namespace.get("UDLM_BASE_COMMIT")),
             "working_tree_status": compact_value(namespace.get("working_tree_status")),
-            "run_flags": run_flags,'''
+            "run_flags": run_flags,"""
     source = _replace_required(
         source, old_metadata, new_metadata, label="dynamic report provenance"
     )
     source = _replace_required(
         source,
-        '''            "udlm_base_commit": compact_value(namespace.get("UDLM_BASE_COMMIT")),
-            "run_flags": run_flags,''',
-        '''            "udlm_base_commit": compact_value(namespace.get("UDLM_BASE_COMMIT")),
+        """            "udlm_base_commit": compact_value(namespace.get("UDLM_BASE_COMMIT")),
+            "run_flags": run_flags,""",
+        """            "udlm_base_commit": compact_value(namespace.get("UDLM_BASE_COMMIT")),
             "working_tree_status": compact_value(namespace.get("working_tree_status")),
-            "run_flags": run_flags,''',
+            "run_flags": run_flags,""",
         label="report dirty-path provenance",
     )
 
@@ -2957,28 +3071,28 @@ released-code, and local bounded results remain separate fields.
         and '        "Comparator implementation provenance",' not in source
     ):
         source = source.replace(
-            '''        "Comparator exact means",
-        *[f"Comparator caveat {index}" for index in range(1, 6)],''',
-            '''        "Comparator exact means",
+            """        "Comparator exact means",
+        *[f"Comparator caveat {index}" for index in range(1, 6)],""",
+            """        "Comparator exact means",
         "Comparator implementation provenance",
-        *[f"Comparator caveat {index}" for index in range(1, 6)],''',
+        *[f"Comparator caveat {index}" for index in range(1, 6)],""",
             1,
         )
         source = source.replace(
-            '''        "Final-candidate lock",
-        "Forbidden inference",''',
-            '''        "Final-candidate lock",
+            """        "Final-candidate lock",
+        "Forbidden inference",""",
+            """        "Final-candidate lock",
         "Final evaluation protocol",
         "Matching constraints",
         "Required candidate provenance",
         "Training-support fairness",
-        "Forbidden inference",''',
+        "Forbidden inference",""",
             1,
         )
         source = source.replace(
-            '''        "Welch interval",
-        "continuation-system",''',
-            '''        "Welch interval",
+            """        "Welch interval",
+        "continuation-system",""",
+            """        "Welch interval",
         "b474efc593b665489359425dbe1ed0873f8ae1d44b77478b871aff6d6b555904",
         "a77d7c84d8628403c6d7a11edebce5bf9b8405e3f8b79a326a6e06bd7f444cea",
         "3 seeds x 1000 requests",
@@ -2986,18 +3100,18 @@ released-code, and local bounded results remain separate fields.
         "initialization checkpoint and raw-or-EMA choice",
         "device UUID mapping and wall time",
         "MDLM-matched content-only framing control",
-        "continuation-system",''',
+        "continuation-system",""",
             1,
         )
 
     source = _replace_required(
         source,
-        '''    for ablation in payload["ablations"]:
+        """    for ablation in payload["ablations"]:
         assert ablation["status"] in allowed_statuses
         assert ablation["local_result"] != ""
 
-    paper_records =''',
-        '''    for ablation in payload["ablations"]:
+    paper_records =""",
+        """    for ablation in payload["ablations"]:
         assert ablation["status"] in allowed_statuses
         assert ablation["local_result"] != ""
 
@@ -3045,24 +3159,24 @@ released-code, and local bounded results remain separate fields.
     ):
         assert required_text in gate_text
 
-    paper_records =''',
+    paper_records =""",
         label="UDLM gate validation",
     )
     source = _replace_required(
         source,
-        '''        "Paper-scale and smoke-test statuses remain separate",
-        "Output root contains this checkout's src/genmol package",''',
-        '''        "Paper-scale and smoke-test statuses remain separate",
+        """        "Paper-scale and smoke-test statuses remain separate",
+        "Output root contains this checkout's src/genmol package",""",
+        """        "Paper-scale and smoke-test statuses remain separate",
         "UDLM gate, comparator caveats, uncertainty methods, and claim scope are explicit",
-        "Output root contains this checkout's src/genmol package",''',
+        "Output root contains this checkout's src/genmol package",""",
         label="UDLM gate validation summary",
     )
     source = _replace_required(
         source,
         '        ("Inspected upstream commit", metadata["upstream_commit"]),',
-        '''        ("Pushed HEAD commit", metadata["pushed_head_commit"]),
+        """        ("Pushed HEAD commit", metadata["pushed_head_commit"]),
         ("Active branch and tracking ref", f"{metadata['active_branch']} -> {metadata['tracking_ref']}"),
-        ("Required UDLM base ancestor", metadata["udlm_base_commit"]),''',
+        ("Required UDLM base ancestor", metadata["udlm_base_commit"]),""",
         label="report cover provenance",
     )
     source = _replace_required(
@@ -3073,27 +3187,27 @@ released-code, and local bounded results remain separate fields.
     )
     source = _replace_required(
         source,
-        '''    evaluation_local = stage_by_id["stage18.evaluation"]
-    fragment_local = stage_by_id["stage13.fragment_constraints"]''',
-        '''    evaluation_local = stage_by_id["stage18.evaluation"]
+        """    evaluation_local = stage_by_id["stage18.evaluation"]
+    fragment_local = stage_by_id["stage13.fragment_constraints"]""",
+        """    evaluation_local = stage_by_id["stage18.evaluation"]
     udlm_local = stage_by_id["stage20.udlm"]
-    fragment_local = stage_by_id["stage13.fragment_constraints"]''',
+    fragment_local = stage_by_id["stage13.fragment_constraints"]""",
         label="UDLM generation-page lookup",
     )
-    udlm_generation_row = '''        (
+    udlm_generation_row = """        (
             "UDLM - bounded implementation evidence",
             udlm_local["status"],
             "Native equations, revisability, and two 16-request CPU artifacts",
             "; ".join((udlm_local["evidence"][0], udlm_local["evidence"][4])),
         ),
-'''
-    accurate_udlm_generation_row = '''        (
+"""
+    accurate_udlm_generation_row = """        (
             "UDLM - bounded implementation evidence",
             udlm_local["status"],
             "Native equation parity, a revisability trace, and two hash-validated 16-request CPU smoke artifacts",
             "; ".join((udlm_local["evidence"][0], udlm_local["evidence"][2], udlm_local["evidence"][3])),
         ),
-'''
+"""
     while udlm_generation_row + udlm_generation_row in source:
         source = source.replace(
             udlm_generation_row + udlm_generation_row,
@@ -3103,11 +3217,11 @@ released-code, and local bounded results remain separate fields.
     if accurate_udlm_generation_row not in source:
         source = _replace_required(
             source,
-            '''        (
-            "Fragment constrained - full benchmark",''',
+            """        (
+            "Fragment constrained - full benchmark",""",
             udlm_generation_row
-            + '''        (
-            "Fragment constrained - full benchmark",''',
+            + """        (
+            "Fragment constrained - full benchmark",""",
             label="UDLM generation-page row",
         )
     source = _replace_required(
@@ -3120,22 +3234,22 @@ released-code, and local bounded results remain separate fields.
     if full_gate_marker not in source:
         source = _replace_required(
             source,
-            '''    )
+            """    )
     story.append(Spacer(1, 5 * mm))
-    story.append(para("Required de novo result columns", "GenMolH2"))''',
-            '''    )
+    story.append(para("Required de novo result columns", "GenMolH2"))""",
+            """    )
     story.append(Spacer(1, 4 * mm))
     story.append(para("Registered UDLM decision gate", "GenMolH2"))
     story.append(para(udlm_local["config"]["stage20_success_criteria"], "GenMolSmall"))
     story.append(Spacer(1, 5 * mm))
-    story.append(para("Required de novo result columns", "GenMolH2"))''',
+    story.append(para("Required de novo result columns", "GenMolH2"))""",
             label="UDLM decision gate in report",
         )
     source = _replace_required(
         source,
-        '''    story.append(para("Registered UDLM decision gate", "GenMolH2"))
-    story.append(para(udlm_local["config"]["stage20_success_criteria"], "GenMolSmall"))''',
-        '''    story.append(para("Registered UDLM decision gate", "GenMolH2"))
+        """    story.append(para("Registered UDLM decision gate", "GenMolH2"))
+    story.append(para(udlm_local["config"]["stage20_success_criteria"], "GenMolSmall"))""",
+        """    story.append(para("Registered UDLM decision gate", "GenMolH2"))
     story.append(
         make_table(
             ("Gate or provenance field", "Exact registered requirement"),
@@ -3143,29 +3257,29 @@ released-code, and local bounded results remain separate fields.
             (48 * mm, 122 * mm),
             font_size=6.2,
         )
-    )''',
+    )""",
         label="untruncated UDLM decision gate in report",
     )
     source = _replace_required(
         source,
         '        ("Upstream commit", metadata["upstream_commit"]),',
-        '''        ("Pushed HEAD commit", metadata["pushed_head_commit"]),
+        """        ("Pushed HEAD commit", metadata["pushed_head_commit"]),
         ("Active branch", metadata["active_branch"]),
         ("Tracking ref", metadata["tracking_ref"]),
-        ("UDLM base ancestor", metadata["udlm_base_commit"]),''',
+        ("UDLM base ancestor", metadata["udlm_base_commit"]),""",
         label="report provenance table migration",
     )
     source = _replace_required(
         source,
-        '''        ("Pushed HEAD commit", metadata["pushed_head_commit"]),
+        """        ("Pushed HEAD commit", metadata["pushed_head_commit"]),
         ("Active branch", metadata["active_branch"]),
         ("Tracking ref", metadata["tracking_ref"]),
-        ("UDLM base ancestor", metadata["udlm_base_commit"]),''',
-        '''        ("Pushed HEAD commit", metadata["pushed_head_commit"]),
+        ("UDLM base ancestor", metadata["udlm_base_commit"]),""",
+        """        ("Pushed HEAD commit", metadata["pushed_head_commit"]),
         ("Active branch", metadata["active_branch"]),
         ("Tracking ref", metadata["tracking_ref"]),
         ("UDLM base ancestor", metadata["udlm_base_commit"]),
-        ("Uncommitted paths at provenance check", metadata["working_tree_status"]),''',
+        ("Uncommitted paths at provenance check", metadata["working_tree_status"]),""",
         label="report provenance table",
     )
     source = _replace_required(
@@ -3176,45 +3290,45 @@ released-code, and local bounded results remain separate fields.
     )
     source = _replace_required(
         source,
-        '''        ("UDLM schedule mismatch", "The release uses residual-clean alpha for corruption/sampling but ideal alpha=1-t in its loss; prior loss is therefore not exactly zero for the implemented forward endpoint."),''',
-        '''        ("UDLM schedule mismatch", "The release uses residual-clean alpha for corruption/sampling but ideal alpha=1-t in its loss; prior loss is therefore not exactly zero for the implemented forward endpoint."),
-        ("Distributed loss weighting", "Released global_mean is process-local. DDP and gradient accumulation average local token ratios rather than forming one token ratio across all ranks and microbatches; an exact-global repair must be a labeled ablation."),''',
+        """        ("UDLM schedule mismatch", "The release uses residual-clean alpha for corruption/sampling but ideal alpha=1-t in its loss; prior loss is therefore not exactly zero for the implemented forward endpoint."),""",
+        """        ("UDLM schedule mismatch", "The release uses residual-clean alpha for corruption/sampling but ideal alpha=1-t in its loss; prior loss is therefore not exactly zero for the implemented forward endpoint."),
+        ("Distributed loss weighting", "Released global_mean is process-local. DDP and gradient accumulation average local token ratios rather than forming one token ratio across all ranks and microbatches; an exact-global repair must be a labeled ablation."),""",
         label="distributed loss weighting qualification",
     )
     source = source.replace(
-        '''        "Process-local token-ratio averaging across DDP ranks and accumulation windows is not an exact globally pooled token mean.",
-        "Fragment distance, full PMO, real docking, and three-run mean/std remain absent unless their ledger rows say EXECUTED - PAPER SCALE.",''',
-        '''        "Process-local token-ratio averaging across DDP ranks and accumulation windows is not an exact globally pooled token mean.",
+        """        "Process-local token-ratio averaging across DDP ranks and accumulation windows is not an exact globally pooled token mean.",
+        "Fragment distance, full PMO, real docking, and three-run mean/std remain absent unless their ledger rows say EXECUTED - PAPER SCALE.",""",
+        """        "Process-local token-ratio averaging across DDP ranks and accumulation windows is not an exact globally pooled token mean.",
         "The current UDLM content-only training support excludes BOS/EOS while faithful MDLM uses the full attention mask; without an MDLM-matched framing control this remains a method-causality confound.",
-        "Fragment distance, full PMO, real docking, and three-run mean/std remain absent unless their ledger rows say EXECUTED - PAPER SCALE.",''',
+        "Fragment distance, full PMO, real docking, and three-run mean/std remain absent unless their ledger rows say EXECUTED - PAPER SCALE.",""",
         1,
     )
     source = _replace_required(
         source,
-        '''        "Bounded validity, uniqueness, quality, and diversity do not replace repeated paper-scale evaluation.",
-        "Fragment distance, full PMO, real docking, and three-run mean/std remain absent unless their ledger rows say EXECUTED - PAPER SCALE.",''',
-        '''        "Bounded validity, uniqueness, quality, and diversity do not replace repeated paper-scale evaluation.",
+        """        "Bounded validity, uniqueness, quality, and diversity do not replace repeated paper-scale evaluation.",
+        "Fragment distance, full PMO, real docking, and three-run mean/std remain absent unless their ledger rows say EXECUTED - PAPER SCALE.",""",
+        """        "Bounded validity, uniqueness, quality, and diversity do not replace repeated paper-scale evaluation.",
         "The frozen local MDLM comparator is not an exact paper reproduction; its five historical caveats are rendered verbatim in the registered gate table.",
         "Process-local token-ratio averaging across DDP ranks and accumulation windows is not an exact globally pooled token mean.",
         "The current UDLM content-only training support excludes BOS/EOS while faithful MDLM uses the full attention mask; without an MDLM-matched framing control this remains a method-causality confound.",
-        "Fragment distance, full PMO, real docking, and three-run mean/std remain absent unless their ledger rows say EXECUTED - PAPER SCALE.",''',
+        "Fragment distance, full PMO, real docking, and three-run mean/std remain absent unless their ledger rows say EXECUTED - PAPER SCALE.",""",
         label="UDLM report limitations",
     )
     source = _replace_required(
         source,
-        '''        "Paper-scale execution ledger",
-        "Verification and limitations",''',
-        '''        "Paper-scale execution ledger",
+        """        "Paper-scale execution ledger",
+        "Verification and limitations",""",
+        """        "Paper-scale execution ledger",
         "Registered UDLM decision gate",
-        "Verification and limitations",''',
+        "Verification and limitations",""",
         label="UDLM gate rendered-heading audit",
     )
     source = source.replace(
-        '''        "udlm_claim_language_present": all(
+        """        "udlm_claim_language_present": all(
             fragment in extracted
             for fragment in ("Newcombe-Wilson", "dirty source tree", "continuation-system")
-        ),''',
-        '''        "udlm_claim_language_present": all(
+        ),""",
+        """        "udlm_claim_language_present": all(
             fragment in extracted
             for fragment in (
                 "Newcombe-Wilson",
@@ -3228,25 +3342,25 @@ released-code, and local bounded results remain separate fields.
                 "global lease",
                 "MDLM-matched",
             )
-        ),''',
+        ),""",
         1,
     )
     if '        "udlm_claim_language_present": all(' in source:
         source = _replace_required(
             source,
-            '''                "device UUID",
-                "MDLM-matched",''',
-            '''                "device UUID",
+            """                "device UUID",
+                "MDLM-matched",""",
+            """                "device UUID",
                 "launch-manifest",
                 "global lease",
-                "MDLM-matched",''',
+                "MDLM-matched",""",
             label="launch-evidence PDF audit",
         )
     source = _replace_required(
         source,
-        '''        "all_required_headings_present": all(heading in extracted for heading in required_headings),
-        "status_labels_consistent":''',
-        '''        "all_required_headings_present": all(heading in extracted for heading in required_headings),
+        """        "all_required_headings_present": all(heading in extracted for heading in required_headings),
+        "status_labels_consistent":""",
+        """        "all_required_headings_present": all(heading in extracted for heading in required_headings),
         "udlm_claim_language_present": all(
             fragment in extracted
             for fragment in (
@@ -3262,16 +3376,16 @@ released-code, and local bounded results remain separate fields.
                 "MDLM-matched",
             )
         ),
-        "status_labels_consistent":''',
+        "status_labels_consistent":""",
         label="UDLM claim-language PDF audit",
     )
     source = _replace_required(
         source,
-        '''assert REPORT_AUDIT["all_required_headings_present"]
-assert REPORT_AUDIT["status_labels_consistent"]''',
-        '''assert REPORT_AUDIT["all_required_headings_present"]
+        """assert REPORT_AUDIT["all_required_headings_present"]
+assert REPORT_AUDIT["status_labels_consistent"]""",
+        """assert REPORT_AUDIT["all_required_headings_present"]
 assert REPORT_AUDIT["udlm_claim_language_present"]
-assert REPORT_AUDIT["status_labels_consistent"]''',
+assert REPORT_AUDIT["status_labels_consistent"]""",
         label="UDLM claim-language report assertion",
     )
 
@@ -3316,7 +3430,7 @@ def _update_completion_gate(notebook: dict) -> None:
   `{UDLM_BASE_COMMIT}` are linked, hashed, and schema-validated. They are bounded
   integration evidence, not evidence that UDLM beats GenMol.
 - Candidate training must bind launch-manifest schema 1, runtime schema 2, and
-  summary/receipt schema 3, including the exact selected UUIDs, final-idle
+  summary/receipt schema 4, including the exact selected UUIDs, final-idle
   telemetry, and repository-global single-job lease. The lease machine-enforces
   one-job concurrency; R/S/E order remains an operator/post-run audit until a
   predecessor-receipt chain is implemented.
@@ -3351,9 +3465,7 @@ def update_notebook(source: Path, destination: Path):
     _update_completion_gate(notebook)
     replacement_ids = {cell["id"] for cell in replacement_cells}
     notebook["cells"] = [
-        cell
-        for cell in notebook["cells"]
-        if cell.get("id") not in replacement_ids
+        cell for cell in notebook["cells"] if cell.get("id") not in replacement_ids
     ]
     insert_at = next(
         index

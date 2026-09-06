@@ -1,3 +1,5 @@
+import hashlib
+import json
 import math
 from dataclasses import FrozenInstanceError, asdict, replace
 from pathlib import Path
@@ -196,8 +198,7 @@ def test_film_timestep_gradient_staging_respects_zero_lr_first_update():
             for parameter in (*film_parameters, *time_parameters)
         )
         return any(
-            torch.count_nonzero(parameter.grad) > 0
-            for parameter in time_parameters
+            torch.count_nonzero(parameter.grad) > 0 for parameter in time_parameters
         )
 
     assert optimizer.param_groups[0]["lr"] == 0.0
@@ -214,6 +215,7 @@ def test_film_timestep_gradient_staging_respects_zero_lr_first_update():
     scheduler.step()
 
     assert backward() is True
+    assert all(torch.count_nonzero(parameter.grad) > 0 for parameter in time_parameters)
 
 
 def test_genmol_configure_optimizers_uses_immutable_schedule_spec():
@@ -255,11 +257,16 @@ def test_genmol_configure_optimizers_uses_immutable_schedule_spec():
             "exactly the registered fields",
         ),
         (
-            _optim_config({key: value for key, value in _l0_config().items() if key != "name"}),
+            _optim_config(
+                {key: value for key, value in _l0_config().items() if key != "name"}
+            ),
             "exactly the registered fields",
         ),
         (_optim_config({**_l0_config(), "name": "cosine"}), "not registered"),
-        (_optim_config({**_l0_config(), "warmup_updates": True}), "nonnegative integer"),
+        (
+            _optim_config({**_l0_config(), "warmup_updates": True}),
+            "nonnegative integer",
+        ),
         (_optim_config({**_l0_config(), "warmup_updates": -1}), "nonnegative integer"),
         (_optim_config({**_l0_config(), "horizon_updates": 1000}), "requires null"),
         (
@@ -343,3 +350,68 @@ def test_hydra_configs_resolve_exact_prospective_e_schedule_bundles():
     assert a1_l1.training.udlm.conditioning_variant == "film_adaln"
     assert a1_l0.training.udlm.zero_init_conditioning is False
     assert a1_l1.training.udlm.zero_init_conditioning is False
+
+
+def test_production_film_gradient_contract_is_frozen_and_shape_exact():
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "experiments/udlm/protocols/film_gradient_contract_v1.json"
+    )
+    payload = path.read_bytes()
+    assert hashlib.sha256(payload).hexdigest() == (
+        "b2a666a23351eb0882a179f7ae5d09fafd2188fee924313cdf60ee94888e7ac5"
+    )
+    contract = json.loads(payload)
+    canonical = json.dumps(
+        contract,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    assert hashlib.sha256(canonical).hexdigest() == (
+        "ff45961276df75f445221fd1aa4629262d21fdb852bd9b226ad56fe2559315d5"
+    )
+    assert contract["optimizer_checks"] == [1, 2, 3]
+    assert contract["first_positive_lr_optimizer_step"] == 2
+    assert contract["timestep_mlp_required_optimizer_check"] == 3
+    film, timestep = contract["groups"]
+    assert film["group_id"] == "film_modulation"
+    assert [parameter["name"] for parameter in film["parameters"]] == [
+        f"backbone.bert.encoder.layer.{layer}.film_modulation.{suffix}"
+        for layer in range(12)
+        for suffix in ("weight", "bias")
+    ]
+    assert [parameter["shape"] for parameter in film["parameters"]] == [
+        shape for _layer in range(12) for shape in ([1536, 768], [1536])
+    ]
+    assert (
+        sum(math.prod(parameter["shape"]) for parameter in film["parameters"])
+        == 14_174_208
+    )
+    assert timestep == {
+        "group_id": "timestep_mlp",
+        "kind": "timestep_mlp",
+        "parameters": [
+            {
+                "name": "backbone.time_conditioner.mlp.0.weight",
+                "shape": [768, 256],
+            },
+            {
+                "name": "backbone.time_conditioner.mlp.0.bias",
+                "shape": [768],
+            },
+            {
+                "name": "backbone.time_conditioner.mlp.2.weight",
+                "shape": [768, 768],
+            },
+            {
+                "name": "backbone.time_conditioner.mlp.2.bias",
+                "shape": [768],
+            },
+        ],
+    }
+    assert (
+        sum(math.prod(parameter["shape"]) for parameter in timestep["parameters"])
+        == 787_968
+    )

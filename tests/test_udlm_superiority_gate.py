@@ -495,6 +495,8 @@ def _write_valid_training_evidence(
                 "weights": "ema",
             },
         },
+        "conditioning_gradient_audit": None,
+        "screen_initialization_state_audit": None,
     }
     if mutate_summary is not None:
         mutate_summary(summary)
@@ -517,6 +519,8 @@ def _write_valid_training_evidence(
         "final_checkpoint_path": str(checkpoint_path),
         "final_checkpoint_sha256": "4" * 64,
         "startup_mode": "warm_start",
+        "conditioning_gradient_audit": None,
+        "screen_initialization_state_audit": None,
     }
     receipt = {
         "schema_version": gate.PILOT_EXIT_STATUS_SCHEMA_VERSION,
@@ -1159,7 +1163,9 @@ def test_lock_rejects_final_seed_leak_and_non_ema_weights(protocol):
 
     candidate_lock = _candidate_lock()
     candidate_lock["training"]["launch_manifest"]["schema_version"] = 2
-    with pytest.raises(gate.GateValidationError, match="launch-manifest schema version"):
+    with pytest.raises(
+        gate.GateValidationError, match="launch-manifest schema version"
+    ):
         gate.validate_candidate_lock(candidate_lock, protocol)
 
     candidate_lock = _candidate_lock()
@@ -1614,9 +1620,10 @@ def test_training_summary_and_exit_receipt_are_joined_to_lock(
     assert evidence["ema_finite_and_checkpoint_bound"] is True
     assert evidence["successful_exit_receipt"] is True
     assert evidence["training_accounting"] == documents["training_accounting"]
-    assert evidence["launch_manifest_sha256"] == candidate_lock["training"][
-        "launch_manifest"
-    ]["sha256"]
+    assert (
+        evidence["launch_manifest_sha256"]
+        == candidate_lock["training"]["launch_manifest"]["sha256"]
+    )
     assert evidence["selected_gpu_uuids"] == ["GPU-synthetic-0001"]
     wrong_lock = copy.deepcopy(normalized)
     wrong_lock["parameter_counts"]["total_trainable"] += 1
@@ -1633,9 +1640,9 @@ def test_training_summary_and_exit_receipt_are_joined_to_lock(
     receipt = documents["receipt"]
     receipt["overall_status"] = "failed"
     receipt_bytes = _json_bytes(receipt)
-    receipt_path = tmp_path / candidate_lock["training"]["exit_receipt"][
-        "relative_path"
-    ]
+    receipt_path = (
+        tmp_path / candidate_lock["training"]["exit_receipt"]["relative_path"]
+    )
     receipt_path.write_bytes(receipt_bytes)
     normalized["receipt"]["sha256"] = hashlib.sha256(receipt_bytes).hexdigest()
     with pytest.raises(gate.GateValidationError, match="not completed"):

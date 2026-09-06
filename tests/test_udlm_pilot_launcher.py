@@ -379,7 +379,7 @@ def test_child_command_sanitizes_python_and_binds_source_argv_config(
     )
     assert environment["PYTHONHASHSEED"] == "7"
     assert environment["GENMOL_TRAIN_SUMMARY_PATH"] == str(summary_path)
-    assert environment["GENMOL_TRAIN_EXPECTED_SUMMARY_SCHEMA_VERSION"] == "3"
+    assert environment["GENMOL_TRAIN_EXPECTED_SUMMARY_SCHEMA_VERSION"] == "4"
     assert environment["GENMOL_TRAIN_EXPECTED_FINAL_CHECKPOINT_PATH"] == str(
         checkpoint_path
     )
@@ -460,9 +460,7 @@ def test_tmux_command_rejects_legacy_training_summary_schema(monkeypatch, tmp_pa
             training_summary_path=(
                 tmp_path / "output/udlm/pilot/training_summary.json"
             ),
-            exit_receipt_path=(
-                tmp_path / "output/udlm/pilot/pilot_exit_status.json"
-            ),
+            exit_receipt_path=(tmp_path / "output/udlm/pilot/pilot_exit_status.json"),
             expected_source_revision="a" * 40,
             expected_config_sha256="b" * 64,
             expected_argv_sha256="c" * 64,
@@ -767,9 +765,7 @@ def test_manifest_publication_and_log_reservation_are_exclusive(tmp_path):
         launcher.reserve_log_path(dangling)
 
 
-def test_training_job_lock_race_has_one_owner_and_exact_release(
-    monkeypatch, tmp_path
-):
+def test_training_job_lock_race_has_one_owner_and_exact_release(monkeypatch, tmp_path):
     monkeypatch.setattr(launcher, "REPOSITORY_ROOT", tmp_path)
     barrier = threading.Barrier(2)
     successes = []
@@ -789,8 +785,7 @@ def test_training_job_lock_race_has_one_owner_and_exact_release(
             failures.append(str(error))
 
     threads = [
-        threading.Thread(target=acquire, args=(f"racer_{index}",))
-        for index in range(2)
+        threading.Thread(target=acquire, args=(f"racer_{index}",)) for index in range(2)
     ]
     for thread in threads:
         thread.start()
@@ -802,9 +797,7 @@ def test_training_job_lock_race_has_one_owner_and_exact_release(
     assert "fail closed" in failures[0]
     lock_path, _record, digest = successes[0]
     with pytest.raises(RuntimeError, match="owned by another run"):
-        launcher.release_exact_training_job_lock(
-            lock_path, expected_sha256="0" * 64
-        )
+        launcher.release_exact_training_job_lock(lock_path, expected_sha256="0" * 64)
     assert lock_path.is_file()
     launcher.release_exact_training_job_lock(lock_path, expected_sha256=digest)
     assert not launcher.os.path.lexists(lock_path)
@@ -883,9 +876,7 @@ def _mock_main_cpu_preflight(monkeypatch, tmp_path, *, run_name):
     return repository_root
 
 
-def test_existing_or_stale_training_lock_fails_before_gpu_probe(
-    monkeypatch, tmp_path
-):
+def test_existing_or_stale_training_lock_fails_before_gpu_probe(monkeypatch, tmp_path):
     repository_root = _mock_main_cpu_preflight(
         monkeypatch, tmp_path, run_name="blocked"
     )
@@ -915,9 +906,10 @@ def test_pre_tmux_launch_failure_releases_only_acquired_lock(monkeypatch, tmp_pa
     def fail_before_handoff(**kwargs):
         lock_path = kwargs["lock_path"]
         assert lock_path.is_file()
-        assert launcher.hashlib.sha256(lock_path.read_bytes()).hexdigest() == kwargs[
-            "lock_sha256"
-        ]
+        assert (
+            launcher.hashlib.sha256(lock_path.read_bytes()).hexdigest()
+            == kwargs["lock_sha256"]
+        )
         raise RuntimeError("synthetic pre-tmux failure")
 
     monkeypatch.setattr(launcher, "_launch_locked_pilot", fail_before_handoff)
@@ -958,9 +950,7 @@ def test_ambiguous_tmux_handoff_retains_lock_fail_closed(monkeypatch, tmp_path):
         launcher.main()
 
     assert has_session_calls == 2
-    assert (
-        repository_root / "output/udlm/.single_training_job.lock"
-    ).is_file()
+    assert (repository_root / "output/udlm/.single_training_job.lock").is_file()
 
 
 def test_main_keeps_final_uuid_probe_adjacent_to_tmux_spawn(monkeypatch, tmp_path):
@@ -1044,12 +1034,12 @@ def test_main_keeps_final_uuid_probe_adjacent_to_tmux_spawn(monkeypatch, tmp_pat
                 repository_root / "output/udlm/ordering/checkpoints/1.ckpt"
             )
             assert manifest["training_summary_path"] == str(summary_path)
-            assert manifest["training_summary_schema_version"] == 3
+            assert manifest["training_summary_schema_version"] == 4
             receipt_path = (
                 repository_root / "output/udlm/ordering/pilot_exit_status.json"
             )
             assert manifest["pilot_exit_status_path"] == str(receipt_path)
-            assert manifest["pilot_exit_status_schema_version"] == 3
+            assert manifest["pilot_exit_status_schema_version"] == 4
             assert manifest["expected_final_checkpoint_path"] == str(checkpoint_path)
             assert manifest["completion_contract"] == {
                 "status_at_launch": "pending",

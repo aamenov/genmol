@@ -80,14 +80,18 @@ def test_post_initialization_reseed_is_launch_bound_and_explicit(monkeypatch):
         "applied_before_dataloader_and_trainer_construction": True,
     }
 
-    with pytest.raises(RuntimeError, match="checkpoint resume"):
+    with pytest.raises(RuntimeError, match="common verified MDLM warm-start"):
         train_entrypoint._reseed_training_rng_after_model_initialization(
             config, "resume"
+        )
+    with pytest.raises(RuntimeError, match="common verified MDLM warm-start"):
+        train_entrypoint._reseed_training_rng_after_model_initialization(
+            config, "scratch"
         )
     monkeypatch.setattr(train_entrypoint, "_PILOT_CONTRACT", None)
     with pytest.raises(RuntimeError, match="launch-bound pilot"):
         train_entrypoint._reseed_training_rng_after_model_initialization(
-            config, "scratch"
+            config, "warm_start"
         )
 
 
@@ -122,13 +126,111 @@ def test_post_initialization_reseed_rejects_seed_coercion_and_out_of_range(
         )
 
     config.seed = 17
-    monkeypatch.setattr(
-        train_entrypoint.L, "seed_everything", lambda _seed, workers: 0
-    )
+    monkeypatch.setattr(train_entrypoint.L, "seed_everything", lambda _seed, workers: 0)
     with pytest.raises(RuntimeError, match="did not apply the exact"):
         train_entrypoint._reseed_training_rng_after_model_initialization(
             config, "warm_start"
         )
+
+
+def test_backbone_state_identity_is_order_independent_and_value_exact():
+    state = [
+        ("z.weight", torch.tensor([[1.0, -0.0]], dtype=torch.float32)),
+        ("a.index", torch.tensor([1, 2], dtype=torch.int64)),
+    ]
+    identity = train_entrypoint._backbone_state_identity(state)
+
+    assert identity == train_entrypoint._backbone_state_identity(reversed(state))
+    assert identity["tensor_count"] == 2
+    changed = [
+        ("z.weight", torch.tensor([[1.0, 0.0]], dtype=torch.float32)),
+        state[1],
+    ]
+    assert (
+        train_entrypoint._backbone_state_identity(changed)["state_sha256"]
+        != identity["state_sha256"]
+    )
+    with pytest.raises(RuntimeError, match="duplicate tensor names"):
+        train_entrypoint._backbone_state_identity([state[0], state[0]])
+
+
+def test_screen_initialization_state_audit_separates_common_conditioning_state(
+    monkeypatch,
+):
+    class TinyBackbone(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.base_weight = torch.nn.Parameter(torch.tensor([1.0, 2.0]))
+            self.time_conditioner = torch.nn.Linear(2, 2)
+            self.block = torch.nn.Module()
+            self.block.film_modulation = torch.nn.Linear(2, 4)
+
+    config = OmegaConf.create(
+        {
+            "seed": 17,
+            "training": {
+                "init_from_mdlm_checkpoint_sha256": "c" * 64,
+                "udlm": {"conditioning_variant": "film_adaln"},
+            },
+        }
+    )
+    monkeypatch.setattr(
+        train_entrypoint,
+        "_PILOT_CONTRACT",
+        {
+            "GENMOL_TRAIN_EXPECTED_CONFIG_SHA256": "d" * 64,
+            "launch_manifest": {"optimization_screen": {"stage_id": "conditioning"}},
+        },
+    )
+    model = SimpleNamespace(backbone=TinyBackbone())
+    warm_start = {
+        "source_sha256": "c" * 64,
+        "expected_source_sha256": "c" * 64,
+        "byte_identity_verified_before_and_after_load": True,
+        "weights": "ema",
+    }
+
+    initial = train_entrypoint._screen_initialization_state_audit(
+        config, model, "warm_start", warm_start
+    )
+    assert set(initial) == {
+        "schema_version",
+        "phase",
+        "source_checkpoint_sha256",
+        "resolved_training_config_sha256",
+        "training_seed",
+        "conditioning_variant",
+        "common_backbone_tensor_count",
+        "common_backbone_state_sha256",
+        "full_initial_tensor_count",
+        "full_initial_state_sha256",
+    }
+    assert initial["common_backbone_tensor_count"] == 1
+    assert initial["full_initial_tensor_count"] == 5
+
+    with torch.no_grad():
+        model.backbone.time_conditioner.weight.add_(1.0)
+    conditioning_changed = train_entrypoint._screen_initialization_state_audit(
+        config, model, "warm_start", warm_start
+    )
+    assert (
+        conditioning_changed["common_backbone_state_sha256"]
+        == initial["common_backbone_state_sha256"]
+    )
+    assert (
+        conditioning_changed["full_initial_state_sha256"]
+        != initial["full_initial_state_sha256"]
+    )
+
+    with torch.no_grad():
+        model.backbone.base_weight.add_(1.0)
+    base_changed = train_entrypoint._screen_initialization_state_audit(
+        config, model, "warm_start", warm_start
+    )
+    assert (
+        base_changed["common_backbone_state_sha256"]
+        != initial["common_backbone_state_sha256"]
+    )
 
 
 def test_manual_training_preserves_absent_pilot_contract(monkeypatch):
@@ -584,6 +686,202 @@ def test_pilot_health_callback_rejects_nonfinite_or_zero_gradients():
         callback.on_before_optimizer_step(None, module, None)
 
 
+class _TinyFilmAuditModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.backbone = torch.nn.Module()
+        self.backbone.time_conditioner = torch.nn.Sequential(
+            torch.nn.Linear(2, 2),
+            torch.nn.SiLU(),
+            torch.nn.Linear(2, 2),
+        )
+        self.backbone.block = torch.nn.Module()
+        self.backbone.block.film_modulation = torch.nn.Linear(2, 4)
+
+
+def _film_audit_contract(model):
+    groups = []
+    for group_id, kind, predicate in (
+        (
+            "film_modulation",
+            "film",
+            lambda name: ".film_modulation." in name,
+        ),
+        (
+            "timestep_mlp",
+            "timestep_mlp",
+            lambda name: name.removeprefix("backbone.").startswith("time_conditioner."),
+        ),
+    ):
+        groups.append(
+            {
+                "group_id": group_id,
+                "kind": kind,
+                "parameters": [
+                    {"name": name, "shape": list(parameter.shape)}
+                    for name, parameter in model.named_parameters()
+                    if predicate(name)
+                ],
+            }
+        )
+    contract = {
+        "schema_version": 1,
+        "observation_point": (
+            "on_before_optimizer_step_global_rank_zero_after_gradient_accumulation"
+        ),
+        "optimizer_checks": [1, 2, 3],
+        "first_positive_lr_optimizer_step": 2,
+        "timestep_mlp_required_optimizer_check": 3,
+        "groups": groups,
+    }
+    return contract, train_entrypoint._canonical_json_sha256(contract)
+
+
+def _set_conditioning_gradients(model, *, timestep_nonzero):
+    for name, parameter in model.named_parameters():
+        if ".film_modulation." in name:
+            parameter.grad = torch.ones_like(parameter)
+        elif name.removeprefix("backbone.").startswith("time_conditioner."):
+            parameter.grad = (
+                torch.ones_like(parameter)
+                if timestep_nonzero
+                else torch.zeros_like(parameter)
+            )
+
+
+def test_film_gradient_audit_binds_topology_lr_transition_and_staged_gradients(
+    monkeypatch,
+):
+    model = _TinyFilmAuditModel()
+    contract, digest = _film_audit_contract(model)
+    monkeypatch.setattr(
+        train_entrypoint,
+        "_PILOT_CONTRACT",
+        {
+            "launch_manifest": {
+                "optimization_screen": {
+                    "conditioning_gradient_contract": contract,
+                    "conditioning_gradient_contract_sha256": digest,
+                }
+            }
+        },
+    )
+    config = OmegaConf.create(
+        {
+            "training": {
+                "pilot_fail_on_nonfinite_loss": True,
+                "reseed_after_model_initialization": True,
+                "udlm": {"conditioning_variant": "film_adaln"},
+            },
+            "trainer": {"detect_anomaly": True},
+        }
+    )
+    callbacks = train_entrypoint._pilot_callbacks(config)
+    assert [type(callback) for callback in callbacks] == [
+        train_entrypoint._PilotFiniteLossCallback,
+        train_entrypoint._FilmGradientActivationCallback,
+    ]
+    callback = callbacks[1]
+    for learning_rate, timestep_nonzero in (
+        (0.0, False),
+        (3e-6, False),
+        (6e-6, True),
+    ):
+        _set_conditioning_gradients(model, timestep_nonzero=timestep_nonzero)
+        callback.on_before_optimizer_step(
+            None,
+            model,
+            SimpleNamespace(param_groups=[{"lr": learning_rate}]),
+        )
+    report = callback.completion_report()
+    assert report == {
+        "schema_version": 1,
+        "status": "completed",
+        "observation_point": (
+            "on_before_optimizer_step_global_rank_zero_after_gradient_accumulation"
+        ),
+        "registered_contract_sha256": digest,
+        "first_positive_lr_optimizer_step": 2,
+        "timestep_mlp_required_optimizer_check": 3,
+        "optimizer_checks": callback.optimizer_checks,
+    }
+    assert [
+        check["learning_rate_before_step"] for check in report["optimizer_checks"]
+    ] == [0.0, 3e-6, 6e-6]
+    assert (
+        report["optimizer_checks"][0]["film_groups"][0][
+            "all_parameter_gradients_nonzero"
+        ]
+        is True
+    )
+    assert (
+        report["optimizer_checks"][0]["timestep_mlp_groups"][0][
+            "all_parameter_gradients_nonzero"
+        ]
+        is False
+    )
+    assert (
+        report["optimizer_checks"][2]["timestep_mlp_groups"][0][
+            "all_parameter_gradients_nonzero"
+        ]
+        is True
+    )
+
+
+def test_film_gradient_audit_rejects_a_dead_timestep_path_on_third_backward():
+    model = _TinyFilmAuditModel()
+    contract, digest = _film_audit_contract(model)
+    contract = train_entrypoint._validate_film_gradient_audit_contract(contract, digest)
+    callback = train_entrypoint._FilmGradientActivationCallback(contract)
+    for learning_rate in (0.0, 3e-6):
+        _set_conditioning_gradients(model, timestep_nonzero=False)
+        callback.on_before_optimizer_step(
+            None,
+            model,
+            SimpleNamespace(param_groups=[{"lr": learning_rate}]),
+        )
+    _set_conditioning_gradients(model, timestep_nonzero=False)
+    with pytest.raises(RuntimeError, match="third optimizer observation"):
+        callback.on_before_optimizer_step(
+            None,
+            model,
+            SimpleNamespace(param_groups=[{"lr": 6e-6}]),
+        )
+
+
+def test_film_gradient_audit_rejects_unregistered_topology_or_lr_schedule():
+    model = _TinyFilmAuditModel()
+    contract, digest = _film_audit_contract(model)
+    contract["groups"][0]["parameters"][0]["shape"] = [999]
+    altered_digest = train_entrypoint._canonical_json_sha256(contract)
+    callback = train_entrypoint._FilmGradientActivationCallback(
+        train_entrypoint._validate_film_gradient_audit_contract(
+            contract, altered_digest
+        )
+    )
+    _set_conditioning_gradients(model, timestep_nonzero=False)
+    with pytest.raises(RuntimeError, match="parameter manifest changed"):
+        callback.on_before_optimizer_step(
+            None,
+            model,
+            SimpleNamespace(param_groups=[{"lr": 0.0}]),
+        )
+
+    valid_contract, _valid_digest = _film_audit_contract(model)
+    callback = train_entrypoint._FilmGradientActivationCallback(valid_contract)
+    with pytest.raises(RuntimeError, match="expected zero LR"):
+        callback.on_before_optimizer_step(
+            None,
+            model,
+            SimpleNamespace(param_groups=[{"lr": 3e-6}]),
+        )
+
+    with pytest.raises(RuntimeError, match="registered SHA-256"):
+        train_entrypoint._validate_film_gradient_audit_contract(
+            valid_contract, "0" * 64
+        )
+
+
 def test_pilot_completion_summary_binds_and_verifies_every_artifact(
     tmp_path, monkeypatch
 ):
@@ -613,9 +911,10 @@ def test_pilot_completion_summary_binds_and_verifies_every_artifact(
     assert (
         summary["training_argv_sha256"] == contract["GENMOL_TRAIN_EXPECTED_ARGV_SHA256"]
     )
-    assert summary["launch_manifest"]["sha256"] == contract[
-        "GENMOL_TRAIN_EXPECTED_LAUNCH_MANIFEST_SHA256"
-    ]
+    assert (
+        summary["launch_manifest"]["sha256"]
+        == contract["GENMOL_TRAIN_EXPECTED_LAUNCH_MANIFEST_SHA256"]
+    )
     assert summary["launch_manifest"]["selected_gpu_uuids"] == [
         "GPU-test-a",
         "GPU-test-b",
@@ -661,6 +960,8 @@ def test_pilot_completion_summary_binds_and_verifies_every_artifact(
     }
     assert summary["training_health"]["loss_checks"] == 10
     assert summary["training_health"]["optimizer_step_checks"] == 10
+    assert summary["conditioning_gradient_audit"] is None
+    assert summary["screen_initialization_state_audit"] is None
     assert (
         summary["training_health"]["every_optimizer_step_had_a_nonzero_gradient"]
         is True
@@ -694,8 +995,8 @@ def test_pilot_completion_summary_binds_and_verifies_every_artifact(
 def test_pilot_training_accounting_rejects_type_or_config_mismatch(
     tmp_path, monkeypatch, mutation, message
 ):
-    config, _contract, _preflight, trainer, model, _warm_start = (
-        _completion_fixture(tmp_path, monkeypatch)
+    config, _contract, _preflight, trainer, model, _warm_start = _completion_fixture(
+        tmp_path, monkeypatch
     )
     if mutation == "boolean_seed":
         config.seed = True
@@ -744,8 +1045,8 @@ def test_pilot_parameter_accounting_separates_film_from_base_backbone():
 def test_pilot_training_accounting_rejects_trainable_parameters_outside_backbone(
     tmp_path, monkeypatch
 ):
-    config, _contract, _preflight, trainer, model, _warm_start = (
-        _completion_fixture(tmp_path, monkeypatch)
+    config, _contract, _preflight, trainer, model, _warm_start = _completion_fixture(
+        tmp_path, monkeypatch
     )
     outside_parameter = torch.nn.Parameter(torch.ones(1))
     original_named_parameters = model.named_parameters
@@ -885,8 +1186,8 @@ def test_pilot_completion_rejects_undecodable_checkpoint(tmp_path, monkeypatch):
 def test_pilot_checkpoint_audit_rejects_path_swap_during_deserialization(
     tmp_path, monkeypatch
 ):
-    _config, contract, _preflight, _trainer, model, _warm_start = (
-        _completion_fixture(tmp_path, monkeypatch)
+    _config, contract, _preflight, _trainer, model, _warm_start = _completion_fixture(
+        tmp_path, monkeypatch
     )
     checkpoint_path = contract["final_checkpoint_path"]
     displaced_path = tmp_path / "displaced.ckpt"

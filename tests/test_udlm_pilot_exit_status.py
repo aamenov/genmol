@@ -1,5 +1,6 @@
 import hashlib
 import json
+import math
 import shutil
 import subprocess
 import sys
@@ -126,6 +127,75 @@ def _finite_record(*, tensors=2, elements=4):
     }
 
 
+def _film_gradient_contract_and_audit():
+    contract = {
+        "schema_version": 1,
+        "observation_point": (
+            "on_before_optimizer_step_global_rank_zero_after_gradient_accumulation"
+        ),
+        "optimizer_checks": [1, 2, 3],
+        "first_positive_lr_optimizer_step": 2,
+        "timestep_mlp_required_optimizer_check": 3,
+        "groups": [
+            {
+                "group_id": "film_modulation",
+                "kind": "film",
+                "parameters": [
+                    {"name": "backbone.layer.film_modulation.weight", "shape": [4, 2]},
+                    {"name": "backbone.layer.film_modulation.bias", "shape": [4]},
+                ],
+            },
+            {
+                "group_id": "timestep_mlp",
+                "kind": "timestep_mlp",
+                "parameters": [
+                    {"name": "backbone.time_conditioner.0.weight", "shape": [2, 2]},
+                    {"name": "backbone.time_conditioner.0.bias", "shape": [2]},
+                    {"name": "backbone.time_conditioner.2.weight", "shape": [2, 2]},
+                    {"name": "backbone.time_conditioner.2.bias", "shape": [2]},
+                ],
+            },
+        ],
+    }
+    digest = _canonical_sha256(contract)
+    group_reports = {}
+    for group in contract["groups"]:
+        group_reports[group["group_id"]] = {
+            "group_id": group["group_id"],
+            "ordered_parameter_manifest_sha256": _canonical_sha256(group["parameters"]),
+            "parameter_count": len(group["parameters"]),
+            "gradient_element_count": sum(
+                math.prod(parameter["shape"]) for parameter in group["parameters"]
+            ),
+            "all_gradients_present": True,
+            "all_gradients_finite": True,
+            "all_parameter_gradients_nonzero": True,
+        }
+    checks = []
+    for index, learning_rate in enumerate((0.0, 3e-6, 6e-6), start=1):
+        timestep_report = dict(group_reports["timestep_mlp"])
+        timestep_report["all_parameter_gradients_nonzero"] = index == 3
+        checks.append(
+            {
+                "optimizer_gradient_observation_index": index,
+                "optimizer_step_index": index,
+                "learning_rate_before_step": learning_rate,
+                "film_groups": [dict(group_reports["film_modulation"])],
+                "timestep_mlp_groups": [timestep_report],
+            }
+        )
+    audit = {
+        "schema_version": 1,
+        "status": "completed",
+        "observation_point": contract["observation_point"],
+        "registered_contract_sha256": digest,
+        "first_positive_lr_optimizer_step": 2,
+        "timestep_mlp_required_optimizer_check": 3,
+        "optimizer_checks": checks,
+    }
+    return contract, digest, audit
+
+
 def _write_training_job_lock(paths):
     paths["lock"].parent.mkdir(parents=True, exist_ok=True)
     if not paths["lock"].exists():
@@ -239,6 +309,8 @@ def _valid_summary(paths, revision):
             "gradient_tensor_observations": 10,
             "gradient_element_observations": 20,
         },
+        "conditioning_gradient_audit": None,
+        "screen_initialization_state_audit": None,
         "final_checkpoint": {
             **_snapshot(paths["checkpoint"]),
             "semantic_audit": {
@@ -351,22 +423,26 @@ def test_successful_pipeline_writes_launch_bound_receipt(receipt_repository):
 
     assert result.returncode == 0, result.stderr
     receipt = json.loads(paths["receipt"].read_text(encoding="utf-8"))
-    assert receipt["schema_version"] == receipt_writer.EXIT_STATUS_SCHEMA_VERSION == 3
+    assert receipt["schema_version"] == receipt_writer.EXIT_STATUS_SCHEMA_VERSION == 4
     assert receipt["status"] == "completed"
     assert receipt["process_exit_status"] == 0
     assert receipt["pipeline"]["training"]["shell_exit_status"] == 0
     assert receipt["pipeline"]["tee"]["shell_exit_status"] == 0
     assert receipt["training_summary"]["valid_and_launch_bound"] is True
     assert receipt["training_summary"]["artifact"]["sha256"] == summary_sha256
-    assert receipt["training_summary"]["validated_bindings"][
-        "training_accounting"
-    ] == expected_accounting
+    assert (
+        receipt["training_summary"]["validated_bindings"]["training_accounting"]
+        == expected_accounting
+    )
     assert receipt["runtime_config"]["matches_training_summary_snapshot"] is True
     assert receipt["launch_manifest"]["valid_and_launch_bound"] is True
     assert receipt["launch_manifest"]["matches_runtime_config_snapshot"] is True
-    assert receipt["training_job_lock"][
-        "valid_and_launch_bound_before_receipt_publication"
-    ] is True
+    assert (
+        receipt["training_job_lock"][
+            "valid_and_launch_bound_before_receipt_publication"
+        ]
+        is True
+    )
     assert receipt["training_job_lock"]["artifact"]["sha256"] == EXPECTED_LOCK_SHA256
     assert receipt["final_checkpoint"]["matches_training_summary_snapshot"] is True
     assert receipt["source_at_receipt"]["verified"] is True
@@ -435,12 +511,16 @@ def test_wrong_or_replaced_training_job_lock_is_never_unlinked(
     assert paths["lock"].read_bytes() == wrong_bytes
     receipt = json.loads(paths["receipt"].read_text(encoding="utf-8"))
     assert receipt["status"] == "failed"
-    assert receipt["training_job_lock"][
-        "valid_and_launch_bound_before_receipt_publication"
-    ] is False
-    assert "training-job lock raw SHA-256" in receipt["training_job_lock"][
-        "validation_error"
-    ]
+    assert (
+        receipt["training_job_lock"][
+            "valid_and_launch_bound_before_receipt_publication"
+        ]
+        is False
+    )
+    assert (
+        "training-job lock raw SHA-256"
+        in receipt["training_job_lock"]["validation_error"]
+    )
 
 
 def test_training_job_lock_replaced_after_receipt_publication_is_not_unlinked(
@@ -611,7 +691,7 @@ def test_required_health_semantic_runtime_and_startup_evidence_cannot_be_forged(
             False,
             "completion fail-on-nonfinite-loss flag",
         ),
-        (("training_health",), None, "training health evidence"),
+        (("training_health",), None, "training summary keys are invalid"),
         (
             ("training_health", "all_losses_finite"),
             False,
@@ -622,7 +702,7 @@ def test_required_health_semantic_runtime_and_startup_evidence_cannot_be_forged(
             0,
             "gradient tensor observation count",
         ),
-        (("training_accounting",), None, "training accounting"),
+        (("training_accounting",), None, "training summary keys are invalid"),
         (
             ("training_accounting", "optimizer_updates"),
             True,
@@ -695,7 +775,7 @@ def test_required_health_semantic_runtime_and_startup_evidence_cannot_be_forged(
             None,
             "runtime config canonical record digest",
         ),
-        (("startup",), None, "startup evidence"),
+        (("startup",), None, "training summary keys are invalid"),
         (
             (
                 "startup",
@@ -892,12 +972,14 @@ def test_launch_manifest_change_during_final_receipt_reread_fails_closed(
     assert status == receipt_writer.INCOMPLETE_EXIT_STATUS
     assert manifest_reads == 2
     assert receipt["launch_manifest"]["valid_and_launch_bound"] is False
-    assert "changed during receipt validation" in receipt["launch_manifest"][
-        "validation_error"
-    ]
-    assert "changed during receipt validation" in receipt["training_summary"][
-        "validation_error"
-    ]
+    assert (
+        "changed during receipt validation"
+        in receipt["launch_manifest"]["validation_error"]
+    )
+    assert (
+        "changed during receipt validation"
+        in receipt["training_summary"]["validation_error"]
+    )
 
 
 def test_runtime_record_must_semantically_match_the_launch(receipt_repository):
@@ -958,10 +1040,104 @@ def test_training_accounting_must_match_resolved_runtime_config(
             expected_max_steps=10,
             expected_world_size=1,
             expected_final_checkpoint_path=paths["checkpoint"],
-            expected_initialization_checkpoint_sha256=(
-                EXPECTED_WARM_START_SHA256
-            ),
+            expected_initialization_checkpoint_sha256=(EXPECTED_WARM_START_SHA256),
             resolved_training_config=mismatched_config,
+            launch_manifest=json.loads(paths["manifest"].read_text(encoding="utf-8")),
+        )
+
+
+def test_receipt_v4_validates_and_echoes_film_gradient_certificate(
+    receipt_repository,
+):
+    repository, revision = receipt_repository
+    paths = _paths(repository)
+    summary = _valid_summary(paths, revision)
+    contract, contract_sha256, audit = _film_gradient_contract_and_audit()
+    launch_manifest = json.loads(paths["manifest"].read_text(encoding="utf-8"))
+    launch_manifest["optimization_screen"] = {
+        "conditioning_gradient_contract": contract,
+        "conditioning_gradient_contract_sha256": contract_sha256,
+    }
+    resolved_config = json.loads(json.dumps(RESOLVED_TRAINING_CONFIG))
+    resolved_config["training"].update(
+        {
+            "reseed_after_model_initialization": True,
+            "udlm": {"conditioning_variant": "film_adaln"},
+        }
+    )
+    summary["training_accounting"]["trainable_parameter_counts"] = {
+        "base_backbone": 3,
+        "time_conditioner": 12,
+        "film_modulation": 12,
+        "total": 27,
+    }
+    summary["startup"]["training_rng_policy"] = {
+        "policy": "reseed_all_training_rng_streams_after_model_and_warm_start",
+        "seed": 7,
+        "purpose": "isolate_training_randomness_from_architecture_constructor_draws",
+        "applied_before_dataloader_and_trainer_construction": True,
+    }
+    summary["conditioning_gradient_audit"] = audit
+    state_audit = {
+        "schema_version": 1,
+        "phase": (
+            "after_verified_mdlm_ema_warm_start_before_training_rng_reseed_and_optimizer_creation"
+        ),
+        "source_checkpoint_sha256": EXPECTED_WARM_START_SHA256,
+        "resolved_training_config_sha256": EXPECTED_CONFIG_SHA256,
+        "training_seed": 7,
+        "conditioning_variant": "film_adaln",
+        "common_backbone_tensor_count": 100,
+        "common_backbone_state_sha256": "8" * 64,
+        "full_initial_tensor_count": 128,
+        "full_initial_state_sha256": "9" * 64,
+    }
+    summary["screen_initialization_state_audit"] = state_audit
+
+    bindings = receipt_writer.validate_training_summary(
+        summary,
+        summary_path=paths["summary"],
+        expected_schema_version=receipt_writer.TRAINING_SUMMARY_SCHEMA_VERSION,
+        expected_source_revision=revision,
+        expected_config_sha256=EXPECTED_CONFIG_SHA256,
+        expected_argv_sha256=EXPECTED_ARGV_SHA256,
+        expected_launch_manifest_path=paths["manifest"],
+        expected_launch_manifest_sha256=hashlib.sha256(
+            paths["manifest"].read_bytes()
+        ).hexdigest(),
+        expected_selected_gpu_uuids=EXPECTED_SELECTED_GPU_UUIDS,
+        expected_max_steps=10,
+        expected_world_size=1,
+        expected_final_checkpoint_path=paths["checkpoint"],
+        expected_initialization_checkpoint_sha256=EXPECTED_WARM_START_SHA256,
+        resolved_training_config=resolved_config,
+        launch_manifest=launch_manifest,
+    )
+    assert bindings["conditioning_gradient_audit"] == audit
+    assert bindings["screen_initialization_state_audit"] == state_audit
+
+    summary["conditioning_gradient_audit"]["optimizer_checks"][2][
+        "timestep_mlp_groups"
+    ][0]["all_parameter_gradients_nonzero"] = False
+    with pytest.raises(ValueError, match="required conditioning gradients are zero"):
+        receipt_writer.validate_training_summary(
+            summary,
+            summary_path=paths["summary"],
+            expected_schema_version=receipt_writer.TRAINING_SUMMARY_SCHEMA_VERSION,
+            expected_source_revision=revision,
+            expected_config_sha256=EXPECTED_CONFIG_SHA256,
+            expected_argv_sha256=EXPECTED_ARGV_SHA256,
+            expected_launch_manifest_path=paths["manifest"],
+            expected_launch_manifest_sha256=hashlib.sha256(
+                paths["manifest"].read_bytes()
+            ).hexdigest(),
+            expected_selected_gpu_uuids=EXPECTED_SELECTED_GPU_UUIDS,
+            expected_max_steps=10,
+            expected_world_size=1,
+            expected_final_checkpoint_path=paths["checkpoint"],
+            expected_initialization_checkpoint_sha256=(EXPECTED_WARM_START_SHA256),
+            resolved_training_config=resolved_config,
+            launch_manifest=launch_manifest,
         )
 
 
@@ -972,7 +1148,7 @@ def test_receipt_writer_rejects_legacy_training_summary_schema(receipt_repositor
     summary["schema_version"] = 1
 
     with pytest.raises(
-        ValueError, match="unsupported training summary schema version 1; expected 3"
+        ValueError, match="unsupported training summary schema version 1; expected 4"
     ):
         receipt_writer.validate_training_summary(
             summary,
@@ -989,10 +1165,9 @@ def test_receipt_writer_rejects_legacy_training_summary_schema(receipt_repositor
             expected_max_steps=10,
             expected_world_size=1,
             expected_final_checkpoint_path=paths["checkpoint"],
-            expected_initialization_checkpoint_sha256=(
-                EXPECTED_WARM_START_SHA256
-            ),
+            expected_initialization_checkpoint_sha256=(EXPECTED_WARM_START_SHA256),
             resolved_training_config=RESOLVED_TRAINING_CONFIG,
+            launch_manifest=json.loads(paths["manifest"].read_text(encoding="utf-8")),
         )
 
 

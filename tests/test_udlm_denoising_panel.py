@@ -577,6 +577,10 @@ def test_checkpoint_metadata_records_exact_bytes_and_udlm_identity(tmp_path: Pat
     assert metadata["epoch"] == 2
     assert metadata["diffusion_type"] == "udlm"
     assert len(metadata["config_sha256"]) == 64
+    assert evaluator.SCHEMA_VERSION == 4
+    assert metadata["udlm_conditioning_metadata_declared"] is False
+    assert metadata["udlm_conditioning_metadata"] is None
+    assert metadata["udlm_conditioning_metadata_sha256"] is None
     assert metadata["training_initialization_declaration"] == {
         "init_from_mdlm_checkpoint": "source.ckpt",
         "init_from_mdlm_ema": False,
@@ -584,6 +588,22 @@ def test_checkpoint_metadata_records_exact_bytes_and_udlm_identity(tmp_path: Pat
             "qualification"
         ],
     }
+
+
+def test_conditioning_attestation_keeps_legacy_mdlm_absence_explicit():
+    class LegacyMDLM:
+        diffusion_type = "mdlm"
+        udlm_conditioning_metadata = None
+
+    identity = evaluator._validate_conditioning_identity(LegacyMDLM(), {})
+
+    assert identity["runtime_conditioning_variant"] is None
+    assert identity["applicability"] == "not_applicable_to_mdlm"
+    assert identity["checkpoint_metadata_required"] is False
+    assert identity["checkpoint_metadata_present"] is False
+    assert identity["checkpoint_metadata_validation"] == "correctly_absent_for_mdlm"
+    assert identity["runtime_metadata"] is None
+    assert identity["checkpoint_metadata"] is None
 
 
 def test_json_loader_parses_the_same_bytes_it_hashes(tmp_path: Path, monkeypatch):
@@ -739,9 +759,21 @@ class _TinyTokenizer:
     pad_token_id = 3
 
 
-def _tiny_real_udlm_config(prior_variant):
+def _tiny_real_udlm_config(prior_variant, *, conditioning_variant=None):
     from omegaconf import OmegaConf
 
+    udlm_config = {
+        "exclude_special_tokens": True,
+        "prior_variant": prior_variant,
+        "empirical_uniform_mix": 0.01,
+        "noise_eps": 0.1,
+        "time_embedding_size": 8,
+        "zero_init_conditioning": True,
+    }
+    if conditioning_variant is not None:
+        udlm_config["conditioning_variant"] = conditioning_variant
+        if conditioning_variant == evaluator.FILM_ADALN_CONDITIONING:
+            udlm_config["zero_init_conditioning"] = False
     return OmegaConf.create(
         {
             "model": {
@@ -769,14 +801,7 @@ def _tiny_real_udlm_config(prior_variant):
                 "ema": 0.0,
                 "antithetic_sampling": True,
                 "sampling_eps": 1e-3,
-                "udlm": {
-                    "exclude_special_tokens": True,
-                    "prior_variant": prior_variant,
-                    "empirical_uniform_mix": 0.01,
-                    "noise_eps": 0.1,
-                    "time_embedding_size": 8,
-                    "zero_init_conditioning": True,
-                },
+                "udlm": udlm_config,
             },
         }
     )
@@ -823,6 +848,24 @@ def test_tiny_real_categorical_checkpoint_cpu_smoke_and_metadata_attacks(
         weight_provenance["udlm_process_identity"]["checkpoint_prior_metadata_required"]
         is True
     )
+    conditioning = weight_provenance["udlm_conditioning_identity"]
+    assert conditioning["runtime_conditioning_variant"] == "additive"
+    assert conditioning["checkpoint_metadata_required"] is False
+    assert conditioning["checkpoint_metadata_present"] is False
+    assert conditioning["checkpoint_metadata_validation"] == (
+        "correctly_absent_for_additive"
+    )
+    assert conditioning["runtime_metadata"] is None
+    assert conditioning["runtime_metadata_canonical_sha256"] is None
+    assert conditioning["checkpoint_metadata"] is None
+    assert conditioning["checkpoint_metadata_canonical_sha256"] is None
+    assert conditioning["validation"] == {
+        "before_strict_state_load": True,
+        "strict_state_load": True,
+        "after_strict_state_load": True,
+        "runtime_identity_unchanged": True,
+        "contract": conditioning["validation"]["contract"],
+    }
 
     panel, frequencies = _model_compatible_toy_artifacts(model_module)
     result = evaluate_denoising_panel(
@@ -899,6 +942,106 @@ def test_tiny_real_categorical_checkpoint_cpu_smoke_and_metadata_attacks(
     }
     with pytest.raises(ValueError, match="release_uniform checkpoint"):
         load_checkpoint_model(release_checkpoint, "raw")
+
+
+def test_film_conditioning_provenance_is_exact_and_fail_closed(
+    tmp_path: Path, monkeypatch
+):
+    from genmol import model as model_module
+
+    monkeypatch.setattr(model_module, "get_tokenizer", lambda: _TinyTokenizer())
+    config = _tiny_real_udlm_config(
+        "schedule_uniform",
+        conditioning_variant=evaluator.FILM_ADALN_CONDITIONING,
+    )
+    source_model = model_module.GenMol(config)
+    conditioning_record = source_model.udlm_conditioning_metadata.to_dict()
+    checkpoint = {
+        "global_step": 1,
+        "epoch": 0,
+        "hyper_parameters": {"config": config},
+        "state_dict": {
+            key: value.detach().clone()
+            for key, value in source_model.state_dict().items()
+        },
+        evaluator.UDLM_PRIOR_CHECKPOINT_KEY: (
+            source_model.udlm_prior_metadata.to_dict()
+        ),
+        evaluator.UDLM_CONDITIONING_CHECKPOINT_KEY: copy.deepcopy(conditioning_record),
+    }
+    checkpoint_path = tmp_path / "tiny-film.ckpt"
+    torch.save(checkpoint, checkpoint_path)
+
+    checkpoint_info = checkpoint_metadata(checkpoint_path)
+    expected_sha256 = evaluator._canonical_sha256(conditioning_record)
+    assert checkpoint_info["udlm_conditioning_metadata_declared"] is True
+    assert checkpoint_info["udlm_conditioning_metadata"] == conditioning_record
+    assert checkpoint_info["udlm_conditioning_metadata_sha256"] == expected_sha256
+
+    loaded_checkpoint, _snapshot = load_verified_checkpoint(checkpoint_path)
+    _loaded_model, provenance = load_checkpoint_model(loaded_checkpoint, "raw")
+    identity = provenance["udlm_conditioning_identity"]
+    assert identity["runtime_conditioning_variant"] == "film_adaln"
+    assert identity["checkpoint_metadata_required"] is True
+    assert identity["checkpoint_metadata_present"] is True
+    assert identity["checkpoint_metadata_validation"] == (
+        "required_record_matches_runtime_exactly"
+    )
+    assert identity["runtime_metadata"] == conditioning_record
+    assert identity["checkpoint_metadata"] == conditioning_record
+    assert identity["runtime_metadata_canonical_sha256"] == expected_sha256
+    assert identity["checkpoint_metadata_canonical_sha256"] == expected_sha256
+    assert identity["validation"]["before_strict_state_load"] is True
+    assert identity["validation"]["strict_state_load"] is True
+    assert identity["validation"]["after_strict_state_load"] is True
+    assert identity["validation"]["runtime_identity_unchanged"] is True
+
+    attacks = []
+    missing = copy.deepcopy(checkpoint)
+    missing.pop(evaluator.UDLM_CONDITIONING_CHECKPOINT_KEY)
+    attacks.append(missing)
+    null = copy.deepcopy(checkpoint)
+    null[evaluator.UDLM_CONDITIONING_CHECKPOINT_KEY] = None
+    attacks.append(null)
+    malformed = copy.deepcopy(checkpoint)
+    malformed[evaluator.UDLM_CONDITIONING_CHECKPOINT_KEY] = []
+    attacks.append(malformed)
+    unexpected = copy.deepcopy(checkpoint)
+    unexpected[evaluator.UDLM_CONDITIONING_CHECKPOINT_KEY]["unexpected"] = True
+    attacks.append(unexpected)
+    coerced_schema = copy.deepcopy(checkpoint)
+    coerced_schema[evaluator.UDLM_CONDITIONING_CHECKPOINT_KEY]["schema_version"] = True
+    attacks.append(coerced_schema)
+    coerced_layer_count = copy.deepcopy(checkpoint)
+    coerced_layer_count[evaluator.UDLM_CONDITIONING_CHECKPOINT_KEY]["layer_count"] = (
+        float(conditioning_record["layer_count"])
+    )
+    attacks.append(coerced_layer_count)
+    coerced_shape = copy.deepcopy(checkpoint)
+    coerced_shape[evaluator.UDLM_CONDITIONING_CHECKPOINT_KEY][
+        "conditioning_parameter_manifest"
+    ][0]["shape"][0] = float(
+        conditioning_record["conditioning_parameter_manifest"][0]["shape"][0]
+    )
+    attacks.append(coerced_shape)
+    for tampered in attacks:
+        with pytest.raises(ValueError, match="conditioning"):
+            load_checkpoint_model(tampered, "raw")
+
+    additive_config = _tiny_real_udlm_config("release_uniform")
+    additive_model = model_module.GenMol(additive_config)
+    additive_checkpoint = {
+        "hyper_parameters": {"config": additive_config},
+        "state_dict": {
+            key: value.detach().clone()
+            for key, value in additive_model.state_dict().items()
+        },
+    }
+    for unexpected_record in (None, {}, conditioning_record):
+        tampered = copy.deepcopy(additive_checkpoint)
+        tampered[evaluator.UDLM_CONDITIONING_CHECKPOINT_KEY] = unexpected_record
+        with pytest.raises(ValueError, match="conditioning|FiLM"):
+            load_checkpoint_model(tampered, "raw")
 
 
 class _TinyBackboneHolder(nn.Module):

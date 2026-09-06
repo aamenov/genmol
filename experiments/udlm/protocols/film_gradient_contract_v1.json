@@ -1,0 +1,133 @@
+{
+  "first_positive_lr_optimizer_step": 2,
+  "groups": [
+    {
+      "group_id": "film_modulation",
+      "kind": "film",
+      "parameters": [
+        {
+          "name": "backbone.bert.encoder.layer.0.film_modulation.weight",
+          "shape": [1536, 768]
+        },
+        {
+          "name": "backbone.bert.encoder.layer.0.film_modulation.bias",
+          "shape": [1536]
+        },
+        {
+          "name": "backbone.bert.encoder.layer.1.film_modulation.weight",
+          "shape": [1536, 768]
+        },
+        {
+          "name": "backbone.bert.encoder.layer.1.film_modulation.bias",
+          "shape": [1536]
+        },
+        {
+          "name": "backbone.bert.encoder.layer.2.film_modulation.weight",
+          "shape": [1536, 768]
+        },
+        {
+          "name": "backbone.bert.encoder.layer.2.film_modulation.bias",
+          "shape": [1536]
+        },
+        {
+          "name": "backbone.bert.encoder.layer.3.film_modulation.weight",
+          "shape": [1536, 768]
+        },
+        {
+          "name": "backbone.bert.encoder.layer.3.film_modulation.bias",
+          "shape": [1536]
+        },
+        {
+          "name": "backbone.bert.encoder.layer.4.film_modulation.weight",
+          "shape": [1536, 768]
+        },
+        {
+          "name": "backbone.bert.encoder.layer.4.film_modulation.bias",
+          "shape": [1536]
+        },
+        {
+          "name": "backbone.bert.encoder.layer.5.film_modulation.weight",
+          "shape": [1536, 768]
+        },
+        {
+          "name": "backbone.bert.encoder.layer.5.film_modulation.bias",
+          "shape": [1536]
+        },
+        {
+          "name": "backbone.bert.encoder.layer.6.film_modulation.weight",
+          "shape": [1536, 768]
+        },
+        {
+          "name": "backbone.bert.encoder.layer.6.film_modulation.bias",
+          "shape": [1536]
+        },
+        {
+          "name": "backbone.bert.encoder.layer.7.film_modulation.weight",
+          "shape": [1536, 768]
+        },
+        {
+          "name": "backbone.bert.encoder.layer.7.film_modulation.bias",
+          "shape": [1536]
+        },
+        {
+          "name": "backbone.bert.encoder.layer.8.film_modulation.weight",
+          "shape": [1536, 768]
+        },
+        {
+          "name": "backbone.bert.encoder.layer.8.film_modulation.bias",
+          "shape": [1536]
+        },
+        {
+          "name": "backbone.bert.encoder.layer.9.film_modulation.weight",
+          "shape": [1536, 768]
+        },
+        {
+          "name": "backbone.bert.encoder.layer.9.film_modulation.bias",
+          "shape": [1536]
+        },
+        {
+          "name": "backbone.bert.encoder.layer.10.film_modulation.weight",
+          "shape": [1536, 768]
+        },
+        {
+          "name": "backbone.bert.encoder.layer.10.film_modulation.bias",
+          "shape": [1536]
+        },
+        {
+          "name": "backbone.bert.encoder.layer.11.film_modulation.weight",
+          "shape": [1536, 768]
+        },
+        {
+          "name": "backbone.bert.encoder.layer.11.film_modulation.bias",
+          "shape": [1536]
+        }
+      ]
+    },
+    {
+      "group_id": "timestep_mlp",
+      "kind": "timestep_mlp",
+      "parameters": [
+        {
+          "name": "backbone.time_conditioner.mlp.0.weight",
+          "shape": [768, 256]
+        },
+        {
+          "name": "backbone.time_conditioner.mlp.0.bias",
+          "shape": [768]
+        },
+        {
+          "name": "backbone.time_conditioner.mlp.2.weight",
+          "shape": [768, 768]
+        },
+        {
+          "name": "backbone.time_conditioner.mlp.2.bias",
+          "shape": [768]
+        }
+      ]
+    }
+  ],
+  "observation_point": "on_before_optimizer_step_global_rank_zero_after_gradient_accumulation",
+  "optimizer_checks": [1, 2, 3],
+  "schema_version": 1,
+  "timestep_mlp_required_optimizer_check": 3
+}

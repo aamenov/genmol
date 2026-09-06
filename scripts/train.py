@@ -20,6 +20,7 @@ import math
 import os
 import re
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -44,7 +45,7 @@ _PILOT_ENVIRONMENT_KEYS = {
     "GENMOL_TRAIN_SELECTED_GPU_UUIDS_JSON",
 }
 _RUNTIME_CONFIG_SCHEMA_VERSION = 2
-_TRAINING_SUMMARY_SCHEMA_VERSION = 3
+_TRAINING_SUMMARY_SCHEMA_VERSION = 4
 _MAX_TRAINING_SEED = 2**32 - 1
 _HOSTED_STREAM_RANK_PARTITION_POLICY = (
     "huggingface_split_dataset_by_node_disjoint_rank_streams"
@@ -231,9 +232,10 @@ def _pilot_environment_contract():
         raise RuntimeError(
             "pilot launch manifest must be launch_manifest.json beside the summary"
         )
-    if len(
-        {runtime_path, summary_path, final_checkpoint_path, launch_manifest_path}
-    ) != 4:
+    if (
+        len({runtime_path, summary_path, final_checkpoint_path, launch_manifest_path})
+        != 4
+    ):
         raise RuntimeError("pilot completion artifact paths must be distinct")
     integer_fields = {
         "summary_schema_version": (
@@ -282,15 +284,14 @@ def _pilot_environment_contract():
         or not sys.dont_write_bytecode
     ):
         raise RuntimeError("pilot child Python flags disagree with its environment")
-    if _canonical_json_sha256(_pilot_base_argv()) != present[
-        "GENMOL_TRAIN_EXPECTED_ARGV_SHA256"
-    ]:
+    if (
+        _canonical_json_sha256(_pilot_base_argv())
+        != present["GENMOL_TRAIN_EXPECTED_ARGV_SHA256"]
+    ):
         raise RuntimeError("pilot child argv disagrees with the launch manifest")
     launch_manifest_snapshot, launch_manifest = _validate_launch_manifest(
         launch_manifest_path,
-        expected_sha256=present[
-            "GENMOL_TRAIN_EXPECTED_LAUNCH_MANIFEST_SHA256"
-        ],
+        expected_sha256=present["GENMOL_TRAIN_EXPECTED_LAUNCH_MANIFEST_SHA256"],
         expected_selected_gpu_uuids=selected_gpu_uuids,
     )
     return {
@@ -369,10 +370,9 @@ def _stable_file_snapshot(path, *, capture_bytes=False):
     digest = hashlib.sha256()
     try:
         before_descriptor = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(before_descriptor.st_mode)
-            or _stat_identity(before_descriptor) != _stat_identity(before_path)
-        ):
+        if not stat.S_ISREG(before_descriptor.st_mode) or _stat_identity(
+            before_descriptor
+        ) != _stat_identity(before_path):
             raise RuntimeError(f"pilot artifact changed before open: {path}")
         while True:
             chunk = os.read(descriptor, 8 * 1024 * 1024)
@@ -434,9 +434,7 @@ def _launch_manifest_evidence():
     _validate_selected_gpu_exposure(_PILOT_CONTRACT["selected_gpu_uuids"])
     snapshot, _manifest = _validate_launch_manifest(
         _PILOT_CONTRACT["launch_manifest_path"],
-        expected_sha256=_PILOT_CONTRACT[
-            "GENMOL_TRAIN_EXPECTED_LAUNCH_MANIFEST_SHA256"
-        ],
+        expected_sha256=_PILOT_CONTRACT["GENMOL_TRAIN_EXPECTED_LAUNCH_MANIFEST_SHA256"],
         expected_selected_gpu_uuids=_PILOT_CONTRACT["selected_gpu_uuids"],
     )
     if snapshot != _PILOT_CONTRACT["launch_manifest_snapshot"]:
@@ -492,7 +490,7 @@ if _PILOT_CONTRACT is not None:
         _PILOT_CONTRACT["GENMOL_TRAIN_EXPECTED_SOURCE_REVISION"]
     )
 
-os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import hydra
 import lightning as L
@@ -503,10 +501,10 @@ from genmol.model import GenMol
 from genmol.utils.checkpoint_io import verified_checkpoint_file
 from genmol.utils.utils_data import get_dataloader, get_last_checkpoint
 
-omegaconf.OmegaConf.register_new_resolver('cwd', os.getcwd)
-omegaconf.OmegaConf.register_new_resolver('device_count', torch.cuda.device_count)
-omegaconf.OmegaConf.register_new_resolver('eval', eval)
-omegaconf.OmegaConf.register_new_resolver('div_up', lambda x, y: (x + y - 1) // y)
+omegaconf.OmegaConf.register_new_resolver("cwd", os.getcwd)
+omegaconf.OmegaConf.register_new_resolver("device_count", torch.cuda.device_count)
+omegaconf.OmegaConf.register_new_resolver("eval", eval)
+omegaconf.OmegaConf.register_new_resolver("div_up", lambda x, y: (x + y - 1) // y)
 
 
 class _PilotFiniteLossCallback(L.Callback):
@@ -582,16 +580,422 @@ class _PilotFiniteLossCallback(L.Callback):
         }
 
 
+_FILM_GRADIENT_AUDIT_SCHEMA_VERSION = 1
+_FILM_GRADIENT_AUDIT_OBSERVATION_POINT = (
+    "on_before_optimizer_step_global_rank_zero_after_gradient_accumulation"
+)
+_FILM_GRADIENT_AUDIT_CHECKS = (1, 2, 3)
+_FILM_GRADIENT_FIRST_POSITIVE_LR_STEP = 2
+_TIMESTEP_MLP_REQUIRED_OPTIMIZER_CHECK = 3
+_SCREEN_INITIALIZATION_STATE_AUDIT_SCHEMA_VERSION = 1
+_SCREEN_INITIALIZATION_STATE_AUDIT_PHASE = "after_verified_mdlm_ema_warm_start_before_training_rng_reseed_and_optimizer_creation"
+_BACKBONE_STATE_HASH_DOMAIN = b"genmol-backbone-state-v1\0"
+
+
+def _hash_framed_bytes(digest, value):
+    """Hash bytes with an unambiguous unsigned-64-bit length prefix."""
+
+    if not isinstance(value, bytes):
+        raise TypeError("framed state-hash values must be bytes")
+    digest.update(struct.pack(">Q", len(value)))
+    digest.update(value)
+
+
+def _backbone_state_identity(named_tensors):
+    """Return a deterministic, exact identity for a named tensor state."""
+
+    items = sorted(named_tensors, key=lambda item: item[0])
+    if not items:
+        raise RuntimeError("backbone state identity cannot hash an empty state")
+    names = [name for name, _tensor in items]
+    if any(not isinstance(name, str) or not name for name in names):
+        raise RuntimeError("backbone state identity contains an invalid tensor name")
+    if len(set(names)) != len(names):
+        raise RuntimeError("backbone state identity contains duplicate tensor names")
+
+    digest = hashlib.sha256()
+    digest.update(_BACKBONE_STATE_HASH_DOMAIN)
+    digest.update(struct.pack(">Q", len(items)))
+    for name, tensor in items:
+        if not isinstance(tensor, torch.Tensor):
+            raise RuntimeError(f"backbone state value is not a tensor: {name}")
+        if tensor.device.type == "meta" or tensor.is_sparse or tensor.is_quantized:
+            raise RuntimeError(
+                f"backbone state tensor has an unsupported representation: {name}"
+            )
+        detached = tensor.detach().cpu().contiguous()
+        raw_bytes = detached.reshape(-1).view(torch.uint8).numpy().tobytes(order="C")
+        _hash_framed_bytes(digest, name.encode("utf-8"))
+        _hash_framed_bytes(digest, str(detached.dtype).encode("ascii"))
+        digest.update(struct.pack(">Q", detached.ndim))
+        for dimension in detached.shape:
+            digest.update(struct.pack(">Q", dimension))
+        _hash_framed_bytes(digest, raw_bytes)
+    return {"tensor_count": len(items), "state_sha256": digest.hexdigest()}
+
+
+def _screen_initialization_state_audit(config, model, startup_mode, warm_start_report):
+    """Bind a screen arm to its exact post-warm-start backbone state."""
+
+    if _PILOT_CONTRACT is None:
+        return None
+    manifest = _PILOT_CONTRACT.get("launch_manifest")
+    screen = (
+        manifest.get("optimization_screen") if isinstance(manifest, Mapping) else None
+    )
+    if screen is None:
+        return None
+    if not isinstance(screen, Mapping):
+        raise RuntimeError("optimization-screen launch contract must be an object")
+    if startup_mode != "warm_start":
+        raise RuntimeError(
+            "optimization-screen state audit requires a verified MDLM warm start"
+        )
+    retained_warm_start = _verified_warm_start_report(
+        config, startup_mode, warm_start_report
+    )
+    if retained_warm_start.get("weights") != "ema":
+        raise RuntimeError("optimization screen must warm-start from MDLM EMA weights")
+    backbone = getattr(model, "backbone", None)
+    state_dict = None if backbone is None else getattr(backbone, "state_dict", None)
+    if not callable(state_dict):
+        raise RuntimeError("optimization-screen model has no backbone state dictionary")
+    full_state = list(state_dict().items())
+    common_state = [
+        (name, tensor)
+        for name, tensor in full_state
+        if not is_conditioning_parameter_name(name)
+    ]
+    full_identity = _backbone_state_identity(full_state)
+    common_identity = _backbone_state_identity(common_state)
+    conditioning_variant = _configured_conditioning_variant(config)
+    if conditioning_variant not in {"additive", "film_adaln"}:
+        raise RuntimeError(
+            "optimization-screen conditioning variant must be additive or film_adaln"
+        )
+    return {
+        "schema_version": _SCREEN_INITIALIZATION_STATE_AUDIT_SCHEMA_VERSION,
+        "phase": _SCREEN_INITIALIZATION_STATE_AUDIT_PHASE,
+        "source_checkpoint_sha256": retained_warm_start["source_sha256"],
+        "resolved_training_config_sha256": _PILOT_CONTRACT[
+            "GENMOL_TRAIN_EXPECTED_CONFIG_SHA256"
+        ],
+        "training_seed": _exact_training_seed(
+            config.get("seed", 1), "optimization-screen training seed"
+        ),
+        "conditioning_variant": conditioning_variant,
+        "common_backbone_tensor_count": common_identity["tensor_count"],
+        "common_backbone_state_sha256": common_identity["state_sha256"],
+        "full_initial_tensor_count": full_identity["tensor_count"],
+        "full_initial_state_sha256": full_identity["state_sha256"],
+    }
+
+
+def _validate_film_gradient_audit_contract(value, expected_sha256):
+    """Validate the immutable A1 gradient topology registered before launch."""
+
+    if not isinstance(expected_sha256, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", expected_sha256
+    ):
+        raise RuntimeError(
+            "conditioning gradient contract SHA-256 must be lowercase hexadecimal"
+        )
+    if not isinstance(value, Mapping):
+        raise RuntimeError("conditioning gradient contract must be an object")
+    contract = dict(value)
+    expected_keys = {
+        "schema_version",
+        "observation_point",
+        "optimizer_checks",
+        "first_positive_lr_optimizer_step",
+        "timestep_mlp_required_optimizer_check",
+        "groups",
+    }
+    if set(contract) != expected_keys:
+        raise RuntimeError("conditioning gradient contract has invalid keys")
+    if (
+        type(contract["schema_version"]) is not int
+        or contract["schema_version"] != _FILM_GRADIENT_AUDIT_SCHEMA_VERSION
+    ):
+        raise RuntimeError("conditioning gradient contract has invalid schema")
+    if contract["observation_point"] != _FILM_GRADIENT_AUDIT_OBSERVATION_POINT:
+        raise RuntimeError(
+            "conditioning gradient contract has invalid observation point"
+        )
+    if contract["optimizer_checks"] != list(_FILM_GRADIENT_AUDIT_CHECKS):
+        raise RuntimeError("conditioning gradient contract has invalid check schedule")
+    if (
+        type(contract["first_positive_lr_optimizer_step"]) is not int
+        or contract["first_positive_lr_optimizer_step"]
+        != _FILM_GRADIENT_FIRST_POSITIVE_LR_STEP
+    ):
+        raise RuntimeError("conditioning gradient contract has invalid LR transition")
+    if (
+        type(contract["timestep_mlp_required_optimizer_check"]) is not int
+        or contract["timestep_mlp_required_optimizer_check"]
+        != _TIMESTEP_MLP_REQUIRED_OPTIMIZER_CHECK
+    ):
+        raise RuntimeError(
+            "conditioning gradient contract has invalid timestep activation check"
+        )
+
+    groups = contract["groups"]
+    if not isinstance(groups, list) or len(groups) != 2:
+        raise RuntimeError("conditioning gradient contract must contain two groups")
+    expected_group_identity = (
+        ("film_modulation", "film"),
+        ("timestep_mlp", "timestep_mlp"),
+    )
+    globally_seen_names = set()
+    normalized_groups = []
+    for group, (expected_group_id, expected_kind) in zip(
+        groups, expected_group_identity, strict=True
+    ):
+        if not isinstance(group, Mapping) or set(group) != {
+            "group_id",
+            "kind",
+            "parameters",
+        }:
+            raise RuntimeError("conditioning gradient contract group has invalid keys")
+        if group["group_id"] != expected_group_id or group["kind"] != expected_kind:
+            raise RuntimeError("conditioning gradient contract group order is invalid")
+        parameters = group["parameters"]
+        if not isinstance(parameters, list) or not parameters:
+            raise RuntimeError("conditioning gradient contract group has no parameters")
+        normalized_parameters = []
+        for parameter in parameters:
+            if not isinstance(parameter, Mapping) or set(parameter) != {
+                "name",
+                "shape",
+            }:
+                raise RuntimeError(
+                    "conditioning gradient parameter manifest has invalid keys"
+                )
+            name = parameter["name"]
+            shape = parameter["shape"]
+            if (
+                not isinstance(name, str)
+                or not name
+                or name in globally_seen_names
+                or not isinstance(shape, list)
+                or not shape
+                or any(
+                    type(dimension) is not int or dimension <= 0 for dimension in shape
+                )
+            ):
+                raise RuntimeError(
+                    "conditioning gradient parameter manifest is invalid"
+                )
+            globally_seen_names.add(name)
+            normalized_parameters.append({"name": name, "shape": list(shape)})
+        normalized_groups.append(
+            {
+                "group_id": expected_group_id,
+                "kind": expected_kind,
+                "parameters": normalized_parameters,
+            }
+        )
+    contract["groups"] = normalized_groups
+    if _canonical_json_sha256(contract) != expected_sha256:
+        raise RuntimeError(
+            "conditioning gradient contract disagrees with its registered SHA-256"
+        )
+    return contract
+
+
+def _registered_film_gradient_audit_contract():
+    if _PILOT_CONTRACT is None:
+        raise RuntimeError("conditioning gradient audit requires a launch contract")
+    manifest = _PILOT_CONTRACT.get("launch_manifest")
+    screen = (
+        manifest.get("optimization_screen") if isinstance(manifest, Mapping) else None
+    )
+    if not isinstance(screen, Mapping):
+        raise RuntimeError(
+            "FiLM pilot launch manifest lacks its optimization-screen contract"
+        )
+    return _validate_film_gradient_audit_contract(
+        screen.get("conditioning_gradient_contract"),
+        screen.get("conditioning_gradient_contract_sha256"),
+    )
+
+
+def _runtime_conditioning_parameter_groups(pl_module):
+    named_parameters = getattr(pl_module, "named_parameters", None)
+    if not callable(named_parameters):
+        raise RuntimeError("FiLM gradient audit model has no named parameters")
+    film_parameters = []
+    timestep_parameters = []
+    for name, parameter in named_parameters():
+        if ".film_modulation." in name:
+            film_parameters.append((name, parameter))
+        elif name.removeprefix("backbone.").startswith("time_conditioner."):
+            timestep_parameters.append((name, parameter))
+    if not film_parameters or not timestep_parameters:
+        raise RuntimeError("FiLM gradient audit found an empty conditioning group")
+    return {
+        "film_modulation": film_parameters,
+        "timestep_mlp": timestep_parameters,
+    }
+
+
+class _FilmGradientActivationCallback(L.Callback):
+    """Attest the staged gradient path created by zero-initialized FiLM layers."""
+
+    def __init__(self, registered_contract):
+        super().__init__()
+        self.registered_contract = registered_contract
+        self.registered_contract_sha256 = _canonical_json_sha256(registered_contract)
+        self.optimizer_checks = []
+
+    def _group_report(self, *, group_contract, runtime_parameters):
+        runtime_manifest = [
+            {"name": name, "shape": list(parameter.shape)}
+            for name, parameter in runtime_parameters
+        ]
+        if runtime_manifest != group_contract["parameters"]:
+            raise RuntimeError(
+                f"runtime {group_contract['group_id']} parameter manifest changed"
+            )
+        gradient_element_count = 0
+        all_parameter_gradients_nonzero = True
+        for name, parameter in runtime_parameters:
+            gradient = parameter.grad
+            if gradient is None:
+                raise RuntimeError(f"conditioning gradient is missing: {name}")
+            gradient = gradient.detach()
+            if not (torch.is_floating_point(gradient) or torch.is_complex(gradient)):
+                raise RuntimeError(
+                    f"conditioning gradient is not floating point: {name}"
+                )
+            if not bool(torch.isfinite(gradient).all().item()):
+                raise FloatingPointError(f"conditioning gradient is non-finite: {name}")
+            gradient_element_count += gradient.numel()
+            all_parameter_gradients_nonzero = all_parameter_gradients_nonzero and bool(
+                torch.count_nonzero(gradient).item()
+            )
+        return {
+            "group_id": group_contract["group_id"],
+            "ordered_parameter_manifest_sha256": _canonical_json_sha256(
+                runtime_manifest
+            ),
+            "parameter_count": len(runtime_parameters),
+            "gradient_element_count": gradient_element_count,
+            "all_gradients_present": True,
+            "all_gradients_finite": True,
+            "all_parameter_gradients_nonzero": all_parameter_gradients_nonzero,
+        }
+
+    def on_before_optimizer_step(self, trainer, pl_module, optimizer):
+        del trainer
+        check_index = len(self.optimizer_checks) + 1
+        if check_index > _FILM_GRADIENT_AUDIT_CHECKS[-1]:
+            return
+        parameter_groups = getattr(optimizer, "param_groups", None)
+        if not isinstance(parameter_groups, list) or len(parameter_groups) != 1:
+            raise RuntimeError(
+                "FiLM gradient audit requires one optimizer parameter group"
+            )
+        learning_rate = parameter_groups[0].get("lr")
+        if (
+            isinstance(learning_rate, bool)
+            or not isinstance(learning_rate, (int, float))
+            or not math.isfinite(float(learning_rate))
+            or learning_rate < 0
+        ):
+            raise RuntimeError("FiLM gradient audit observed an invalid learning rate")
+        learning_rate = float(learning_rate)
+        if check_index == 1 and learning_rate != 0.0:
+            raise RuntimeError(
+                "FiLM gradient audit expected zero LR at optimizer step 1"
+            )
+        if check_index in (2, 3) and learning_rate <= 0.0:
+            raise RuntimeError(
+                "FiLM gradient audit expected positive LR at optimizer steps 2 and 3"
+            )
+
+        runtime_groups = _runtime_conditioning_parameter_groups(pl_module)
+        contract_groups = {
+            group["group_id"]: group for group in self.registered_contract["groups"]
+        }
+        film_report = self._group_report(
+            group_contract=contract_groups["film_modulation"],
+            runtime_parameters=runtime_groups["film_modulation"],
+        )
+        timestep_report = self._group_report(
+            group_contract=contract_groups["timestep_mlp"],
+            runtime_parameters=runtime_groups["timestep_mlp"],
+        )
+        if check_index == 1 and not film_report["all_parameter_gradients_nonzero"]:
+            raise RuntimeError(
+                "every FiLM parameter must receive a nonzero gradient at the first "
+                "optimizer observation"
+            )
+        if check_index == 3 and not timestep_report["all_parameter_gradients_nonzero"]:
+            raise RuntimeError(
+                "every timestep-MLP parameter must receive a nonzero gradient at the "
+                "third optimizer observation"
+            )
+        self.optimizer_checks.append(
+            {
+                "optimizer_gradient_observation_index": check_index,
+                "optimizer_step_index": check_index,
+                "learning_rate_before_step": learning_rate,
+                "film_groups": [film_report],
+                "timestep_mlp_groups": [timestep_report],
+            }
+        )
+
+    def completion_report(self):
+        observed_checks = [
+            check["optimizer_gradient_observation_index"]
+            for check in self.optimizer_checks
+        ]
+        if observed_checks != list(_FILM_GRADIENT_AUDIT_CHECKS):
+            raise RuntimeError(
+                "FiLM gradient audit did not observe its first three optimizer checks"
+            )
+        return {
+            "schema_version": _FILM_GRADIENT_AUDIT_SCHEMA_VERSION,
+            "status": "completed",
+            "observation_point": _FILM_GRADIENT_AUDIT_OBSERVATION_POINT,
+            "registered_contract_sha256": self.registered_contract_sha256,
+            "first_positive_lr_optimizer_step": (_FILM_GRADIENT_FIRST_POSITIVE_LR_STEP),
+            "timestep_mlp_required_optimizer_check": (
+                _TIMESTEP_MLP_REQUIRED_OPTIMIZER_CHECK
+            ),
+            "optimizer_checks": list(self.optimizer_checks),
+        }
+
+
+def _configured_conditioning_variant(config):
+    training = config.get("training", {})
+    udlm = training.get("udlm", {}) if isinstance(training, Mapping) else {}
+    variant = udlm.get("conditioning_variant", "additive")
+    if not isinstance(variant, str):
+        raise RuntimeError("training.udlm.conditioning_variant must be a string")
+    return variant
+
+
 def _pilot_callbacks(config):
     if _PILOT_CONTRACT is None:
         return []
-    if config.training.get('pilot_fail_on_nonfinite_loss') is not True:
+    if config.training.get("pilot_fail_on_nonfinite_loss") is not True:
         raise RuntimeError(
             "pilot config must enable fail-fast non-finite loss validation"
         )
-    if config.trainer.get('detect_anomaly') is not True:
+    if config.trainer.get("detect_anomaly") is not True:
         raise RuntimeError("pilot config must enable backward anomaly detection")
-    return [_PilotFiniteLossCallback()]
+    callbacks = [_PilotFiniteLossCallback()]
+    if _configured_conditioning_variant(config) == "film_adaln":
+        if config.training.get("reseed_after_model_initialization") is not True:
+            raise RuntimeError(
+                "FiLM optimization screen requires post-initialization reseeding"
+            )
+        callbacks.append(
+            _FilmGradientActivationCallback(_registered_film_gradient_audit_contract())
+        )
+    return callbacks
 
 
 def _exact_positive_integer(value, label):
@@ -676,24 +1080,19 @@ def _pilot_training_accounting(config, trainer, model, train_dataloader):
 
     if _PILOT_CONTRACT is None:
         return None
-    training_seed = _exact_training_seed(
-        config.get('seed', 1), "pilot training seed"
-    )
+    training_seed = _exact_training_seed(config.get("seed", 1), "pilot training seed")
     optimizer_updates = _exact_positive_integer(
-        getattr(trainer, 'global_step', None), "pilot optimizer updates"
+        getattr(trainer, "global_step", None), "pilot optimizer updates"
     )
     configured_updates = _exact_positive_integer(
-        config.trainer.get('max_steps'), "pilot configured optimizer updates"
+        config.trainer.get("max_steps"), "pilot configured optimizer updates"
     )
     runtime_max_steps = _exact_positive_integer(
-        getattr(trainer, 'max_steps', None), "pilot runtime max steps"
+        getattr(trainer, "max_steps", None), "pilot runtime max steps"
     )
     expected_updates = _PILOT_CONTRACT["expected_max_steps"]
     if not (
-        optimizer_updates
-        == configured_updates
-        == runtime_max_steps
-        == expected_updates
+        optimizer_updates == configured_updates == runtime_max_steps == expected_updates
     ):
         raise RuntimeError(
             "pilot optimizer updates disagree across completion, runtime, config, "
@@ -701,16 +1100,16 @@ def _pilot_training_accounting(config, trainer, model, train_dataloader):
         )
 
     world_size = _exact_positive_integer(
-        getattr(trainer, 'world_size', None), "pilot accounting world size"
+        getattr(trainer, "world_size", None), "pilot accounting world size"
     )
     configured_devices = _exact_positive_integer(
-        config.trainer.get('devices'), "pilot configured devices"
+        config.trainer.get("devices"), "pilot configured devices"
     )
     configured_nodes = _exact_positive_integer(
-        config.trainer.get('num_nodes'), "pilot configured nodes"
+        config.trainer.get("num_nodes"), "pilot configured nodes"
     )
     runtime_nodes = _exact_positive_integer(
-        getattr(trainer, 'num_nodes', None), "pilot runtime nodes"
+        getattr(trainer, "num_nodes", None), "pilot runtime nodes"
     )
     expected_world_size = _PILOT_CONTRACT["expected_world_size"]
     if (
@@ -725,12 +1124,12 @@ def _pilot_training_accounting(config, trainer, model, train_dataloader):
         )
 
     if train_dataloader is None:
-        train_dataloader = getattr(trainer, 'train_dataloader', None)
+        train_dataloader = getattr(trainer, "train_dataloader", None)
     micro_batch_size = _exact_positive_integer(
-        config.loader.get('batch_size'), "pilot micro-batch size per rank"
+        config.loader.get("batch_size"), "pilot micro-batch size per rank"
     )
     runtime_micro_batch_size = _exact_positive_integer(
-        getattr(train_dataloader, 'batch_size', None),
+        getattr(train_dataloader, "batch_size", None),
         "pilot runtime micro-batch size per rank",
     )
     if runtime_micro_batch_size != micro_batch_size:
@@ -738,11 +1137,11 @@ def _pilot_training_accounting(config, trainer, model, train_dataloader):
             "pilot runtime micro-batch size disagrees with the resolved config"
         )
     accumulation = _exact_positive_integer(
-        config.trainer.get('accumulate_grad_batches'),
+        config.trainer.get("accumulate_grad_batches"),
         "pilot configured gradient accumulation",
     )
     runtime_accumulation = _exact_positive_integer(
-        getattr(trainer, 'accumulate_grad_batches', None),
+        getattr(trainer, "accumulate_grad_batches", None),
         "pilot runtime gradient accumulation",
     )
     if runtime_accumulation != accumulation:
@@ -751,14 +1150,14 @@ def _pilot_training_accounting(config, trainer, model, train_dataloader):
         )
     effective_global_examples = micro_batch_size * world_size * accumulation
     configured_global_batch = _exact_positive_integer(
-        config.loader.get('global_batch_size'), "pilot configured global batch size"
+        config.loader.get("global_batch_size"), "pilot configured global batch size"
     )
     if configured_global_batch != effective_global_examples:
         raise RuntimeError(
             "pilot configured global batch size does not equal micro-batch per rank "
             "times world size times accumulation"
         )
-    if config.get('data') != 'safe':
+    if config.get("data") != "safe":
         raise RuntimeError("pilot accounting requires the hosted SAFE training stream")
 
     return {
@@ -771,9 +1170,7 @@ def _pilot_training_accounting(config, trainer, model, train_dataloader):
         "total_requested_example_exposures": (
             effective_global_examples * optimizer_updates
         ),
-        "hosted_stream_rank_partition_policy": (
-            _HOSTED_STREAM_RANK_PARTITION_POLICY
-        ),
+        "hosted_stream_rank_partition_policy": (_HOSTED_STREAM_RANK_PARTITION_POLICY),
         "trainable_parameter_counts": _pilot_trainable_parameter_counts(model),
     }
 
@@ -805,8 +1202,7 @@ def _pilot_streaming_partition(trainer):
         )
 
     distributed_environment = {
-        key: os.environ.get(key)
-        for key in ("LOCAL_RANK", "WORLD_SIZE", "NODE_RANK")
+        key: os.environ.get(key) for key in ("LOCAL_RANK", "WORLD_SIZE", "NODE_RANK")
     }
     present_values = {
         key: value
@@ -847,29 +1243,32 @@ def _validate_pilot_completion_config(config):
     expected_steps = _PILOT_CONTRACT["expected_max_steps"]
     expected_world_size = _PILOT_CONTRACT["expected_world_size"]
     configured_steps = _exact_positive_integer(
-        config.trainer.get('max_steps'), "pilot trainer.max_steps"
+        config.trainer.get("max_steps"), "pilot trainer.max_steps"
     )
     devices = _exact_positive_integer(
-        config.trainer.get('devices'), "pilot trainer.devices"
+        config.trainer.get("devices"), "pilot trainer.devices"
     )
     nodes = _exact_positive_integer(
-        config.trainer.get('num_nodes'), "pilot trainer.num_nodes"
+        config.trainer.get("num_nodes"), "pilot trainer.num_nodes"
     )
     if configured_steps != expected_steps:
         raise RuntimeError("pilot max step disagrees with the launch contract")
     if devices * nodes != expected_world_size:
         raise RuntimeError("pilot world size disagrees with the launch contract")
-    callback_dir = Path(os.path.abspath(os.fspath(config.callback.get('dirpath'))))
-    if callback_dir / f"{expected_steps}.ckpt" != _PILOT_CONTRACT[
-        "final_checkpoint_path"
-    ]:
+    callback_dir = Path(os.path.abspath(os.fspath(config.callback.get("dirpath"))))
+    if (
+        callback_dir / f"{expected_steps}.ckpt"
+        != _PILOT_CONTRACT["final_checkpoint_path"]
+    ):
         raise RuntimeError("pilot final checkpoint path disagrees with its config")
     if (
-        config.callback.get('filename') != '{step}'
-        or config.callback.get('every_n_train_steps') != expected_steps
-        or config.callback.get('save_top_k') != -1
+        config.callback.get("filename") != "{step}"
+        or config.callback.get("every_n_train_steps") != expected_steps
+        or config.callback.get("save_top_k") != -1
     ):
-        raise RuntimeError("pilot checkpoint callback does not guarantee the final step")
+        raise RuntimeError(
+            "pilot checkpoint callback does not guarantee the final step"
+        )
     return {
         "summary_schema_version": _PILOT_CONTRACT["summary_schema_version"],
         "summary_path": str(_PILOT_CONTRACT["summary_path"]),
@@ -884,16 +1283,16 @@ def _validate_pilot_completion_config(config):
 def checkpoint_startup_mode(resume_checkpoint, initialization_checkpoint):
     """Choose exactly one of Lightning resume, one-time warm-start, or scratch."""
     if resume_checkpoint is not None:
-        return 'resume'
+        return "resume"
     if initialization_checkpoint:
-        return 'warm_start'
-    return 'scratch'
+        return "warm_start"
+    return "scratch"
 
 
 def _reseed_training_rng_after_model_initialization(config, startup_mode):
     """Make architecture-screen training randomness independent of init draws."""
 
-    enabled = config.training.get('reseed_after_model_initialization', False)
+    enabled = config.training.get("reseed_after_model_initialization", False)
     if type(enabled) is not bool:
         raise RuntimeError(
             "training.reseed_after_model_initialization must be a boolean"
@@ -904,12 +1303,13 @@ def _reseed_training_rng_after_model_initialization(config, startup_mode):
         raise RuntimeError(
             "post-initialization reseeding is restricted to a launch-bound pilot"
         )
-    if startup_mode not in {'warm_start', 'scratch'}:
+    if startup_mode != "warm_start":
         raise RuntimeError(
-            "post-initialization reseeding cannot be combined with checkpoint resume"
+            "post-initialization reseeding requires the common verified MDLM "
+            "warm-start checkpoint"
         )
     seed = _exact_training_seed(
-        config.get('seed', 1), "post-initialization training seed"
+        config.get("seed", 1), "post-initialization training seed"
     )
     applied_seed = L.seed_everything(seed, workers=True)
     if type(applied_seed) is not int or applied_seed != seed:
@@ -929,10 +1329,8 @@ def _validate_and_record_pilot_config(config):
         return None
     completion_contract = _validate_pilot_completion_config(config)
     _pilot_callbacks(config)
-    _exact_training_seed(config.get('seed', 1), "pilot training seed")
-    expected_revision = _PILOT_CONTRACT[
-        "GENMOL_TRAIN_EXPECTED_SOURCE_REVISION"
-    ]
+    _exact_training_seed(config.get("seed", 1), "pilot training seed")
+    expected_revision = _PILOT_CONTRACT["GENMOL_TRAIN_EXPECTED_SOURCE_REVISION"]
     source = _require_pilot_source_revision(expected_revision)
     resolved = omegaconf.OmegaConf.to_container(
         config,
@@ -944,7 +1342,7 @@ def _validate_and_record_pilot_config(config):
         raise RuntimeError(
             "resolved Hydra config disagrees with the launch-pinned config digest"
         )
-    if os.environ["PYTHONHASHSEED"] != str(config.get('seed', 1)):
+    if os.environ["PYTHONHASHSEED"] != str(config.get("seed", 1)):
         raise RuntimeError("PYTHONHASHSEED disagrees with the resolved training seed")
     launch_manifest_evidence = _launch_manifest_evidence()
     record = {
@@ -954,17 +1352,13 @@ def _validate_and_record_pilot_config(config):
         "source": source,
         "training_argv": _pilot_base_argv(),
         "observed_training_argv": list(sys.argv),
-        "training_argv_sha256": _PILOT_CONTRACT[
-            "GENMOL_TRAIN_EXPECTED_ARGV_SHA256"
-        ],
+        "training_argv_sha256": _PILOT_CONTRACT["GENMOL_TRAIN_EXPECTED_ARGV_SHA256"],
         "resolved_training_config": resolved,
         "resolved_training_config_sha256": digest,
         "launch_manifest": launch_manifest_evidence,
         "completion_contract": completion_contract,
         "python_environment": {
-            key: value
-            for key, value in os.environ.items()
-            if key.startswith("PYTHON")
+            key: value for key, value in os.environ.items() if key.startswith("PYTHON")
         },
     }
     local_rank = os.environ.get("LOCAL_RANK")
@@ -979,7 +1373,9 @@ def _validate_and_record_pilot_config(config):
             os.fsync(handle.fileno())
     except FileExistsError:
         if runtime_path.read_text(encoding="utf-8") != encoded:
-            raise RuntimeError("pilot runtime config record already exists with other data")
+            raise RuntimeError(
+                "pilot runtime config record already exists with other data"
+            )
     return record
 
 
@@ -1211,9 +1607,7 @@ def _audit_pilot_checkpoint(path, *, expected_steps, model):
         )
     conditioning_validator(checkpoint)
     live_match = _validate_checkpoint_matches_live_model(checkpoint_state, model)
-    live_ema_match = _validate_checkpoint_ema_matches_live(
-        checkpoint_shadows, model
-    )
+    live_ema_match = _validate_checkpoint_ema_matches_live(checkpoint_shadows, model)
     live_ema = getattr(model, "ema", None)
     live_ema_metadata = _validated_ema_metadata(
         {
@@ -1241,22 +1635,94 @@ def _audit_pilot_checkpoint(path, *, expected_steps, model):
 
 
 def _verified_warm_start_report(config, startup_mode, warm_start_report):
-    if startup_mode != 'warm_start':
+    if startup_mode != "warm_start":
         if warm_start_report is not None:
-            raise RuntimeError("non-warm-start pilot unexpectedly retained a warm-start report")
+            raise RuntimeError(
+                "non-warm-start pilot unexpectedly retained a warm-start report"
+            )
         return None
     if not isinstance(warm_start_report, Mapping):
         raise RuntimeError("warm-start pilot did not retain its verified MDLM report")
     report = dict(warm_start_report)
-    expected_sha256 = config.training.get('init_from_mdlm_checkpoint_sha256')
+    expected_sha256 = config.training.get("init_from_mdlm_checkpoint_sha256")
     if (
         not isinstance(expected_sha256, str)
-        or report.get('source_sha256') != expected_sha256
-        or report.get('expected_source_sha256') != expected_sha256
-        or report.get('byte_identity_verified_before_and_after_load') is not True
+        or report.get("source_sha256") != expected_sha256
+        or report.get("expected_source_sha256") != expected_sha256
+        or report.get("byte_identity_verified_before_and_after_load") is not True
     ):
         raise RuntimeError("warm-start report disagrees with the verified MDLM source")
     return report
+
+
+def _validated_screen_initialization_state_audit(
+    value, *, config, startup_mode, warm_start_report
+):
+    """Validate the retained pre-optimizer state certificate at completion."""
+
+    manifest = _PILOT_CONTRACT.get("launch_manifest")
+    screen = (
+        manifest.get("optimization_screen") if isinstance(manifest, Mapping) else None
+    )
+    if screen is None:
+        if value is not None:
+            raise RuntimeError(
+                "non-screen pilot unexpectedly retained an initialization-state audit"
+            )
+        return None
+    if not isinstance(screen, Mapping):
+        raise RuntimeError("optimization-screen launch contract must be an object")
+    if not isinstance(value, Mapping):
+        raise RuntimeError(
+            "optimization-screen completion lacks its initialization-state audit"
+        )
+    audit = dict(value)
+    expected_keys = {
+        "schema_version",
+        "phase",
+        "source_checkpoint_sha256",
+        "resolved_training_config_sha256",
+        "training_seed",
+        "conditioning_variant",
+        "common_backbone_tensor_count",
+        "common_backbone_state_sha256",
+        "full_initial_tensor_count",
+        "full_initial_state_sha256",
+    }
+    if set(audit) != expected_keys:
+        raise RuntimeError(
+            "optimization-screen initialization-state audit has invalid keys"
+        )
+    warm_start = _verified_warm_start_report(config, startup_mode, warm_start_report)
+    expected_values = {
+        "schema_version": _SCREEN_INITIALIZATION_STATE_AUDIT_SCHEMA_VERSION,
+        "phase": _SCREEN_INITIALIZATION_STATE_AUDIT_PHASE,
+        "source_checkpoint_sha256": warm_start["source_sha256"],
+        "resolved_training_config_sha256": _PILOT_CONTRACT[
+            "GENMOL_TRAIN_EXPECTED_CONFIG_SHA256"
+        ],
+        "training_seed": _exact_training_seed(
+            config.get("seed", 1), "optimization-screen training seed"
+        ),
+        "conditioning_variant": _configured_conditioning_variant(config),
+    }
+    for key, expected in expected_values.items():
+        if audit.get(key) != expected:
+            raise RuntimeError(
+                f"optimization-screen initialization-state audit changed {key}"
+            )
+    for key in ("common_backbone_tensor_count", "full_initial_tensor_count"):
+        _exact_positive_integer(audit.get(key), f"initialization-state {key}")
+    if audit["full_initial_tensor_count"] < audit["common_backbone_tensor_count"]:
+        raise RuntimeError(
+            "initialization-state full tensor count is smaller than common backbone"
+        )
+    for key in ("common_backbone_state_sha256", "full_initial_state_sha256"):
+        if not isinstance(audit.get(key), str) or not re.fullmatch(
+            r"[0-9a-f]{64}", audit[key]
+        ):
+            raise RuntimeError(f"initialization-state {key} is not a SHA-256")
+    return audit
 
 
 def _write_pilot_training_summary(
@@ -1267,6 +1733,7 @@ def _write_pilot_training_summary(
     preflight_record,
     startup_mode,
     warm_start_report,
+    screen_initialization_state_audit=None,
     train_dataloader=None,
     training_rng_policy=None,
 ):
@@ -1274,18 +1741,22 @@ def _write_pilot_training_summary(
 
     if _PILOT_CONTRACT is None:
         return None
-    if not bool(getattr(trainer, 'is_global_zero', False)):
+    if not bool(getattr(trainer, "is_global_zero", False)):
         return None
-    global_rank = getattr(trainer, 'global_rank', 0)
-    if isinstance(global_rank, bool) or not isinstance(global_rank, int) or global_rank != 0:
+    global_rank = getattr(trainer, "global_rank", 0)
+    if (
+        isinstance(global_rank, bool)
+        or not isinstance(global_rank, int)
+        or global_rank != 0
+    ):
         raise RuntimeError("pilot global-zero process reports an invalid global rank")
     expected_steps = _PILOT_CONTRACT["expected_max_steps"]
     expected_world_size = _PILOT_CONTRACT["expected_world_size"]
     observed_steps = _exact_positive_integer(
-        getattr(trainer, 'global_step', None), "pilot completed global step"
+        getattr(trainer, "global_step", None), "pilot completed global step"
     )
     observed_world_size = _exact_positive_integer(
-        getattr(trainer, 'world_size', None), "pilot completed world size"
+        getattr(trainer, "world_size", None), "pilot completed world size"
     )
     if observed_steps != expected_steps:
         raise RuntimeError(
@@ -1311,30 +1782,49 @@ def _write_pilot_training_summary(
     training_health = health_callbacks[0].completion_report(
         expected_optimizer_steps=expected_steps
     )
+    film_callbacks = (
+        []
+        if not isinstance(callbacks, (list, tuple))
+        else [
+            callback
+            for callback in callbacks
+            if isinstance(callback, _FilmGradientActivationCallback)
+        ]
+    )
+    configured_conditioning_variant = _configured_conditioning_variant(config)
+    if configured_conditioning_variant == "film_adaln":
+        if len(film_callbacks) != 1:
+            raise RuntimeError(
+                "FiLM pilot trainer must retain exactly one gradient-audit callback"
+            )
+        conditioning_gradient_audit = film_callbacks[0].completion_report()
+    else:
+        if film_callbacks:
+            raise RuntimeError(
+                "non-FiLM pilot unexpectedly retained a gradient-audit callback"
+            )
+        conditioning_gradient_audit = None
     if not isinstance(preflight_record, Mapping):
         raise RuntimeError("pilot completion lacks its runtime config record")
     completion_contract = _validate_pilot_completion_config(config)
     if preflight_record.get("completion_contract") != completion_contract:
         raise RuntimeError("pilot runtime config completion contract changed")
 
-    expected_revision = _PILOT_CONTRACT[
-        "GENMOL_TRAIN_EXPECTED_SOURCE_REVISION"
-    ]
+    expected_revision = _PILOT_CONTRACT["GENMOL_TRAIN_EXPECTED_SOURCE_REVISION"]
     source = _require_pilot_source_revision(expected_revision)
     if preflight_record.get("source") != source:
         raise RuntimeError("pilot source identity changed after runtime preflight")
-    if _canonical_json_sha256(_pilot_base_argv()) != _PILOT_CONTRACT[
-        "GENMOL_TRAIN_EXPECTED_ARGV_SHA256"
-    ]:
+    if (
+        _canonical_json_sha256(_pilot_base_argv())
+        != _PILOT_CONTRACT["GENMOL_TRAIN_EXPECTED_ARGV_SHA256"]
+    ):
         raise RuntimeError("pilot argv changed before completion")
 
     runtime_snapshot, runtime_bytes = _stable_file_snapshot(
         _PILOT_CONTRACT["runtime_path"], capture_bytes=True
     )
     try:
-        recorded_runtime = _strict_json_loads(
-            runtime_bytes, label="runtime config"
-        )
+        recorded_runtime = _strict_json_loads(runtime_bytes, label="runtime config")
     except RuntimeError as error:
         raise RuntimeError("pilot runtime config is not valid strict JSON") from error
     if recorded_runtime != dict(preflight_record):
@@ -1346,8 +1836,8 @@ def _write_pilot_training_summary(
     raw_tensors = _floating_tensor_finiteness(
         model.state_dict().items(), label="raw model state"
     )
-    ema = getattr(model, 'ema', None)
-    shadows = None if ema is None else getattr(ema, 'shadow_params', None)
+    ema = getattr(model, "ema", None)
+    shadows = None if ema is None else getattr(ema, "shadow_params", None)
     if not isinstance(shadows, (list, tuple)):
         raise RuntimeError("pilot model has no verifiable EMA shadow tensors")
     ema_tensors = _floating_tensor_finiteness(
@@ -1364,6 +1854,12 @@ def _write_pilot_training_summary(
     )
     retained_warm_start = _verified_warm_start_report(
         config, startup_mode, warm_start_report
+    )
+    retained_screen_initialization = _validated_screen_initialization_state_audit(
+        screen_initialization_state_audit,
+        config=config,
+        startup_mode=startup_mode,
+        warm_start_report=warm_start_report,
     )
 
     startup_record = {
@@ -1382,9 +1878,7 @@ def _write_pilot_training_summary(
         "resolved_training_config_sha256": _PILOT_CONTRACT[
             "GENMOL_TRAIN_EXPECTED_CONFIG_SHA256"
         ],
-        "training_argv_sha256": _PILOT_CONTRACT[
-            "GENMOL_TRAIN_EXPECTED_ARGV_SHA256"
-        ],
+        "training_argv_sha256": _PILOT_CONTRACT["GENMOL_TRAIN_EXPECTED_ARGV_SHA256"],
         "launch_manifest": launch_manifest_evidence,
         "runtime_config": {
             **runtime_snapshot,
@@ -1399,6 +1893,8 @@ def _write_pilot_training_summary(
         },
         "training_accounting": training_accounting,
         "training_health": training_health,
+        "conditioning_gradient_audit": conditioning_gradient_audit,
+        "screen_initialization_state_audit": retained_screen_initialization,
         "final_checkpoint": {
             **checkpoint_snapshot,
             "semantic_audit": checkpoint_audit,
@@ -1418,40 +1914,41 @@ def _write_pilot_training_summary(
         _PILOT_CONTRACT["summary_path"], capture_bytes=True
     )
     if json.loads(written_bytes) != summary:
-        raise RuntimeError("published pilot training summary failed its post-write check")
+        raise RuntimeError(
+            "published pilot training summary failed its post-write check"
+        )
     return {**summary, "artifact": written_snapshot}
 
 
-@hydra.main(version_base=None,
+@hydra.main(
+    version_base=None,
     config_path="../configs",
     config_name="base",
 )
 def train(config):
     pilot_preflight = _validate_and_record_pilot_config(config)
     pilot_callbacks = _pilot_callbacks(config)
-    L.seed_everything(config.get('seed', 1), workers=True)
+    L.seed_everything(config.get("seed", 1), workers=True)
     wandb_logger = None
     if config.wandb.name is not None:
         wandb_logger = L.pytorch.loggers.WandbLogger(
-            config=omegaconf.OmegaConf.to_object(config),
-            **config.wandb)
-    
-    if config.training.get('use_bracket_safe'):
+            config=omegaconf.OmegaConf.to_object(config), **config.wandb
+        )
+
+    if config.training.get("use_bracket_safe"):
         config.model.vocab_size += 2
 
     model = GenMol(config)
     ckpt_path = get_last_checkpoint(config.callback.dirpath)
-    init_from_mdlm = config.training.get('init_from_mdlm_checkpoint')
+    init_from_mdlm = config.training.get("init_from_mdlm_checkpoint")
     startup_mode = checkpoint_startup_mode(ckpt_path, init_from_mdlm)
     warm_start_report = None
-    if startup_mode == 'warm_start':
+    if startup_mode == "warm_start":
         source_path = hydra.utils.to_absolute_path(init_from_mdlm)
         warm_start_report = model.initialize_from_mdlm_checkpoint(
             source_path,
-            use_ema=bool(config.training.get('init_from_mdlm_ema', True)),
-            expected_sha256=config.training.get(
-                'init_from_mdlm_checkpoint_sha256'
-            ),
+            use_ema=bool(config.training.get("init_from_mdlm_ema", True)),
+            expected_sha256=config.training.get("init_from_mdlm_checkpoint_sha256"),
         )
         print(
             'Initialized UDLM backbone from MDLM: '
@@ -1460,16 +1957,19 @@ def train(config):
             f"parameters={warm_start_report['parameter_tensors']}, "
             f"sha256={warm_start_report['source_sha256']})"
         )
-    elif startup_mode == 'resume':
+    elif startup_mode == "resume":
         print(
-            f'Resuming {ckpt_path}; the configured MDLM initialization is '
-            'a one-time provenance field and will not be reapplied.'
+            f"Resuming {ckpt_path}; the configured MDLM initialization is "
+            "a one-time provenance field and will not be reapplied."
         )
 
+    screen_initialization_state_audit = _screen_initialization_state_audit(
+        config, model, startup_mode, warm_start_report
+    )
     training_rng_policy = _reseed_training_rng_after_model_initialization(
         config, startup_mode
     )
-    
+
     train_dataloader = None
     if _PILOT_CONTRACT is None:
         train_dataloader = get_dataloader(config)
@@ -1479,7 +1979,8 @@ def train(config):
         callbacks=[hydra.utils.instantiate(config.callback), *pilot_callbacks],
         strategy=_training_strategy(),
         logger=wandb_logger,
-        enable_progress_bar=True)
+        enable_progress_bar=True,
+    )
     if _PILOT_CONTRACT is not None:
         # Lightning cannot inject a DistributedSampler into an iterable
         # dataset. Resolve the pilot rank after Trainer construction and split
@@ -1498,10 +1999,11 @@ def train(config):
         preflight_record=pilot_preflight,
         startup_mode=startup_mode,
         warm_start_report=warm_start_report,
+        screen_initialization_state_audit=screen_initialization_state_audit,
         train_dataloader=train_dataloader,
         training_rng_policy=training_rng_policy,
     )
-    
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     train()

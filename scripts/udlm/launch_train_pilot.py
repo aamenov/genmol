@@ -31,11 +31,17 @@ PROJECT_ROOT = REPOSITORY_ROOT.parents[1]
 RUN_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}\Z")
 MAX_SAFE_UTILIZATION_PERCENT = 10
 MIN_SAFE_FREE_MEMORY_MIB = 30_000
-TRAINING_SUMMARY_SCHEMA_VERSION = 3
-PILOT_EXIT_STATUS_SCHEMA_VERSION = 3
+TRAINING_SUMMARY_SCHEMA_VERSION = 4
+PILOT_EXIT_STATUS_SCHEMA_VERSION = 4
 LAUNCH_MANIFEST_SCHEMA_VERSION = 1
 MATCHED_PANEL_SCHEMA_VERSION = 1
 TRAINING_JOB_LOCK_SCHEMA_VERSION = 1
+TRAINING_JOB_LOCK_PURPOSES = frozenset(
+    {
+        "enforce_one_R_S_E_pilot_training_job_at_a_time",
+        "enforce_one_registered_optimization_screen_job_at_a_time",
+    }
+)
 MAX_TRAINING_SEED = 2**32 - 1
 TRAINING_VARIANTS = {
     "udlm": {
@@ -523,7 +529,9 @@ def sha256_file(path: Path) -> str:
             offset += len(chunk)
         after = os.fstat(descriptor)
         path_state = os.stat(resolved, follow_symlinks=False)
-        observed_states = [_stable_stat_identity(observed) for observed in (after, path_state)]
+        observed_states = [
+            _stable_stat_identity(observed) for observed in (after, path_state)
+        ]
         if any(observed != state for observed in observed_states):
             raise RuntimeError(f"checkpoint changed while it was hashed: {resolved}")
         return digest.hexdigest()
@@ -733,7 +741,11 @@ def training_job_lock_path() -> Path:
 
 
 def acquire_training_job_lock(
-    *, source_revision: str, run_name: str, training_variant: str
+    *,
+    source_revision: str,
+    run_name: str,
+    training_variant: str,
+    purpose: str = "enforce_one_R_S_E_pilot_training_job_at_a_time",
 ) -> tuple[Path, dict[str, object], str]:
     """Atomically claim the sole pilot training slot; never recover stale locks."""
 
@@ -742,11 +754,13 @@ def acquire_training_job_lock(
     if not RUN_NAME_PATTERN.fullmatch(run_name):
         raise ValueError("run_name is invalid")
     validate_training_variant(training_variant)
+    if purpose not in TRAINING_JOB_LOCK_PURPOSES:
+        raise ValueError("training-job lock purpose is not reviewed")
     lock_path = training_job_lock_path()
     lock_record = {
         "schema_version": TRAINING_JOB_LOCK_SCHEMA_VERSION,
         "status": "held",
-        "purpose": "enforce_one_R_S_E_pilot_training_job_at_a_time",
+        "purpose": purpose,
         "source_revision": source_revision,
         "run_name": run_name,
         "training_variant": training_variant,
@@ -810,7 +824,9 @@ def release_exact_training_job_lock(path: Path, *, expected_sha256: str) -> None
     ):
         raise RuntimeError("training-job lock changed during exact release")
     if digest.hexdigest() != expected_sha256:
-        raise RuntimeError("refusing to release a training-job lock owned by another run")
+        raise RuntimeError(
+            "refusing to release a training-job lock owned by another run"
+        )
     os.unlink(path)
     directory_descriptor = os.open(path.parent, os.O_RDONLY)
     try:
@@ -935,7 +951,9 @@ def build_child_environment_command(
             "resolved_config_sha256 must be 64 lowercase hexadecimal digits"
         )
     if not re.fullmatch(r"[0-9a-f]{64}", launch_manifest_sha256):
-        raise ValueError("launch_manifest_sha256 must be 64 lowercase hexadecimal digits")
+        raise ValueError(
+            "launch_manifest_sha256 must be 64 lowercase hexadecimal digits"
+        )
     if not visible_uuids or any(
         not value.startswith("GPU-") for value in visible_uuids.split(",")
     ):
@@ -957,14 +975,17 @@ def build_child_environment_command(
     training_summary_path = artifact_paths["training summary"][0]
     final_checkpoint_path = artifact_paths["final checkpoint"][0]
     launch_manifest_path = artifact_paths["launch manifest"][0]
-    if len(
-        {
-            runtime_config_path,
-            training_summary_path,
-            final_checkpoint_path,
-            launch_manifest_path,
-        }
-    ) != 4:
+    if (
+        len(
+            {
+                runtime_config_path,
+                training_summary_path,
+                final_checkpoint_path,
+                launch_manifest_path,
+            }
+        )
+        != 4
+    ):
         raise ValueError("pilot completion artifact paths must be distinct")
     if (
         type(expected_max_steps) is not int
@@ -1567,11 +1588,11 @@ def main():
         gpu_count=gpu_count,
     )
     try:
-        resolved_prior_variant = resolved_config["training"]["udlm"][
-            "prior_variant"
-        ]
+        resolved_prior_variant = resolved_config["training"]["udlm"]["prior_variant"]
     except (KeyError, TypeError) as error:
-        raise RuntimeError("resolved training config lacks its UDLM treatment") from error
+        raise RuntimeError(
+            "resolved training config lacks its UDLM treatment"
+        ) from error
     if resolved_prior_variant != variant["prior_variant"]:
         raise RuntimeError(
             "resolved UDLM treatment disagrees with the registered training variant"

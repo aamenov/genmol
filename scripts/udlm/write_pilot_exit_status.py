@@ -25,8 +25,8 @@ from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 RUNTIME_CONFIG_SCHEMA_VERSION = 2
-TRAINING_SUMMARY_SCHEMA_VERSION = 3
-EXIT_STATUS_SCHEMA_VERSION = 3
+TRAINING_SUMMARY_SCHEMA_VERSION = 4
+EXIT_STATUS_SCHEMA_VERSION = 4
 INCOMPLETE_EXIT_STATUS = 97
 HOSTED_STREAM_RANK_PARTITION_POLICY = (
     "huggingface_split_dataset_by_node_disjoint_rank_streams"
@@ -148,8 +148,11 @@ def _artifact_path(value: Path, *, suffix: str, label: str) -> Path:
 
 def _training_job_lock_path(value: Path) -> Path:
     path = Path(os.path.abspath(os.fspath(value)))
-    expected = REPOSITORY_ROOT.resolve(strict=True) / "output" / "udlm" / (
-        ".single_training_job.lock"
+    expected = (
+        REPOSITORY_ROOT.resolve(strict=True)
+        / "output"
+        / "udlm"
+        / (".single_training_job.lock")
     )
     if path != expected:
         raise ValueError(
@@ -483,6 +486,366 @@ def _validate_finiteness_record(value: object, *, label: str) -> None:
         raise ValueError(f"{label} has fewer elements than tensors")
 
 
+def _conditioning_configuration(
+    resolved_training_config: object,
+) -> tuple[str, bool, int]:
+    resolved = _required_mapping(
+        resolved_training_config, label="resolved training configuration"
+    )
+    training = _required_mapping(
+        resolved.get("training"), label="resolved training configuration.training"
+    )
+    udlm_value = training.get("udlm", {})
+    udlm = _required_mapping(udlm_value, label="resolved UDLM configuration")
+    variant = udlm.get("conditioning_variant", "additive")
+    if variant not in {"additive", "film_adaln"}:
+        raise ValueError("resolved conditioning variant is unsupported")
+    reseed = training.get("reseed_after_model_initialization", False)
+    if type(reseed) is not bool:
+        raise ValueError("resolved post-initialization reseed flag must be boolean")
+    seed = _nonnegative_integer_field(resolved, "seed", label="resolved training seed")
+    if variant == "film_adaln" and reseed is not True:
+        raise ValueError("FiLM screen requires post-initialization reseeding")
+    return variant, reseed, seed
+
+
+def _validate_gradient_contract(
+    value: object, expected_sha256: object
+) -> dict[str, object]:
+    contract = _required_mapping(value, label="conditioning gradient contract")
+    _require_exact_keys(
+        contract,
+        {
+            "schema_version",
+            "observation_point",
+            "optimizer_checks",
+            "first_positive_lr_optimizer_step",
+            "timestep_mlp_required_optimizer_check",
+            "groups",
+        },
+        label="conditioning gradient contract",
+    )
+    _exact_integer(
+        contract.get("schema_version"), 1, label="conditioning gradient schema"
+    )
+    _exact_string(
+        contract.get("observation_point"),
+        "on_before_optimizer_step_global_rank_zero_after_gradient_accumulation",
+        label="conditioning gradient observation point",
+    )
+    if contract.get("optimizer_checks") != [1, 2, 3]:
+        raise ValueError("conditioning gradient optimizer checks are invalid")
+    _exact_integer(
+        contract.get("first_positive_lr_optimizer_step"),
+        2,
+        label="conditioning gradient first positive-LR step",
+    )
+    _exact_integer(
+        contract.get("timestep_mlp_required_optimizer_check"),
+        3,
+        label="conditioning gradient timestep backward index",
+    )
+    groups = contract.get("groups")
+    if not isinstance(groups, list) or len(groups) != 2:
+        raise ValueError("conditioning gradient contract must have two groups")
+    expected_groups = (
+        ("film_modulation", "film"),
+        ("timestep_mlp", "timestep_mlp"),
+    )
+    names: set[str] = set()
+    for group, (group_id, kind) in zip(groups, expected_groups, strict=True):
+        group = _required_mapping(group, label="conditioning gradient group")
+        _require_exact_keys(
+            group,
+            {"group_id", "kind", "parameters"},
+            label="conditioning gradient group",
+        )
+        _exact_string(group.get("group_id"), group_id, label="gradient group ID")
+        _exact_string(group.get("kind"), kind, label="gradient group kind")
+        parameters = group.get("parameters")
+        if not isinstance(parameters, list) or not parameters:
+            raise ValueError("conditioning gradient group must have parameters")
+        for parameter in parameters:
+            parameter = _required_mapping(
+                parameter, label="conditioning parameter manifest"
+            )
+            _require_exact_keys(
+                parameter,
+                {"name", "shape"},
+                label="conditioning parameter manifest",
+            )
+            name = parameter.get("name")
+            shape = parameter.get("shape")
+            if (
+                not isinstance(name, str)
+                or not name
+                or name in names
+                or not isinstance(shape, list)
+                or not shape
+                or any(
+                    type(dimension) is not int or dimension <= 0 for dimension in shape
+                )
+            ):
+                raise ValueError("conditioning parameter manifest is invalid")
+            names.add(name)
+    digest = canonical_json_sha256(contract)
+    _exact_string(
+        expected_sha256,
+        digest,
+        label="registered conditioning gradient contract digest",
+    )
+    return contract
+
+
+def _validate_gradient_group_report(
+    value: object,
+    *,
+    contract_group: dict[str, object],
+    require_nonzero: bool,
+) -> dict[str, object]:
+    report = _required_mapping(value, label="conditioning gradient group report")
+    _require_exact_keys(
+        report,
+        {
+            "group_id",
+            "ordered_parameter_manifest_sha256",
+            "parameter_count",
+            "gradient_element_count",
+            "all_gradients_present",
+            "all_gradients_finite",
+            "all_parameter_gradients_nonzero",
+        },
+        label="conditioning gradient group report",
+    )
+    _exact_string(
+        report.get("group_id"),
+        contract_group["group_id"],
+        label="conditioning gradient report group ID",
+    )
+    _exact_string(
+        report.get("ordered_parameter_manifest_sha256"),
+        canonical_json_sha256(contract_group["parameters"]),
+        label="conditioning gradient parameter-manifest digest",
+    )
+    _exact_integer(
+        report.get("parameter_count"),
+        len(contract_group["parameters"]),
+        label="conditioning gradient parameter count",
+    )
+    expected_elements = sum(
+        math.prod(parameter["shape"]) for parameter in contract_group["parameters"]
+    )
+    _exact_integer(
+        report.get("gradient_element_count"),
+        expected_elements,
+        label="conditioning gradient element count",
+    )
+    _required_true(report, "all_gradients_present", label="gradient-present flag")
+    _required_true(report, "all_gradients_finite", label="gradient-finite flag")
+    nonzero = report.get("all_parameter_gradients_nonzero")
+    if type(nonzero) is not bool:
+        raise ValueError("conditioning gradient nonzero flag must be boolean")
+    if require_nonzero and nonzero is not True:
+        raise ValueError("required conditioning gradients are zero")
+    return report
+
+
+def _validate_conditioning_gradient_audit(
+    value: object,
+    *,
+    conditioning_variant: str,
+    launch_manifest: object,
+) -> dict[str, object] | None:
+    if conditioning_variant != "film_adaln":
+        if value is not None:
+            raise ValueError("non-FiLM summary must have a null gradient audit")
+        return None
+    report = _required_mapping(value, label="conditioning gradient audit")
+    _require_exact_keys(
+        report,
+        {
+            "schema_version",
+            "status",
+            "observation_point",
+            "registered_contract_sha256",
+            "first_positive_lr_optimizer_step",
+            "timestep_mlp_required_optimizer_check",
+            "optimizer_checks",
+        },
+        label="conditioning gradient audit",
+    )
+    manifest = _required_mapping(launch_manifest, label="launch manifest")
+    screen = _required_mapping(
+        manifest.get("optimization_screen"), label="optimization-screen manifest"
+    )
+    contract = _validate_gradient_contract(
+        screen.get("conditioning_gradient_contract"),
+        screen.get("conditioning_gradient_contract_sha256"),
+    )
+    _exact_integer(report.get("schema_version"), 1, label="gradient audit schema")
+    _exact_string(report.get("status"), "completed", label="gradient audit status")
+    _exact_string(
+        report.get("observation_point"),
+        contract["observation_point"],
+        label="gradient audit observation point",
+    )
+    _exact_string(
+        report.get("registered_contract_sha256"),
+        canonical_json_sha256(contract),
+        label="gradient audit registered contract digest",
+    )
+    _exact_integer(
+        report.get("first_positive_lr_optimizer_step"),
+        2,
+        label="gradient audit first positive-LR step",
+    )
+    _exact_integer(
+        report.get("timestep_mlp_required_optimizer_check"),
+        3,
+        label="gradient audit timestep backward index",
+    )
+    checks = report.get("optimizer_checks")
+    if not isinstance(checks, list) or len(checks) != 3:
+        raise ValueError("conditioning gradient audit must have three checks")
+    contract_groups = {group["group_id"]: group for group in contract["groups"]}
+    for index, check in enumerate(checks, start=1):
+        check = _required_mapping(check, label="conditioning gradient check")
+        _require_exact_keys(
+            check,
+            {
+                "optimizer_gradient_observation_index",
+                "optimizer_step_index",
+                "learning_rate_before_step",
+                "film_groups",
+                "timestep_mlp_groups",
+            },
+            label="conditioning gradient check",
+        )
+        _exact_integer(
+            check.get("optimizer_gradient_observation_index"),
+            index,
+            label="optimizer gradient observation index",
+        )
+        _exact_integer(
+            check.get("optimizer_step_index"), index, label="optimizer-step index"
+        )
+        learning_rate = check.get("learning_rate_before_step")
+        if (
+            isinstance(learning_rate, bool)
+            or not isinstance(learning_rate, (int, float))
+            or not math.isfinite(float(learning_rate))
+            or float(learning_rate) < 0.0
+            or (index == 1 and float(learning_rate) != 0.0)
+            or (index in (2, 3) and float(learning_rate) <= 0.0)
+        ):
+            raise ValueError(
+                "conditioning gradient learning-rate transition is invalid"
+            )
+        for key, group_id, required_index in (
+            ("film_groups", "film_modulation", 1),
+            ("timestep_mlp_groups", "timestep_mlp", 3),
+        ):
+            groups = check.get(key)
+            if not isinstance(groups, list) or len(groups) != 1:
+                raise ValueError("conditioning gradient check group list is invalid")
+            _validate_gradient_group_report(
+                groups[0],
+                contract_group=contract_groups[group_id],
+                require_nonzero=index == required_index,
+            )
+    return report
+
+
+def _validate_screen_initialization_state_audit(
+    value: object,
+    *,
+    conditioning_variant: str,
+    training_seed: int,
+    expected_checkpoint_sha256: str | None,
+    expected_config_sha256: str,
+    launch_manifest: object,
+) -> dict[str, object] | None:
+    """Validate the exact post-warm-start state bound to a screen attempt."""
+
+    manifest = _required_mapping(launch_manifest, label="launch manifest")
+    screen = manifest.get("optimization_screen")
+    if screen is None:
+        if value is not None:
+            raise ValueError(
+                "non-screen summary must have a null initialization-state audit"
+            )
+        return None
+    _required_mapping(screen, label="optimization-screen manifest")
+    if expected_checkpoint_sha256 is None:
+        raise ValueError("optimization screen requires a warm-start checkpoint")
+    audit = _required_mapping(
+        value, label="optimization-screen initialization-state audit"
+    )
+    _require_exact_keys(
+        audit,
+        {
+            "schema_version",
+            "phase",
+            "source_checkpoint_sha256",
+            "resolved_training_config_sha256",
+            "training_seed",
+            "conditioning_variant",
+            "common_backbone_tensor_count",
+            "common_backbone_state_sha256",
+            "full_initial_tensor_count",
+            "full_initial_state_sha256",
+        },
+        label="optimization-screen initialization-state audit",
+    )
+    _exact_integer(audit.get("schema_version"), 1, label="state-audit schema")
+    _exact_string(
+        audit.get("phase"),
+        "after_verified_mdlm_ema_warm_start_before_training_rng_reseed_and_optimizer_creation",
+        label="state-audit phase",
+    )
+    _exact_string(
+        audit.get("source_checkpoint_sha256"),
+        expected_checkpoint_sha256,
+        label="state-audit warm-start checkpoint digest",
+    )
+    _exact_string(
+        audit.get("resolved_training_config_sha256"),
+        expected_config_sha256,
+        label="state-audit resolved-config digest",
+    )
+    _exact_integer(
+        audit.get("training_seed"), training_seed, label="state-audit training seed"
+    )
+    _exact_string(
+        audit.get("conditioning_variant"),
+        conditioning_variant,
+        label="state-audit conditioning variant",
+    )
+    common_count = _positive_integer_field(
+        audit,
+        "common_backbone_tensor_count",
+        label="state-audit common-backbone tensor count",
+    )
+    full_count = _positive_integer_field(
+        audit,
+        "full_initial_tensor_count",
+        label="state-audit full tensor count",
+    )
+    if full_count < common_count:
+        raise ValueError("state-audit full tensor count is smaller than common state")
+    _sha256_field(
+        audit,
+        "common_backbone_state_sha256",
+        label="state-audit common-backbone digest",
+    )
+    _sha256_field(
+        audit,
+        "full_initial_state_sha256",
+        label="state-audit full-state digest",
+    )
+    return audit
+
+
 def validate_runtime_config(
     runtime: object,
     *,
@@ -549,17 +912,17 @@ def validate_runtime_config(
     )
     if record.get("observed_training_argv") != training_argv:
         raise ValueError("runtime observed argv disagrees with its base training argv")
-    launch_manifest = _validate_snapshot_claim(
+    launch_manifest_claim = _validate_snapshot_claim(
         record.get("launch_manifest"),
         expected_path=expected_launch_manifest_path,
         label="runtime launch manifest evidence",
     )
     _exact_string(
-        launch_manifest.get("sha256"),
+        launch_manifest_claim.get("sha256"),
         expected_launch_manifest_sha256,
         label="runtime launch manifest raw SHA-256",
     )
-    if launch_manifest.get("selected_gpu_uuids") != expected_selected_gpu_uuids:
+    if launch_manifest_claim.get("selected_gpu_uuids") != expected_selected_gpu_uuids:
         raise ValueError(
             "runtime launch manifest selected GPU UUIDs do not equal the "
             "launch-pinned value"
@@ -590,6 +953,7 @@ def validate_training_summary(
     expected_final_checkpoint_path: Path,
     expected_initialization_checkpoint_sha256: str | None,
     resolved_training_config: object,
+    launch_manifest: object,
 ) -> dict[str, object]:
     """Validate the completion fields that bind the summary to this launch."""
 
@@ -600,6 +964,33 @@ def validate_training_summary(
         )
     if not isinstance(summary, dict):
         raise ValueError("training summary root must be a JSON object")
+    _require_exact_keys(
+        summary,
+        {
+            "schema_version",
+            "status",
+            "completed_at_utc",
+            "source_revision",
+            "source",
+            "resolved_training_config_sha256",
+            "training_argv_sha256",
+            "launch_manifest",
+            "runtime_config",
+            "completion_contract",
+            "observed_training_state",
+            "training_accounting",
+            "training_health",
+            "conditioning_gradient_audit",
+            "screen_initialization_state_audit",
+            "final_checkpoint",
+            "tensor_finiteness",
+            "startup",
+        },
+        label="training summary",
+    )
+    conditioning_variant, reseed_after_initialization, configured_seed = (
+        _conditioning_configuration(resolved_training_config)
+    )
     _exact_integer(
         summary.get("schema_version"),
         expected_schema_version,
@@ -645,17 +1036,17 @@ def validate_training_summary(
         label="training summary source upstream",
     )
 
-    launch_manifest = _validate_snapshot_claim(
+    summary_manifest_claim = _validate_snapshot_claim(
         summary.get("launch_manifest"),
         expected_path=expected_launch_manifest_path,
         label="training summary launch manifest evidence",
     )
     _exact_string(
-        launch_manifest.get("sha256"),
+        summary_manifest_claim.get("sha256"),
         expected_launch_manifest_sha256,
         label="training summary launch manifest raw SHA-256",
     )
-    if launch_manifest.get("selected_gpu_uuids") != expected_selected_gpu_uuids:
+    if summary_manifest_claim.get("selected_gpu_uuids") != expected_selected_gpu_uuids:
         raise ValueError(
             "training summary selected GPU UUIDs do not equal the launch-pinned value"
         )
@@ -810,9 +1201,12 @@ def validate_training_summary(
         accounting.get("trainable_parameter_counts"),
         label="accounting trainable parameter counts",
     )
+    expected_parameter_count_keys = {"base_backbone", "time_conditioner", "total"}
+    if conditioning_variant == "film_adaln":
+        expected_parameter_count_keys.add("film_modulation")
     _require_exact_keys(
         parameter_counts,
-        {"base_backbone", "time_conditioner", "total"},
+        expected_parameter_count_keys,
         label="accounting trainable parameter counts",
     )
     base_backbone = _positive_integer_field(
@@ -825,19 +1219,23 @@ def validate_training_summary(
         "time_conditioner",
         label="accounting time-conditioner trainable parameter count",
     )
+    film_modulation = 0
+    if conditioning_variant == "film_adaln":
+        film_modulation = _positive_integer_field(
+            parameter_counts,
+            "film_modulation",
+            label="accounting FiLM trainable parameter count",
+        )
     total_trainable = _positive_integer_field(
         parameter_counts,
         "total",
         label="accounting total trainable parameter count",
     )
-    if total_trainable != base_backbone + time_conditioner:
+    if total_trainable != base_backbone + time_conditioner + film_modulation:
         raise ValueError("accounting trainable parameter counts do not add up")
 
     resolved_config = _required_mapping(
         resolved_training_config, label="resolved training config for accounting"
-    )
-    configured_seed = _nonnegative_integer_field(
-        resolved_config, "seed", label="configured training seed"
     )
     if training_seed != configured_seed:
         raise ValueError("accounting training seed disagrees with resolved config")
@@ -1041,6 +1439,10 @@ def validate_training_summary(
         raise ValueError("live and serialized EMA finiteness evidence disagree")
 
     startup = _required_mapping(summary.get("startup"), label="startup evidence")
+    expected_startup_keys = {"mode", "verified_mdlm_warm_start_report"}
+    if reseed_after_initialization:
+        expected_startup_keys.add("training_rng_policy")
+    _require_exact_keys(startup, expected_startup_keys, label="startup evidence")
     startup_mode = startup.get("mode")
     expected_startup_mode = (
         "warm_start"
@@ -1082,6 +1484,60 @@ def validate_training_summary(
     elif warm_start is not None:
         raise ValueError("non-warm-start summary contains an MDLM warm-start report")
 
+    if reseed_after_initialization:
+        if startup_mode != "warm_start":
+            raise ValueError("post-initialization reseeding requires MDLM warm-start")
+        rng_policy = _required_mapping(
+            startup.get("training_rng_policy"), label="training RNG policy"
+        )
+        expected_rng_policy = {
+            "policy": "reseed_all_training_rng_streams_after_model_and_warm_start",
+            "seed": configured_seed,
+            "purpose": "isolate_training_randomness_from_architecture_constructor_draws",
+            "applied_before_dataloader_and_trainer_construction": True,
+        }
+        if rng_policy != expected_rng_policy:
+            raise ValueError("training RNG policy disagrees with the resolved config")
+
+    conditioning_gradient_audit = _validate_conditioning_gradient_audit(
+        summary.get("conditioning_gradient_audit"),
+        conditioning_variant=conditioning_variant,
+        launch_manifest=launch_manifest,
+    )
+    screen_initialization_state_audit = _validate_screen_initialization_state_audit(
+        summary.get("screen_initialization_state_audit"),
+        conditioning_variant=conditioning_variant,
+        training_seed=configured_seed,
+        expected_checkpoint_sha256=(expected_initialization_checkpoint_sha256),
+        expected_config_sha256=expected_config_sha256,
+        launch_manifest=launch_manifest,
+    )
+    if conditioning_variant == "film_adaln":
+        screen = _required_mapping(
+            _required_mapping(launch_manifest, label="launch manifest").get(
+                "optimization_screen"
+            ),
+            label="optimization-screen manifest",
+        )
+        gradient_contract = _validate_gradient_contract(
+            screen.get("conditioning_gradient_contract"),
+            screen.get("conditioning_gradient_contract_sha256"),
+        )
+        contract_counts = {
+            group["group_id"]: sum(
+                math.prod(parameter["shape"]) for parameter in group["parameters"]
+            )
+            for group in gradient_contract["groups"]
+        }
+        if (
+            film_modulation != contract_counts["film_modulation"]
+            or time_conditioner != contract_counts["timestep_mlp"]
+        ):
+            raise ValueError(
+                "conditioning contract parameter sizes disagree with training "
+                "accounting"
+            )
+
     return {
         "schema_version": expected_schema_version,
         "source_revision": expected_source_revision,
@@ -1097,6 +1553,8 @@ def validate_training_summary(
         "final_checkpoint_path": str(expected_final_checkpoint_path),
         "final_checkpoint_sha256": final_checkpoint["sha256"],
         "startup_mode": startup_mode,
+        "conditioning_gradient_audit": conditioning_gradient_audit,
+        "screen_initialization_state_audit": (screen_initialization_state_audit),
     }
 
 
@@ -1175,9 +1633,10 @@ def build_exit_receipt(args: argparse.Namespace) -> tuple[dict[str, object], int
         raise ValueError(
             "launch manifest must be launch_manifest.json beside the training summary"
         )
-    if len(
-        {summary_path, receipt_path, final_checkpoint_path, launch_manifest_path}
-    ) != 4:
+    if (
+        len({summary_path, receipt_path, final_checkpoint_path, launch_manifest_path})
+        != 4
+    ):
         raise ValueError(
             "pilot manifest, summary, receipt, and checkpoint paths must be distinct"
         )
@@ -1303,7 +1762,10 @@ def build_exit_receipt(args: argparse.Namespace) -> tuple[dict[str, object], int
     except (OSError, ValueError) as error:
         lock_evidence["validation_error"] = f"{type(error).__name__}: {error}"
     try:
-        if current_manifest is None or manifest_evidence["validation_error"] is not None:
+        if (
+            current_manifest is None
+            or manifest_evidence["validation_error"] is not None
+        ):
             raise ValueError(
                 "launch manifest validation failed: "
                 f"{manifest_evidence['validation_error']}"
@@ -1354,9 +1816,7 @@ def build_exit_receipt(args: argparse.Namespace) -> tuple[dict[str, object], int
             expected_config_sha256=args.expected_config_sha256,
             expected_argv_sha256=args.expected_argv_sha256,
             expected_launch_manifest_path=launch_manifest_path,
-            expected_launch_manifest_sha256=(
-                args.expected_launch_manifest_sha256
-            ),
+            expected_launch_manifest_sha256=(args.expected_launch_manifest_sha256),
             expected_selected_gpu_uuids=args.expected_selected_gpu_uuids,
             expected_max_steps=args.expected_max_steps,
             expected_world_size=args.expected_world_size,
@@ -1364,9 +1824,8 @@ def build_exit_receipt(args: argparse.Namespace) -> tuple[dict[str, object], int
             expected_initialization_checkpoint_sha256=(
                 args.expected_initialization_checkpoint_sha256
             ),
-            resolved_training_config=runtime_mapping.get(
-                "resolved_training_config"
-            ),
+            resolved_training_config=runtime_mapping.get("resolved_training_config"),
+            launch_manifest=parsed_manifest,
         )
         expected_runtime_record_sha256 = parsed["runtime_config"]["record_sha256"]
         _exact_string(
@@ -1380,9 +1839,7 @@ def build_exit_receipt(args: argparse.Namespace) -> tuple[dict[str, object], int
             expected_config_sha256=args.expected_config_sha256,
             expected_argv_sha256=args.expected_argv_sha256,
             expected_launch_manifest_path=launch_manifest_path,
-            expected_launch_manifest_sha256=(
-                args.expected_launch_manifest_sha256
-            ),
+            expected_launch_manifest_sha256=(args.expected_launch_manifest_sha256),
             expected_selected_gpu_uuids=args.expected_selected_gpu_uuids,
             expected_completion_contract=parsed["completion_contract"],
         )

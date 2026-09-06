@@ -1,6 +1,6 @@
 # GenMol v2 project context
 
-Snapshot: 2026-09-06 09:25 Asia/Dubai. Recheck dynamic state, especially Git
+Snapshot: 2026-09-06 10:35 Asia/Dubai. Recheck dynamic state, especially Git
 status, logs, tmux sessions, and GPU occupancy, before acting.
 
 ## Active objective and safe workspace
@@ -16,9 +16,11 @@ status, logs, tmux sessions, and GPU occupancy, before acting.
   `3be650e3a32a0bb9fd12c7cdc684cb38ec94d953`. It adds strict optimizer-step
   scheduler identity, prospective E-L0/E-L1 bundles, the warm-start-compatible
   A1 post-BERT FiLM conditioner, exact conditioning checkpoint identity,
-  constructor-RNG isolation plumbing, and their teaching/tests. These screen
-  arms remain deliberately unauthorized until a separate registry, launcher,
-  and verifier are frozen. The distinct source revision
+  constructor-RNG isolation plumbing, and their teaching/tests. The newer
+  CPU-only source tranche implements the registry preparer, registry-aware
+  launcher, evidence producers/collector, and independent verifier, but the
+  screen arms remain deliberately unauthorized until the user chooses a GPU
+  count and the exact registry is frozen. The distinct source revision
   used to produce the immutable current-code MDLM rescore is
   `74482c2742ab5ad15def122c809a6b4e403e94cf`. It contains the hardened
   completion contract, pilot-only distributed-stream repair and scheduler
@@ -107,11 +109,64 @@ timestep MLP, then uses a zero-initialized `H -> 2H` shift/scale projection afte
 each layer. At initialization it is an exact MDLM-logit identity. Production
 `H=768`, `L=12` gives 14,174,208 FiLM parameters and 14,962,176 total
 conditioning parameters. With the actual schedulers, optimizer update one has
-LR zero: FiLM gradients exist on backward one, but the first positive-rate
-FiLM update is optimizer update two, so the timestep MLP can first receive a
-nonzero gradient on backward three. Both 500-update A arms must start
+LR zero: every FiLM parameter has a nonzero gradient at optimizer-gradient
+observation one, but the first positive-rate FiLM update is optimizer update
+two, so every timestep-MLP parameter is required nonzero at observation three.
+Both 500-update A arms must start
 independently from the same verified MDLM EMA and reseed after construction;
 neither may continue a scheduler-screen checkpoint.
+
+The production optimizer-gradient topology is frozen independently of the
+later GPU-count-specific arm registry in
+`experiments/udlm/protocols/film_gradient_contract_v1.json`: raw SHA-256
+`b2a666a23351eb0882a179f7ae5d09fafd2188fee924313cdf60ee94888e7ac5`,
+canonical SHA-256
+`ff45961276df75f445221fd1aa4629262d21fdb852bd9b226ad56fe2559315d5`.
+It binds the ordered names and shapes of all 24 FiLM and four timestep-MLP
+tensors plus optimizer observations 1--3. Training-summary schema 4 always
+contains `conditioning_gradient_audit`: null for non-A1 arms and a
+contract-bound staged-gradient certificate for A1. Exit-receipt schema 4
+revalidates and echoes that value. Every optimization-screen arm additionally
+captures a ten-field `screen_initialization_state_audit` after the verified
+MDLM-EMA warm start and before RNG reseeding or optimizer construction. It
+domain-separates and hashes the sorted backbone tensor names, dtypes, shapes,
+and exact raw bytes both for the full backbone and for the common subset that
+excludes timestep/FiLM tensors. The receipt validates and echoes this record;
+the screen verifier requires identical full/common states for L0/L1 and an
+identical common backbone for A0/A1.
+
+A full-size, CPU-only pre-registry diagnostic independently constructed A0 and
+A1 from the real 50,000-step MDLM EMA checkpoint and evaluated the pinned
+literal fixture. Both produced shape `[2, 4, 1880]`, 60,160 raw little-endian
+float32 bytes, and exact SHA-256
+`3e6ef7368f9a11d061640948ac5955fba81c2acac6546a12adc4efc5e22e15b8`;
+byte equality was exact. The sequential probe took 33.55 seconds and about
+3,578,044 KiB peak RSS. This verifies the intended initialization identity on
+the production topology but is not registered screen evidence, a training
+result, or a quality claim; the audit must be rerun under the later frozen
+registry and pushed conditioning-authorization revision.
+
+The CPU-side screen authority is now implemented but has intentionally not
+been instantiated. `prepare_optimization_screen_registry.py` first composes
+six exact GPU-count-specific configurations and later, only from a clean
+pushed source revision, validates and writes a registry as the sole prospective
+next-commit change. `launch_optimization_screen.py` accepts only a registered
+stage and arm: the registry, not CLI overrides, fixes GPU count, seed, updates,
+checkpoint, batch arithmetic, configuration, and output path. The launcher
+reuses the repository-global job lease and last-moment idle-UUID re-probe.
+`collect_optimization_screen_evidence.py` derives hashes from completed arm
+artifacts and preflights its no-clobber evidence through the independent
+`verify_optimization_screen.py`; missing or invalid evidence yields no winner,
+whereas a complete threshold miss explicitly retains the registered control.
+
+The Git chronology is part of the experimental contract. R0 will contain the
+pushed implementation plus the six resolved configs but no registry. R1 may
+add only the frozen registry and is the scheduler-run source. After both
+scheduler arms finish, their collected evidence and deterministic selection
+are the only permitted R1-to-R2 additions; pushed R2 then authorizes the two
+fresh conditioning arms. No resolved configs or registry exist yet because the
+user has not selected one or two GPUs, so no screen arm is currently
+authorized despite the completed CPU implementation.
 
 The benchmark and report pipeline now binds each run to its clean pushed source
 revision, tracked inference-config blob, checkpoint, tokenizer/data/SA inputs,
@@ -151,7 +206,7 @@ nonzero-status evidence makes the launcher fail. The semantic checkpoint audit
 now deserializes the same open file descriptor whose bytes and identity were
 certified, so a byte-identical pathname replacement also fails. The launch
 manifest uses schema 1, runtime config schema 2, and training summary plus exit
-receipt schema 3. They record the training seed, optimizer updates, world size,
+receipt schema 4. They record the training seed, optimizer updates, world size,
 microbatch, accumulation, requested example exposure, hosted-stream partition
 policy, trainable base/time-adapter parameter split, exact EMA shadow
 count/decay/update count, GPU telemetry, and manifest/lease bindings. These
@@ -195,9 +250,9 @@ query was used for this validation.
 
 The frozen protocol is
 `experiments/udlm/protocols/de_novo_superiority_v1.json`, raw SHA-256
-`a44263d56a42593ca9f1b9c00c7ad8177229f0f4fa9ff941ab07481054b84848`
+`d734e2771e94b54f3bdb2e86e6da496d855a3eb7a7bd07abbbcdfbf406ab4a20`
 and canonical SHA-256
-`6c33533dc220f5d6682964fd94de3ce85a4425e2cce8ca21df227feeb4d0af2e`.
+`3b36fc1df19d4fdce4e522b3f9963eb55a9a136575bab361362b114dae25f53d`.
 The publication gate
 requires all four point estimates and all four one-sided 95% interval criteria
 for one checkpoint locked before final seeds 0, 1, and 2. Validity uses pooled
@@ -430,6 +485,16 @@ Completed prior items:
 - All six real-checkpoint R/S/E dry-run configurations were then re-resolved at
   `3be650e` for one and two GPUs. Their updated digests are recorded above; no
   project launch artifact, GPU probe, or tmux action occurred.
+- The current CPU-only optimization-screen tranche adds summary/receipt schema
+  4 state and staged-gradient attestations, the frozen FiLM topology and
+  initialization fixture, a strict screen verifier, initialization-audit and
+  evidence producers, a registry-controlled launcher, and the two-phase
+  config/registry preparer. Its broad integration subset passed `270` tests;
+  after integration and notebook regeneration the exact worktree full suite
+  passed `751` tests with `14` dependency warnings in 173.45 seconds. Ruff,
+  `py_compile`, notebook regeneration tests, and `git diff --check` also
+  passed. This tranche has not queried GPUs, launched training, materialized a
+  GPU-count-specific config set, or frozen a registry.
 
 Remaining sequence:
 
@@ -438,11 +503,13 @@ Remaining sequence:
 2. Only after that choice, perform the first fresh GPU inventory and exact-UUID
    re-probe, then launch the matched 10-step `R/S/E` engineering pilot.
 3. Review its authoritative manifests, receipts, checkpoints, and
-   non-authoritative logs. Before authorizing the 100-update scheduler screen,
-   implement and freeze the separate optimization-screen registry, launcher,
-   evidence schemas, and CPU-only selection verifier, including all deferred
-   A1 schema bindings listed above. Do not rank variants from 10-step losses or
-   32-sample health diagnostics.
+   non-authoritative logs. If the health gate passes, materialize the six exact
+   configs for the user-selected GPU count, commit and push them with the
+   reviewed implementation as R0, then run the CPU-only freezer and commit/push
+   its registry as the sole R1 change. The launcher, evidence schemas,
+   initialization/gradient producers, collector, and independent selector are
+   already implemented. Do not rank variants from 10-step losses or 32-sample
+   health diagnostics.
 4. Run E-L0/E-L1 only under the frozen 100-update registry. If complete, use
    its verified scheduler decision for two fresh 500-update A0/A1 warm starts;
    never continue a scheduler-screen checkpoint or use final seeds.

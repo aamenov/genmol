@@ -70,7 +70,7 @@ selection score. The machine-readable winner is the highest mean quality,
 then highest mean diversity, then lexicographically smallest attempt ID.
 Artifacts using benchmark-run schema 6 or aggregate-report schema 5 are
 rejected; the required versions are benchmark 7, report 6, launch manifest 1,
-training runtime config 2, training summary 3, and successful exit receipt 3.
+training runtime config 2, training summary 4, and successful exit receipt 4.
 
 The MDLM side of the gate is independently bound to
 `experiments/udlm/baselines/mdlm_50000_rescore_attestation.json` (SHA-256
@@ -170,9 +170,10 @@ Combining clean logits would not equal the UDLM paper's D-CFG rule.
    at least 2% lower, at least two of the three time bins improve, and no bin is
    more than 2% worse. A complete valid screen that misses a threshold retains
    E-L0; missing, malformed, or unmatched evidence yields no winner. The code
-   and CPU tests exist, but the exact arm registry and selection record are not
-   frozen, the launcher does not yet authorize these arms, and no GPU screen has
-   run.
+   and CPU tests exist, including a strict registry-aware launcher, evidence
+   collector, and independent selector. The exact GPU-count-specific configs
+   and registry are deliberately not materialized yet, however, so the
+   launcher cannot authorize either arm and no GPU screen has run.
 5. **Implemented but not yet registered or authorized conditioning screen:** on
    E only, seed 17, train 500 updates with the selected scheduler. Both E-A0 and
    E-A1 start independently from the same verified MDLM-EMA checkpoint; neither
@@ -184,10 +185,11 @@ Combining clean logits would not equal the UDLM paper's D-CFG rule.
    $H\to2H$ FiLM projection after each BERT layer. Select A1 only if it exactly
    preserves warm-start logits before training, pooled fixed-panel content-token
    loss is at least 2% lower, no $t\in\{0.1,0.5,0.9\}$ bin is more than 2% worse,
-   clean-token accuracy is nondecreasing, every layer's FiLM group has finite
-   nonzero gradients on the first backward, and the timestep MLP has finite
-   nonzero gradients after the first **nonzero-learning-rate** FiLM update
-   (backward three under either registered schedule, because optimizer update
+   clean-token accuracy is nondecreasing, every FiLM parameter has a finite
+   nonzero gradient at the first post-accumulation optimizer observation, and
+   every timestep-MLP parameter has a finite
+   nonzero gradient after the first **nonzero-learning-rate** FiLM update
+   (optimizer observation three under either registered schedule, because update
    one uses learning rate zero). A complete valid screen that misses a selection
    condition retains A0; malformed or incomplete evidence yields no winner.
    This is implemented experimental plumbing, not an executed result.
@@ -208,6 +210,20 @@ Combining clean logits would not equal the UDLM paper's D-CFG rule.
    final seeds, once each in their predeclared directories at 128 NFE. Update
    the benchmark PDF only after the raw-row reporter and registered superiority
    gate both validate the result.
+
+The optimization screens use a three-revision firewall. Once the user chooses
+one or two GPUs, the CPU-only preparer composes two scheduler configs and four
+conditioning configs (A0/A1 contingent on either scheduler), all at effective
+global batch 16 with per-process microbatch 2. Those six JSON files are
+committed with the implementation in clean pushed revision R0; the registry
+path must not exist there. The preparer then validates every live/Git blob,
+replays each config through the launcher's Hydra composition, streams the exact
+MDLM checkpoint hash, and writes the registry as the only R0-to-R1 candidate.
+After that registry-only commit is pushed, R1 may run E-L0/E-L1. Their evidence
+and deterministic selection are the only permitted R1-to-R2 additions. Pushed
+R2 may then run only the A0/A1 configs contingent on the selected scheduler.
+This ordering prevents a result from changing its own registry or its later
+conditioning comparison.
 
 ### What the prospective L1 and A1 arms change
 
@@ -270,14 +286,51 @@ encoder loop passes $h_l$ into stock BERT layer $l+1$ (and the final $h_L$ to
 the classifier); it uses neither hooks nor mutable forward state. Both $W_l$
 and $b_l$ start at zero, so $h_l=y_l$ exactly for every $\sigma$ and the MDLM
 warm-start logits are unchanged. The timestep MLP $g$ must *not* also have a
-zero output: a nonzero $c$ lets each $W_l$ receive a gradient on backward one.
-Since every $W_l$ is zero then, the gradient into $g$ is zero on backward one
-by construction. Both registered schedules use learning-rate index zero on
-optimizer update one, so that zero-rate step leaves $W_l=0$ and backward two
-also gives zero gradient to $g$. Optimizer update two has positive learning rate
-and changes $W_l$; the next backward (backward three) can make $g$'s gradient
-nonzero. The gate is therefore phrased as "after the first nonzero-rate FiLM
+zero output: a nonzero $c$ lets each $W_l$ receive a gradient at optimizer-
+gradient observation one. Since every $W_l$ is zero then, the gradient into $g$
+is zero at that observation by construction. Both registered schedules use
+learning-rate index zero on optimizer update one, so that zero-rate step leaves
+$W_l=0$ and observation two also gives zero gradient to $g$. Optimizer update
+two has positive learning rate and changes $W_l$; observation three can make
+$g$'s gradient nonzero. The gate is therefore phrased as "after the first nonzero-rate FiLM
 update," rather than assuming that the first optimizer call changes weights.
+
+The exact production observation topology is frozen in
+`experiments/udlm/protocols/film_gradient_contract_v1.json` (raw SHA-256
+`b2a666a23351eb0882a179f7ae5d09fafd2188fee924313cdf60ee94888e7ac5`,
+canonical SHA-256
+`ff45961276df75f445221fd1aa4629262d21fdb852bd9b226ad56fe2559315d5`).
+It lists all 24 FiLM tensors and four timestep-MLP tensors in model order.
+Training-summary schema 4 records a contract-bound audit for A1 and explicit
+null for every other arm; exit-receipt schema 4 independently validates and
+echoes it. Every optimization-screen arm also records
+`screen_initialization_state_audit` immediately after the verified MDLM-EMA
+warm start and before any optional RNG reseed, dataloader, trainer, optimizer,
+or scheduler construction. Let $S$ be the sorted `backbone.state_dict()` and
+$C\subset S$ remove every timestep-MLP and FiLM name. A domain-separated
+SHA-256 frames each tensor's name, dtype, shape, and exact raw bytes. Scheduler
+arms must have identical full-state and common-state hashes; A0/A1 must have an
+identical common-state hash, while their topology-specific full hashes may
+differ. The summary retains this ten-field certificate and receipt schema 4
+validates and echoes it, so free-form evidence cannot substitute arbitrary
+initial-state digest strings.
+
+For a toy state with one shared weight and one timestep weight, changing only
+the timestep tensor changes the full hash but preserves the common hash;
+changing the shared weight changes both. The separate fixed literal CPU probe
+then tests the stronger functional invariant required for A0/A1: their raw
+float32 logit bytes must be exactly equal before training. Released GenMol has
+neither certificate because it has no optimization-screen conditioner pair;
+this is experimental provenance plumbing, not a change to its MDLM method.
+
+The full-size pre-registry CPU diagnostic has exercised that invariant against
+the actual 50,000-step MDLM EMA. A0 and A1 each emitted a `[2, 4, 1880]`
+tensor, or 60,160 raw little-endian float32 bytes, with the identical SHA-256
+`3e6ef7368f9a11d061640948ac5955fba81c2acac6546a12adc4efc5e22e15b8`.
+The sequential check took 33.55 seconds and about 3,578,044 KiB peak RSS. It is
+a topology diagnostic only: because no GPU-count-specific registry or pushed
+conditioning-authorization revision existed, it cannot substitute for the
+registered audit that gates A0/A1 selection.
 
 For example, with $B=2$, $S=4$, $H=24$, and $L=2$, $c$ has shape `[2, 24]`,
 each projection produces `[2, 48]`, each shift and scale has shape `[2, 24]`,
@@ -309,11 +362,12 @@ learning-rate sum by about 37.57 times, long before much cosine decay occurs.
 Why are zero FiLM projections compatible with useful first-step gradients?
 Expected reasoning: they make the forward map the identity, but the normally
 initialized timestep MLP supplies nonzero $c$, so projection gradients can be
-nonzero. Why does the timestep MLP wait until backward three under these
-schedules? Expected reasoning: on backward one its upstream Jacobian contains
-zero $W_l$; optimizer update one also has zero learning rate, so backward two
-sees zero $W_l$ again. Optimizer update two is the first positive-rate update,
-allowing backward three to propagate through nonzero FiLM weights.
+nonzero. Why need the timestep MLP not become nonzero until optimizer-gradient
+observation three under these schedules? Expected reasoning: at observation one
+its upstream Jacobian contains zero $W_l$; optimizer update one also has zero
+learning rate, so observation two sees zero $W_l$ again. Optimizer update two is
+the first positive-rate update, allowing observation three to propagate through
+nonzero FiLM weights.
 
 The warm-start route is an operational sample-efficiency comparison: it uses
 the MDLM checkpoint's previous data exposure. A method-only claim additionally

@@ -38,6 +38,10 @@ for _import_root in (REPOSITORY_ROOT, REPOSITORY_ROOT / "src"):
     sys.path.insert(0, str(_import_root))
 
 from scripts.udlm.materialize_validation_panel import validate_panel  # noqa: E402
+from genmol.backbone import (  # noqa: E402
+    ADDITIVE_CONDITIONING,
+    FILM_ADALN_CONDITIONING,
+)
 from genmol.diffusion import (  # noqa: E402
     ContinuousCategoricalDiffusion,
     ContinuousUniformDiffusion,
@@ -53,9 +57,11 @@ FROZEN_FREQUENCY_SHA256 = (
     "088c78e75611f3cc42c4011e1da6f65a377e673b9cba07a28b126b0fc62f06ed"
 )
 DEFAULT_TIME_BINS = (0.1, 0.3, 0.5, 0.7, 0.9)
-SCHEMA_VERSION = 3
+# Version 4 adds explicit, type-exact conditioning provenance to the result.
+SCHEMA_VERSION = 4
 
 UDLM_PRIOR_CHECKPOINT_KEY = "udlm_prior_metadata"
+UDLM_CONDITIONING_CHECKPOINT_KEY = "udlm_conditioning_metadata"
 EMPIRICAL_FREQUENCY_RELATIVE_PATH = Path(
     "experiments/udlm/token_frequency/train_first_10000.json"
 )
@@ -535,6 +541,127 @@ def _exact_data_equal(observed: Any, expected: Any) -> bool:
             for left, right in zip(observed, expected, strict=True)
         )
     return bool(observed == expected)
+
+
+def _exact_conditioning_record(value: Any, *, label: str) -> dict[str, Any]:
+    """Return detached canonical JSON data without hiding Python type changes."""
+
+    if type(value) is not dict:
+        raise ValueError(f"{label} must be an exact dictionary")
+    try:
+        encoded = json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        detached = json.loads(encoded)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{label} must contain canonical JSON data") from error
+    if not _exact_data_equal(value, detached):
+        raise ValueError(f"{label} contains non-canonical or type-coerced JSON data")
+    return detached
+
+
+def _validate_conditioning_identity(
+    model: Any,
+    checkpoint: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate and snapshot conditioning identity at one checkpoint-load phase."""
+
+    checkpoint_metadata_present = UDLM_CONDITIONING_CHECKPOINT_KEY in checkpoint
+    raw_checkpoint_metadata = checkpoint.get(UDLM_CONDITIONING_CHECKPOINT_KEY)
+    raw_runtime_metadata = getattr(model, "udlm_conditioning_metadata", None)
+    diffusion_type = getattr(model, "diffusion_type", None)
+
+    if diffusion_type != "udlm":
+        if raw_runtime_metadata is not None:
+            raise ValueError("non-UDLM model unexpectedly has conditioning metadata")
+        if checkpoint_metadata_present:
+            raise ValueError(
+                "non-UDLM checkpoint unexpectedly declares conditioning metadata"
+            )
+        return {
+            "runtime_conditioning_variant": None,
+            "applicability": "not_applicable_to_mdlm",
+            "checkpoint_metadata_key": UDLM_CONDITIONING_CHECKPOINT_KEY,
+            "checkpoint_metadata_required": False,
+            "checkpoint_metadata_present": False,
+            "checkpoint_metadata_validation": "correctly_absent_for_mdlm",
+            "runtime_metadata": None,
+            "runtime_metadata_canonical_sha256": None,
+            "checkpoint_metadata": None,
+            "checkpoint_metadata_canonical_sha256": None,
+        }
+
+    runtime_variant = getattr(
+        getattr(model, "backbone", None), "conditioning_variant", None
+    )
+    if type(runtime_variant) is not str or runtime_variant not in {
+        ADDITIVE_CONDITIONING,
+        FILM_ADALN_CONDITIONING,
+    }:
+        raise ValueError("UDLM runtime conditioning variant is missing or invalid")
+
+    if runtime_variant == ADDITIVE_CONDITIONING:
+        if raw_runtime_metadata is not None:
+            raise ValueError(
+                "additive UDLM runtime unexpectedly has FiLM conditioning metadata"
+            )
+        if checkpoint_metadata_present:
+            raise ValueError(
+                "additive UDLM checkpoint unexpectedly declares conditioning metadata"
+            )
+        return {
+            "runtime_conditioning_variant": ADDITIVE_CONDITIONING,
+            "applicability": "udlm_conditioning",
+            "checkpoint_metadata_key": UDLM_CONDITIONING_CHECKPOINT_KEY,
+            "checkpoint_metadata_required": False,
+            "checkpoint_metadata_present": False,
+            "checkpoint_metadata_validation": "correctly_absent_for_additive",
+            "runtime_metadata": None,
+            "runtime_metadata_canonical_sha256": None,
+            "checkpoint_metadata": None,
+            "checkpoint_metadata_canonical_sha256": None,
+        }
+
+    to_dict = getattr(raw_runtime_metadata, "to_dict", None)
+    if not callable(to_dict):
+        raise ValueError("FiLM UDLM runtime conditioning metadata is malformed")
+    runtime_metadata = _exact_conditioning_record(
+        to_dict(),
+        label="FiLM UDLM runtime conditioning metadata",
+    )
+    if not checkpoint_metadata_present:
+        raise ValueError(
+            "FiLM UDLM checkpoint is missing immutable conditioning metadata"
+        )
+    checkpoint_metadata = _exact_conditioning_record(
+        raw_checkpoint_metadata,
+        label="FiLM UDLM checkpoint conditioning metadata",
+    )
+    if not _exact_data_equal(checkpoint_metadata, runtime_metadata):
+        raise ValueError(
+            "FiLM UDLM checkpoint conditioning metadata is not type-exact with "
+            "the runtime topology"
+        )
+    runtime_sha256 = _canonical_sha256(runtime_metadata)
+    checkpoint_sha256 = _canonical_sha256(checkpoint_metadata)
+    if checkpoint_sha256 != runtime_sha256:  # pragma: no cover - implied by equality
+        raise RuntimeError("equal conditioning records produced different hashes")
+    return {
+        "runtime_conditioning_variant": FILM_ADALN_CONDITIONING,
+        "applicability": "udlm_conditioning",
+        "checkpoint_metadata_key": UDLM_CONDITIONING_CHECKPOINT_KEY,
+        "checkpoint_metadata_required": True,
+        "checkpoint_metadata_present": True,
+        "checkpoint_metadata_validation": "required_record_matches_runtime_exactly",
+        "runtime_metadata": runtime_metadata,
+        "runtime_metadata_canonical_sha256": runtime_sha256,
+        "checkpoint_metadata": checkpoint_metadata,
+        "checkpoint_metadata_canonical_sha256": checkpoint_sha256,
+    }
 
 
 def _runtime_prior_metadata(model: Any) -> dict[str, Any] | None:
@@ -1449,6 +1576,15 @@ def _checkpoint_metadata_from_payload(
         if checkpoint_prior_metadata is None
         else _plain_config(checkpoint_prior_metadata)
     )
+    checkpoint_declares_conditioning = UDLM_CONDITIONING_CHECKPOINT_KEY in checkpoint
+    checkpoint_conditioning_metadata = checkpoint.get(UDLM_CONDITIONING_CHECKPOINT_KEY)
+    if checkpoint_declares_conditioning:
+        plain_conditioning_metadata = _exact_conditioning_record(
+            checkpoint_conditioning_metadata,
+            label="checkpoint udlm_conditioning_metadata",
+        )
+    else:
+        plain_conditioning_metadata = None
     return {
         "path": str(path.resolve()),
         "sha256": snapshot["sha256"],
@@ -1471,6 +1607,13 @@ def _checkpoint_metadata_from_payload(
             else _canonical_sha256(plain_prior_metadata)
         ),
         "udlm_prior_metadata": plain_prior_metadata,
+        "udlm_conditioning_metadata_declared": checkpoint_declares_conditioning,
+        "udlm_conditioning_metadata_sha256": (
+            None
+            if plain_conditioning_metadata is None
+            else _canonical_sha256(plain_conditioning_metadata)
+        ),
+        "udlm_conditioning_metadata": plain_conditioning_metadata,
         "training_initialization_declaration": {
             "init_from_mdlm_checkpoint": initialization_checkpoint,
             "init_from_mdlm_ema": bool(training.get("init_from_mdlm_ema", True)),
@@ -1723,6 +1866,7 @@ def load_checkpoint_model(
     from genmol.model import (
         EMPIRICAL_FREQUENCY_RELATIVE_PATH as MODEL_FREQUENCY_RELATIVE_PATH,
         EMPIRICAL_FREQUENCY_SHA256 as MODEL_FREQUENCY_SHA256,
+        UDLM_CONDITIONING_CHECKPOINT_KEY as MODEL_CONDITIONING_CHECKPOINT_KEY,
         UDLM_PRIOR_CHECKPOINT_KEY as MODEL_PRIOR_CHECKPOINT_KEY,
         UDLM_PRIOR_VARIANT_IDENTITIES as MODEL_PRIOR_VARIANT_IDENTITIES,
         GenMol,
@@ -1730,6 +1874,7 @@ def load_checkpoint_model(
 
     if (
         MODEL_PRIOR_CHECKPOINT_KEY != UDLM_PRIOR_CHECKPOINT_KEY
+        or MODEL_CONDITIONING_CHECKPOINT_KEY != UDLM_CONDITIONING_CHECKPOINT_KEY
         or MODEL_FREQUENCY_RELATIVE_PATH != EMPIRICAL_FREQUENCY_RELATIVE_PATH
         or MODEL_FREQUENCY_SHA256 != FROZEN_FREQUENCY_SHA256
         or MODEL_PRIOR_VARIANT_IDENTITIES != UDLM_PRIOR_VARIANT_IDENTITIES
@@ -1757,6 +1902,10 @@ def load_checkpoint_model(
     model._validate_udlm_prior_checkpoint(checkpoint)
     model._validate_runtime_udlm_conditioning_identity()
     model._validate_udlm_conditioning_checkpoint(checkpoint)
+    conditioning_before_strict_load = _validate_conditioning_identity(
+        model,
+        checkpoint,
+    )
     runtime_metadata = getattr(model, "udlm_prior_metadata", None)
     runtime_record = None if runtime_metadata is None else runtime_metadata.to_dict()
     checkpoint_record = checkpoint.get(UDLM_PRIOR_CHECKPOINT_KEY)
@@ -1768,6 +1917,15 @@ def load_checkpoint_model(
     model.load_state_dict(checkpoint_state, strict=True)
     model._validate_runtime_udlm_prior_identity()
     model._validate_runtime_udlm_conditioning_identity()
+    conditioning_after_strict_load = _validate_conditioning_identity(
+        model,
+        checkpoint,
+    )
+    if not _exact_data_equal(
+        conditioning_after_strict_load,
+        conditioning_before_strict_load,
+    ):
+        raise RuntimeError("UDLM conditioning identity changed during strict load")
     manifest = _backbone_parameter_manifest(model, checkpoint_state)
     names = [name for name, _parameter, _raw_tensor in manifest]
     ema_enabled = model.ema is not None
@@ -1813,6 +1971,21 @@ def load_checkpoint_model(
             else "release_uniform categorical metadata/state absence and live "
             "process identity were checked before and after strict state loading"
         ),
+        "model_source_path": str(model_source_path),
+    }
+    weight_provenance["udlm_conditioning_identity"] = {
+        **conditioning_after_strict_load,
+        "validation": {
+            "before_strict_state_load": True,
+            "strict_state_load": True,
+            "after_strict_state_load": True,
+            "runtime_identity_unchanged": True,
+            "contract": (
+                "runtime variant, metadata requirement/presence, exact metadata, "
+                "and canonical hash were validated before and after strict state "
+                "loading"
+            ),
+        },
         "model_source_path": str(model_source_path),
     }
     model.backbone.eval()
@@ -2026,6 +2199,7 @@ def main() -> None:
             "weights_evaluated": args.weights,
             "weight_application": weight_provenance,
         },
+        "conditioning": weight_provenance["udlm_conditioning_identity"],
         "artifacts": artifact_provenance,
         "source": source_info,
         "runtime": runtime_info,

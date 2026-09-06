@@ -34,9 +34,9 @@ from scripts.exps.denovo import report as denovo_report  # noqa: E402
 
 SCHEMA_VERSION = 1
 PROTOCOL_RELATIVE_PATH = Path("experiments/udlm/protocols/de_novo_superiority_v1.json")
-PROTOCOL_SHA256 = "a44263d56a42593ca9f1b9c00c7ad8177229f0f4fa9ff941ab07481054b84848"
+PROTOCOL_SHA256 = "d734e2771e94b54f3bdb2e86e6da496d855a3eb7a7bd07abbbcdfbf406ab4a20"
 PROTOCOL_CANONICAL_SHA256 = (
-    "6c33533dc220f5d6682964fd94de3ce85a4425e2cce8ca21df227feeb4d0af2e"
+    "3b36fc1df19d4fdce4e522b3f9963eb55a9a136575bab361362b114dae25f53d"
 )
 BASELINE_RELATIVE_PATH = Path("experiments/udlm/baselines/mdlm_50000.json")
 BASELINE_SHA256 = "6da46fc615dedbcca436da087a2c1e9145f5d110036e0c15bb431ded3c2e5539"
@@ -67,8 +67,8 @@ CANDIDATE_LEDGER_SCHEMA_VERSION = 1
 PILOT_EVIDENCE_SCHEMA_VERSION = 1
 LAUNCH_MANIFEST_SCHEMA_VERSION = 1
 RUNTIME_CONFIG_SCHEMA_VERSION = 2
-TRAINING_SUMMARY_SCHEMA_VERSION = 3
-PILOT_EXIT_STATUS_SCHEMA_VERSION = 3
+TRAINING_SUMMARY_SCHEMA_VERSION = 4
+PILOT_EXIT_STATUS_SCHEMA_VERSION = 4
 MAX_SAFE_UTILIZATION_PERCENT = 10
 MIN_SAFE_FREE_MEMORY_MIB = 30_000
 REGISTERED_SELECTION_PILOT_SEEDS = (1000, 1001)
@@ -483,6 +483,23 @@ def validate_protocol(protocol: Mapping[str, Any]) -> None:
         raise GateValidationError("protocol must require every registered gate")
     for metric in METRICS:
         _mapping(uncertainty.get(metric), f"uncertainty gate {metric}")
+    lock_requirements = _mapping(
+        protocol.get("candidate_lock_requirements"),
+        "protocol.candidate_lock_requirements",
+    )
+    accepted_training_schemas = _mapping(
+        lock_requirements.get("accepted_training_artifact_schema_versions"),
+        "protocol accepted training artifact schemas",
+    )
+    if accepted_training_schemas != {
+        "launch_manifest": LAUNCH_MANIFEST_SCHEMA_VERSION,
+        "runtime_config": RUNTIME_CONFIG_SCHEMA_VERSION,
+        "training_summary": TRAINING_SUMMARY_SCHEMA_VERSION,
+        "successful_exit_receipt": PILOT_EXIT_STATUS_SCHEMA_VERSION,
+    }:
+        raise GateValidationError(
+            "protocol accepted training artifact schemas are unexpected"
+        )
 
 
 def _sample_sd(values: Sequence[float]) -> float:
@@ -1960,7 +1977,10 @@ def _validate_launch_manifest(
         raise GateValidationError("launch manifest purpose is unexpected")
     if manifest.get("git_sha") != lock["source_revision"]:
         raise GateValidationError("launch manifest source revision disagrees with lock")
-    if manifest.get("source_revision_before_final_gpu_probe") != lock["source_revision"]:
+    if (
+        manifest.get("source_revision_before_final_gpu_probe")
+        != lock["source_revision"]
+    ):
         raise GateValidationError(
             "launch manifest final-probe source revision disagrees with lock"
         )
@@ -2035,7 +2055,9 @@ def _validate_launch_manifest(
     if len(set(inventory_uuids)) != len(inventory_uuids) or not set(
         selected_gpu_uuids
     ).issubset(inventory_uuids):
-        raise GateValidationError("launch manifest GPU inventory identities are invalid")
+        raise GateValidationError(
+            "launch manifest GPU inventory identities are invalid"
+        )
 
     safety = _mapping(manifest.get("gpu_safety_policy"), "launch GPU safety policy")
     _exact_keys(
@@ -2077,10 +2099,14 @@ def _validate_launch_manifest(
             )
 
     training_argv = manifest.get("training_argv")
-    if not isinstance(training_argv, list) or not training_argv or not all(
-        isinstance(argument, str) for argument in training_argv
+    if (
+        not isinstance(training_argv, list)
+        or not training_argv
+        or not all(isinstance(argument, str) for argument in training_argv)
     ):
-        raise GateValidationError("launch manifest training argv must be a string array")
+        raise GateValidationError(
+            "launch manifest training argv must be a string array"
+        )
     if (
         manifest.get("training_argv_sha256") != lock["training_argv_sha256"]
         or canonical_json_sha256(training_argv) != lock["training_argv_sha256"]
@@ -2102,10 +2128,10 @@ def _validate_launch_manifest(
     resolved_udlm = _mapping(
         resolved_training.get("udlm"), "launch resolved UDLM section"
     )
-    if (
-        resolved_udlm.get("prior_variant") != manifest.get("udlm_prior_variant")
-        or resolved_udlm.get("exclude_special_tokens")
-        != manifest.get("exclude_special_tokens")
+    if resolved_udlm.get("prior_variant") != manifest.get(
+        "udlm_prior_variant"
+    ) or resolved_udlm.get("exclude_special_tokens") != manifest.get(
+        "exclude_special_tokens"
     ):
         raise GateValidationError(
             "launch resolved UDLM treatment or token support disagrees with the manifest"
@@ -2162,7 +2188,9 @@ def _validate_launch_manifest(
         or effective_batch
         != lock["data_exposure"]["global_examples_per_optimizer_step"]
     ):
-        raise GateValidationError("launch manifest batch arithmetic disagrees with lock")
+        raise GateValidationError(
+            "launch manifest batch arithmetic disagrees with lock"
+        )
     if type(manifest.get("exclude_special_tokens")) is not bool:
         raise GateValidationError("launch manifest special-token flag must be boolean")
 
@@ -2237,8 +2265,7 @@ def _validate_launch_manifest(
     common_config_sha256 = matched_panel_config_sha256(resolved_config)
     if (
         panel_training.get("source_revision") != lock["source_revision"]
-        or panel_training.get("initialization_mode")
-        != expected_initialization_mode
+        or panel_training.get("initialization_mode") != expected_initialization_mode
         or panel_training.get("initialization_checkpoint_path")
         != manifest.get("checkpoint")
         or panel_training.get("requested_gpu_count") != world_size
@@ -2252,8 +2279,7 @@ def _validate_launch_manifest(
         != lock["initialization_checkpoint_sha256"]
         or panel_training.get("exclude_special_tokens")
         != manifest.get("exclude_special_tokens")
-        or panel_training.get("common_resolved_config_sha256")
-        != common_config_sha256
+        or panel_training.get("common_resolved_config_sha256") != common_config_sha256
     ):
         raise GateValidationError("launch matched-panel contract disagrees with lock")
     resolved_loader = _mapping(
@@ -2266,7 +2292,9 @@ def _validate_launch_manifest(
         resolved_config.get("callback"), "launch resolved callback config"
     )
     resolved_num_workers = _integer(
-        resolved_loader.get("num_workers"), "launch resolved loader num_workers", minimum=0
+        resolved_loader.get("num_workers"),
+        "launch resolved loader num_workers",
+        minimum=0,
     )
     expected_checkpoint_directory = str(
         Path(manifest["expected_final_checkpoint_path"]).parent
@@ -2362,9 +2390,7 @@ def _validate_launch_manifest(
     )
     if lock_binding.get("path") != str(expected_lock_path):
         raise GateValidationError("launch training-job lock path is unexpected")
-    lock_sha256 = _sha256(
-        lock_binding.get("sha256"), "launch training-job lock digest"
-    )
+    lock_sha256 = _sha256(lock_binding.get("sha256"), "launch training-job lock digest")
     lock_record = _mapping(
         lock_binding.get("record"), "launch training-job lock record"
     )
@@ -2474,7 +2500,9 @@ def validate_training_evidence(lock: Mapping[str, Any]) -> dict[str, Any]:
     if receipt.get("schema_version") != PILOT_EXIT_STATUS_SCHEMA_VERSION:
         raise GateValidationError("training exit receipt schema version is unsupported")
     if runtime.get("schema_version") != RUNTIME_CONFIG_SCHEMA_VERSION:
-        raise GateValidationError("training runtime-config schema version is unsupported")
+        raise GateValidationError(
+            "training runtime-config schema version is unsupported"
+        )
     if summary.get("status") != "completed":
         raise GateValidationError("training summary is not completed")
     if summary.get("source_revision") != lock["source_revision"]:
@@ -2488,9 +2516,7 @@ def validate_training_evidence(lock: Mapping[str, Any]) -> dict[str, Any]:
         raise GateValidationError("training summary config digest disagrees with lock")
     if summary.get("training_argv_sha256") != lock["training_argv_sha256"]:
         raise GateValidationError("training summary argv digest disagrees with lock")
-    manifest_path = _expected_artifact_path(
-        lock["launch_manifest"]["relative_path"]
-    )
+    manifest_path = _expected_artifact_path(lock["launch_manifest"]["relative_path"])
     summary_manifest_claim = _validate_snapshot_claim(
         summary.get("launch_manifest"),
         label="summary launch-manifest evidence",
@@ -2612,6 +2638,22 @@ def validate_training_evidence(lock: Mapping[str, Any]) -> dict[str, Any]:
         raise GateValidationError(
             "scratch summary unexpectedly contains warm-start evidence"
         )
+    if (
+        "conditioning_gradient_audit" not in summary
+        or summary.get("conditioning_gradient_audit") is not None
+    ):
+        raise GateValidationError(
+            "registered R/S/E candidate summary must have a null conditioning "
+            "gradient audit"
+        )
+    if (
+        "screen_initialization_state_audit" not in summary
+        or summary.get("screen_initialization_state_audit") is not None
+    ):
+        raise GateValidationError(
+            "registered R/S/E candidate summary must have a null optimization-"
+            "screen initialization-state audit"
+        )
 
     if (
         receipt.get("status") != "completed"
@@ -2696,11 +2738,11 @@ def validate_training_evidence(lock: Mapping[str, Any]) -> dict[str, Any]:
         "matches_runtime_config_snapshot",
         "valid_and_launch_bound",
     ):
-        _required_true(
-            receipt_manifest.get(field), f"receipt launch-manifest {field}"
-        )
+        _required_true(receipt_manifest.get(field), f"receipt launch-manifest {field}")
     if receipt_manifest.get("validation_error") is not None:
-        raise GateValidationError("receipt launch-manifest validation recorded an error")
+        raise GateValidationError(
+            "receipt launch-manifest validation recorded an error"
+        )
     for field in ("expected_selected_gpu_uuids", "observed_selected_gpu_uuids"):
         selected = _selected_gpu_uuids(
             receipt_manifest.get(field),
@@ -3021,6 +3063,8 @@ def validate_training_evidence(lock: Mapping[str, Any]) -> dict[str, Any]:
             "final_checkpoint_path",
             "final_checkpoint_sha256",
             "startup_mode",
+            "conditioning_gradient_audit",
+            "screen_initialization_state_audit",
         },
         "receipt validated training-summary bindings",
     )
@@ -3039,6 +3083,8 @@ def validate_training_evidence(lock: Mapping[str, Any]) -> dict[str, Any]:
         ),
         "final_checkpoint_sha256": lock["checkpoint"]["sha256"],
         "startup_mode": lock["startup_mode"],
+        "conditioning_gradient_audit": None,
+        "screen_initialization_state_audit": None,
     }
     for key, expected_value in expected_validated_bindings.items():
         if validated_bindings.get(key) != expected_value:

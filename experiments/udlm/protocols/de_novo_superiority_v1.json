@@ -101,8 +101,8 @@
     "accepted_training_artifact_schema_versions": {
       "launch_manifest": 1,
       "runtime_config": 2,
-      "training_summary": 3,
-      "successful_exit_receipt": 3
+      "training_summary": 4,
+      "successful_exit_receipt": 4
     },
     "immutable_launch_manifest_relative_path_raw_hash_and_schema_required": true,
     "exact_selected_gpu_uuids_and_final_idle_telemetry_bound_through_launch_runtime_summary_and_receipt_required": true,

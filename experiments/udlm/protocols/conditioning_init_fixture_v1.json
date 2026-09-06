@@ -1,0 +1,42 @@
+{
+  "attention_mask": [
+    [
+      1,
+      1,
+      1,
+      1
+    ],
+    [
+      1,
+      1,
+      1,
+      1
+    ]
+  ],
+  "checkpoint_sha256": "8d00aa47b02f64bf39ff6b0b2e786f213587366fc2c3d29712a00f3f84108dd6",
+  "input_ids": [
+    [
+      1,
+      5,
+      8,
+      2
+    ],
+    [
+      1,
+      6,
+      7,
+      2
+    ]
+  ],
+  "noise_tensor": [
+    0.10524941235780716,
+    2.2936253547668457
+  ],
+  "probe_phase": "after_mdlm_ema_load_before_training_rng_reseed_and_optimizer_creation",
+  "purpose": "pre_optimizer_exact_additive_vs_film_warm_start_logit_identity",
+  "schema_version": 1,
+  "timestep_tensor": [
+    0.1,
+    0.9
+  ]
+}
