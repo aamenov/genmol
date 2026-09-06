@@ -1,6 +1,6 @@
 # GenMol v2 project context
 
-Snapshot: 2026-09-06 07:41 Asia/Dubai. Recheck dynamic state, especially Git
+Snapshot: 2026-09-06 08:37 Asia/Dubai. Recheck dynamic state, especially Git
 status, logs, tmux sessions, and GPU occupancy, before acting.
 
 ## Active objective and safe workspace
@@ -12,7 +12,9 @@ status, logs, tmux sessions, and GPU occupancy, before acting.
   `/home/aidar.alimbayev/Documents/genmolv2/run_sources/udlm_genmol_worktree`
   on branch `codex/udlm-genmol`, not in the dirty main checkout. Preserve all
   unrelated and uncommitted work.
-- The clean pushed source revision used for the current-code MDLM rescore is
+- The current reviewed source revision is clean and pushed at
+  `19a3e0c5c4128c0e299208e9a116d9cda2633bf6`. The distinct source revision
+  used to produce the immutable current-code MDLM rescore is
   `74482c2742ab5ad15def122c809a6b4e403e94cf`. It contains the hardened
   completion contract, pilot-only distributed-stream repair and scheduler
   isolation, exact EMA inference receipt, evidence schema bumps, registered
@@ -95,8 +97,13 @@ generator is itself bound to the clean pushed report revision and recorded by
 path, size, and SHA-256.
 
 The training-pilot launcher resolves and hashes the complete Hydra task config
-before exposing GPUs. It binds source revision, base argv, resolved-config
-digest, seed/hash seed, expected world size and steps, runtime-config record,
+before exposing GPUs. Its dry-run path performs no GPU query and creates or
+modifies no project run artifact, lease, log, manifest, output reservation, or
+tmux object. A real launch atomically acquires one repository-global
+training-job lease before any GPU probe, so overlapping reviewed jobs fail
+closed before they can consume devices. It then binds source revision, base
+argv, resolved-config digest, seed/hash seed, expected world size and steps,
+exact selected UUID tuple, raw launch-manifest hash, runtime-config record,
 final checkpoint, training summary, and exit receipt into the child
 environment. The entry point verifies those bindings before model imports and
 again at training start; DDP workers accept only Lightning's exact rank suffix.
@@ -111,16 +118,19 @@ the UDLM prior identity. Only then may it atomically publish the no-clobber
 `training_summary.json`, bound to the runtime record, source, configuration,
 argv, checkpoint hash, world size, and warm-start provenance. A separate
 post-pipeline helper atomically publishes `pilot_exit_status.json`; it records
-the training and `tee` statuses separately and revalidates runtime, checkpoint,
-summary, and source bindings. Missing, malformed, mismatched, or nonzero-status
-evidence makes the launcher fail. The semantic checkpoint audit now
-deserializes the same open file descriptor whose bytes and identity were
-certified, so a byte-identical pathname replacement also fails. The summary
-and exit receipt use schema 2 and record the training seed, optimizer updates,
-world size, microbatch, accumulation, requested example exposure, hosted-stream
-partition policy, trainable base/time-adapter parameter split, and exact EMA
-shadow count/decay/update count. These pilot-only guards leave ordinary
-release/manual training defaults unchanged.
+the training and `tee` statuses separately and revalidates the exact manifest,
+selected UUIDs, held lease, runtime, checkpoint, summary, and source bindings.
+After publishing either a completed or failed receipt, it releases only the
+unchanged lease owned by that launch. Missing, malformed, mismatched, or
+nonzero-status evidence makes the launcher fail. The semantic checkpoint audit
+now deserializes the same open file descriptor whose bytes and identity were
+certified, so a byte-identical pathname replacement also fails. The launch
+manifest uses schema 1, runtime config schema 2, and training summary plus exit
+receipt schema 3. They record the training seed, optimizer updates, world size,
+microbatch, accumulation, requested example exposure, hosted-stream partition
+policy, trainable base/time-adapter parameter split, exact EMA shadow
+count/decay/update count, GPU telemetry, and manifest/lease bindings. These
+pilot-only guards leave ordinary release/manual training defaults unchanged.
 
 At source revision `74482c2742ab5ad15def122c809a6b4e403e94cf`, the
 exact-worktree full test suite passed `594` tests with `14` dependency warnings,
@@ -139,12 +149,22 @@ Lightning's ordinary scheduler autodetection. Remaining boundaries are the
 trusted virtual-environment `.pth` files, a local upstream ref that is compared
 but not implicitly fetched, the host I/O cost of the post-fit checkpoint audit,
 and the unavoidable small interval between the final GPU probe and process
-creation.
+creation. The global lease proves at most one reviewed worktree training job is
+active, but each per-run manifest does not yet bind its predecessor receipt;
+R-to-S-to-E order remains an operator protocol checked again after the runs.
+The non-authoritative log is exclusively reserved but later reopened by
+`tee -a`, so its inode is not evidence-bound. A crash after receipt publication
+but before lease unlink can leave a stale lease; that state deliberately fails
+closed for manual review.
 
 ## Registered superiority and baseline evidence
 
 The frozen protocol is
-`experiments/udlm/protocols/de_novo_superiority_v1.json`. The publication gate
+`experiments/udlm/protocols/de_novo_superiority_v1.json`, raw SHA-256
+`a44263d56a42593ca9f1b9c00c7ad8177229f0f4fa9ff941ab07481054b84848`
+and canonical SHA-256
+`6c33533dc220f5d6682964fd94de3ce85a4425e2cce8ca21df227feeb4d0af2e`.
+The publication gate
 requires all four point estimates and all four one-sided 95% interval criteria
 for one checkpoint locked before final seeds 0, 1, and 2. Validity uses pooled
 Newcombe--Wilson method 10; uniqueness, quality, and diversity use unpaired
@@ -236,13 +256,61 @@ required before any prior choice, and the proposed weights
 audit performs no training or generation and supports no quality, ranking, or
 UDLM-over-GenMol superiority claim.
 
+## CPU-only launch preflight and performance risks
+
+At pushed source revision `19a3e0c5c4128c0e299208e9a116d9cda2633bf6`,
+all six real warm-start dry-runs (`R`, `S`, and `E`, each configured for one
+and two GPUs) resolved successfully against the default full-size MDLM
+checkpoint. The checkpoint is 1,396,998,679 bytes with SHA-256
+`8d00aa47b02f64bf39ff6b0b2e786f213587366fc2c3d29712a00f3f84108dd6`.
+The dry-runs created no run directory, log, lease, tmux session, or GPU-probe
+artifact and did not query GPU state. The worktree remained clean.
+
+For one GPU, all three arms shared common-config digest
+`c87cf4ce04ca08ac1336eef2c6d87df921cd4a6e5dbccb151ec7d406f07ec15e`,
+panel digest
+`951b1ae6c4dee531e279a5db6c1ebb32e71568972aeeb034015f4110d2977c4f`,
+gradient accumulation 8, and effective batch size 16. For two GPUs, the
+corresponding digests are
+`cf9ddfcf56f0080a05406d6061b468753ca78fe0c12170e9cc601e1775e0bc88`
+and `35e1497a69055380a583f3e61628be16365ccedab5d8777bb9094a9d59531c99`,
+with gradient accumulation 4 and the same effective batch size 16. The exact
+resolved-config digests were:
+
+| GPU count | `R` | `S` | `E` |
+| ---: | --- | --- | --- |
+| 1 | `dd26c878e21ecbfacb338fbfa3348de594cfdeb2cc4434bcc63c3a2d9fc09be3` | `9ba7ad3468070d22149b6cd1605c399a69cc013794016f4bede33555a73d551f` | `78651b85796fe7cdf068e4a01dfa7b51fed22d45efc2d8e0fb67e34f5af6bd69` |
+| 2 | `46633de979a15c3faf97d6b7a3f3a5e96f10b4c3f4abbd1951c6d64c73d8ce4a` | `1429bc807518df0af8d3b61a35e5f218619133894011a358741b9eab9fa7e416` | `3e9f8b41f8798ea788b58414528cb10d99d386a85de1f2da1737ceb281043d34` |
+
+A separate full-size CPU initialization preflight loaded 202 MDLM EMA
+backbone tensors, zero-initialized the four new time-conditioner tensors, and
+created 206 EMA shadows. A comparison with the pinned official UDLM source
+`edb0f8c28b7caeb4ea7a06a2fee8d74ab6da1661` found no objective-correctness
+blocker. The principal performance risks are architectural and statistical:
+the additive BERT time conditioner is weaker than the official per-block
+adaptive normalization, the current 2,500-step warmup yields only about
+`1.2e-6` learning rate at optimizer step 10, and the 1,880-token empirical
+prior is estimated from a prefix containing only 184 observed token types.
+The configured uniform mixture leaves about `0.0090213` stationary mass on
+training-unseen types, while the observed mass is highly concentrated.
+
+The 10-step matched `R/S/E` run is therefore a health gate only, not a ranking.
+If it succeeds, first run an `E`-only 100-update scheduler screen, then an
+`E`-only 500-update additive-versus-zero-init-FiLM conditioning screen, and
+only then a matched 1,000-update `R/S/E` comparison. Commit the exact arm
+registry and selection rules before the 100-update screen. Use 32-sample
+diagnostics only for health; registered selection remains seeds 1000 and 1001,
+256 samples each, EMA weights, 128 reverse steps, and temperature 1.0. Do not
+touch final seeds 0, 1, and 2 until a registered winner satisfies the frozen
+eligibility and scientific gates.
+
 ## GPU status and required next pilot
 
 No UDLM GPU job has been launched, and no GPU inventory or utilization probe
 has yet been run for the pending pilot. No probe or job occurred while producing
-or reviewing revision `74482c2742ab5ad15def122c809a6b4e403e94cf`, the CPU-only
-MDLM rescore, or this documentation update. No stale snapshot should be treated
-as authorization or availability evidence.
+or reviewing revision `19a3e0c5c4128c0e299208e9a116d9cda2633bf6`, the CPU-only
+MDLM rescore, the six real launch dry-runs, or this documentation update. No
+stale snapshot should be treated as authorization or availability evidence.
 
 Before the first GPU launch, the user must select only the GPU count: one or
 two. Recommend **one GPU** for the first matched 10-step engineering gate; the
@@ -291,6 +359,16 @@ Completed prior items:
   Git-firewall, notebook, and documentation bindings, the exact-worktree full
   suite passed `610` tests with the same `14` dependency warnings. Those
   reviewed bindings were committed and pushed in `64743c7`.
+- The launch-artifact-free dry-run, repository-global single-job lease, exact
+  launch-manifest/UUID evidence chain, schema-3 training receipts, stricter
+  candidate gate, frozen protocol update, and teaching material were reviewed,
+  committed, and pushed in `19a3e0c`. The focused suite passed `164` tests;
+  the full suite passed `638` tests with `14` dependency warnings. Ruff,
+  `py_compile`, protocol and notebook invariants, and `git diff --check` also
+  passed.
+- All six full-size real-checkpoint dry-run combinations (`R/S/E` at one and
+  two GPUs) then resolved with matched common/panel digests and effective batch
+  size 16 without creating launch artifacts or making a GPU query.
 
 Remaining sequence:
 
@@ -298,7 +376,8 @@ Remaining sequence:
    one GPU for this first matched health gate.
 2. Only after that choice, perform the first fresh GPU inventory and exact-UUID
    re-probe, then launch the matched 10-step `R/S/E` engineering pilot.
-3. Review its logs and artifacts before authorizing the next small training and
-   32-sample stage.
+3. Review its authoritative manifests, receipts, checkpoints, and
+   non-authoritative logs before authorizing the 100-update scheduler screen.
+   Do not rank variants from 10-step losses or 32-sample health diagnostics.
 4. Update the final PDF only after the required controlled experiments and
    ablations exist; keep all caveats and paper comparisons explicit.
