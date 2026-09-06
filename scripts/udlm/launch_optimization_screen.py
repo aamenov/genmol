@@ -276,6 +276,8 @@ def load_registry(
         loader=verifier.local_blob_loader,
         git_blob_loader=verifier.git_blob_loader,
         git_ancestor_checker=verifier.git_ancestor_checker,
+        git_sole_parent_checker=verifier.git_sole_parent_checker,
+        git_tree_paths_loader=verifier.git_tree_paths_loader,
         git_pushed_checker=verifier.git_pushed_checker,
         git_diff_checker=verifier.git_diff_checker,
     )
@@ -351,6 +353,21 @@ def _conditioning_dependency(
     if selected not in verifier.EXPECTED_ARM_ORDER["scheduler"]:
         raise verifier.ScreenValidationError(
             "scheduler dependency selected no valid arm"
+        )
+    allowed_changes = frozenset(
+        {
+            registry.relative_path.as_posix(),
+            normalized["scheduler_evidence"]["relative_path"],
+            normalized["scheduler_selection"]["relative_path"],
+        }
+    )
+    if not registry.git_diff_checker(
+        registry.data["source"]["revision"],
+        validated_revision,
+        allowed_changes,
+    ):
+        raise verifier.ScreenValidationError(
+            "conditioning authorization changed unregistered source bytes"
         )
     return validated_revision, normalized
 

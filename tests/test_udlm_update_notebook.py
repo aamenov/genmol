@@ -132,3 +132,69 @@ def test_generated_schedule_teaching_distinguishes_official_recipe(tmp_path: Pat
     assert "not the released UDLM QM9 schedule" in markdown
     assert "pilot hypothesis" in markdown
     assert "not an exact replay of the official recipe" in markdown
+
+
+def test_generated_health_teaching_binds_exact_gate_and_later_diagnostic(
+    tmp_path: Path,
+):
+    destination = tmp_path / "updated.ipynb"
+    updater.update_notebook(SOURCE_NOTEBOOK, destination)
+    cells = _cells_by_id(json.loads(destination.read_text()))
+    markdown = "".join(cells["stage-20-udlm-evidence"]["source"])
+    compact_markdown = " ".join(markdown.split())
+    code = "".join(cells["stage-20-udlm-evidence-code"]["source"])
+    all_markdown = "\n".join(
+        "".join(cell["source"])
+        for cell in cells.values()
+        if cell["cell_type"] == "markdown"
+    )
+
+    for fragment in (
+        "scripts/udlm/launch_health_panel.py",
+        "scripts/udlm/validate_health_panel.py",
+        "health-w{W}-e-{H}",
+        "Both config materialization at $H$ and registry freezing at R0",
+        "permits only screen authorization",
+        "$B_{\\mathrm{eff}}=Wma_W=16$",
+        "Only after each 1,000-update training receipt validates",
+        "not the 10-update health-terminal receipt",
+    ):
+        assert fragment in compact_markdown
+    for fragment in (
+        '"launcher_variant_order": ["udlm", "schedule_uniform", "udlm_categorical"]',
+        '"supported_world_sizes": [1, 2]',
+        '"num_nodes": 1',
+        '"optimizer_updates_each": 10',
+        '"training_seed": 1',
+        '"loader_workers": 1',
+        '"micro_batch_size_per_process": 2',
+        '"gradient_accumulation_by_world_size": {1: 8, 2: 4}',
+        '"effective_global_batch_size": 16',
+        '"vocabulary_size": 1880',
+        '"exclude_special_tokens": False',
+        '"scratch_mode": False',
+        '"empirical_uniform_mix": 0.0002',
+        '"checkpoint_project_relative_path"',
+        '"checkpoint_size_bytes": 1396998679',
+        "8d00aa47b02f64bf39ff6b0b2e786f213587366fc2c3d29712a00f3f84108dd6",
+        '"max_utilization_percent": 10',
+        '"min_free_memory_mib": 30000',
+        '"normalized_evidence_schema_version": 1',
+        '"successful_exit_receipt_schema_version": 5',
+        '"terminal_e_receipt_required_before"',
+        '"screen_config_materialization"',
+        '"screen_registry_freeze"',
+        '"candidate_lock": False',
+        '"post_training_decode_diagnostic"',
+        '"after_optimizer_updates_each": 1000',
+        '"seed": 1100',
+        '"requested": 32',
+    ):
+        assert fragment in code
+    assert '"health_generation"' not in code
+    compact_all_markdown = " ".join(all_markdown.split())
+    assert "deterministic `health-w{W}-{r,s,e}-{H}` names" in compact_all_markdown
+    assert "Only after those training runs, seed 1100 x 32 requests" in (
+        compact_all_markdown
+    )
+    compile(code, "stage-20-udlm-evidence-code", "exec")

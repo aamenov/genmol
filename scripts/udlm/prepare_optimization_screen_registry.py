@@ -1,11 +1,15 @@
 """Prepare the prospective UDLM optimization screen without using a GPU.
 
-The workflow is deliberately split across two Git revisions:
+The workflow starts only after the deterministic ten-update health panel has a
+fully validated terminal-E receipt, then splits publication across two Git
+revisions:
 
 1. ``materialize-configs`` composes and exclusively publishes the six resolved
    Hydra configurations for the user-selected GPU count.  Commit and push
-   those files together with the reviewed implementation (revision R0).
-2. ``freeze-registry`` requires a clean, pushed R0, proves that every config is
+   those files as the exact sole child change after the reviewed health source
+   (revision R0).
+2. ``freeze-registry`` revalidates that health receipt, requires a clean,
+   pushed R0, proves that every config is
    its exact Git blob and is reproducible by the registered launcher, validates
    the complete candidate with the strict screen verifier, and exclusively
    writes the registry as the sole R0 -> R1 change.
@@ -35,7 +39,7 @@ CHECKPOINT_RELATIVE_PATH = "outputs/paper_v1/checkpoints/50000.ckpt"
 CHECKPOINT_SHA256 = "8d00aa47b02f64bf39ff6b0b2e786f213587366fc2c3d29712a00f3f84108dd6"
 CHECKPOINT_SIZE_BYTES = 1_396_998_679
 REGISTRY_RELATIVE_PATH = (
-    "experiments/udlm/protocols/optimization_screen_registry_v1.json"
+    "experiments/udlm/protocols/optimization_screen_registry_v2.json"
 )
 CONFIG_DIRECTORY_TEMPLATE = (
     "experiments/udlm/protocols/optimization_screen_configs_gpu{gpu_count}"
@@ -61,11 +65,14 @@ SOURCE_PATHS = (
     "scripts/udlm/collect_optimization_screen_evidence.py",
     "scripts/udlm/evaluate_denoising_panel.py",
     "scripts/udlm/launch_optimization_screen.py",
+    "scripts/udlm/launch_health_panel.py",
     "scripts/udlm/launch_train_pilot.py",
     "scripts/udlm/materialize_validation_panel.py",
     "scripts/udlm/prepare_optimization_screen_registry.py",
     "scripts/udlm/token_frequency_audit.py",
+    "scripts/udlm/validate_health_panel.py",
     "scripts/udlm/verify_optimization_screen.py",
+    "scripts/udlm/write_pilot_evidence.py",
     "scripts/udlm/write_pilot_exit_status.py",
     "src/genmol/backbone.py",
     "src/genmol/diffusion.py",
@@ -102,6 +109,18 @@ def _runtime_modules() -> tuple[Any, Any]:
     from scripts.udlm import verify_optimization_screen as verifier
 
     return launcher, verifier
+
+
+def _health_module() -> Any:
+    """Import the CPU-only health validator lazily for lightweight ``--help``."""
+
+    import sys
+
+    if str(REPOSITORY_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPOSITORY_ROOT))
+    from scripts.udlm import validate_health_panel as health
+
+    return health
 
 
 def _config_specs(gpu_count: int) -> tuple[ConfigSpec, ...]:
@@ -172,6 +191,34 @@ def _config_directory(gpu_count: int) -> Path:
 
 def _checkpoint_path() -> Path:
     return PROJECT_ROOT / CHECKPOINT_RELATIVE_PATH
+
+
+def _validate_health_prerequisite(
+    *, gpu_count: int, health_source_revision: str
+) -> dict[str, Any]:
+    """Validate the deterministic terminal-E receipt without probing a GPU."""
+
+    health = _health_module()
+    terminal_run = health.health_run_name(
+        gpu_count, "udlm_categorical", health_source_revision
+    )
+    terminal_receipt = (
+        REPOSITORY_ROOT / "output" / "udlm" / terminal_run / "pilot_exit_status.json"
+    )
+    try:
+        evidence = health.validate_health_panel(
+            terminal_receipt,
+            expected_gpu_count=gpu_count,
+            expected_source_revision=health_source_revision,
+        )
+    except (OSError, ValueError) as error:
+        raise PreparationError(
+            "the exact terminal-E ten-update health receipt is required before "
+            f"screen preparation: {error}"
+        ) from error
+    if not isinstance(evidence, Mapping):
+        raise PreparationError("health validator returned a non-object result")
+    return dict(evidence)
 
 
 def _json_bytes(value: object) -> bytes:
@@ -324,6 +371,12 @@ def _publish_config_set_exclusive(
 def materialize_configs(gpu_count: int) -> dict[str, Any]:
     """Compose and exclusively publish the six reviewed R0 config candidates."""
 
+    source_revision = _require_clean_pushed_source()
+    _require_no_config_family_at_health_source(source_revision)
+    health_evidence = _validate_health_prerequisite(
+        gpu_count=gpu_count,
+        health_source_revision=source_revision,
+    )
     launcher, verifier = _runtime_modules()
     specs = _config_specs(gpu_count)
     _validate_fresh_output_paths(specs)
@@ -335,14 +388,25 @@ def materialize_configs(gpu_count: int) -> dict[str, Any]:
         verifier=verifier,
     )
     directory = _config_directory(gpu_count)
+    if _require_clean_pushed_source() != source_revision:
+        raise PreparationError(
+            "source revision changed while materialized configs were composed"
+        )
     _publish_config_set_exclusive(directory, documents)
+    _assert_only_materialized_config_changes(
+        gpu_count=gpu_count,
+        documents=documents,
+        source_revision=source_revision,
+    )
     return {
         "status": "six_resolved_configs_materialized_no_gpu_operation",
+        "source_revision": source_revision,
         "gpu_count": gpu_count,
         "global_batch_size": GLOBAL_BATCH_SIZE,
         "micro_batch_size_per_process": MICRO_BATCH_SIZE,
         "accumulate_grad_batches": 8 if gpu_count == 1 else 4,
         "checkpoint_sha256": checkpoint["sha256"],
+        "health_gate": health_evidence,
         "config_directory": directory.relative_to(REPOSITORY_ROOT).as_posix(),
         "configs": [
             {
@@ -376,7 +440,7 @@ def _require_clean_pushed_source() -> str:
     status = _run_git(["status", "--porcelain=v1", "--untracked-files=all"]).stdout
     if status:
         raise PreparationError(
-            "freeze-registry requires a completely clean R0 worktree"
+            "registry preparation requires a completely clean input worktree"
         )
     revision = _run_git(["rev-parse", "--verify", "HEAD"]).stdout.strip()
     if HEX_REVISION.fullmatch(revision) is None:
@@ -388,9 +452,237 @@ def _require_clean_pushed_source() -> str:
         )
     if revision != upstream:
         raise PreparationError(
-            "R0 HEAD has not been pushed exactly to the configured upstream"
+            "input HEAD has not been pushed exactly to the configured upstream"
         )
     return revision
+
+
+def _require_exact_pushed_revision(revision: str) -> None:
+    """Require both live Git refs to remain the exact reviewed revision."""
+
+    if HEX_REVISION.fullmatch(revision) is None:
+        raise PreparationError("expected source revision is invalid")
+    for reference in ("HEAD", "@{upstream}"):
+        observed = _run_git(["rev-parse", "--verify", reference]).stdout.strip()
+        if observed != revision:
+            raise PreparationError(
+                "HEAD or upstream changed during registry publication"
+            )
+
+
+def _require_registry_candidate_bytes(
+    *,
+    candidate: Mapping[str, Any],
+    payload: bytes,
+    raw_sha256: str,
+    canonical_sha256: str,
+    verifier: Any,
+    published_path: Path | None = None,
+) -> None:
+    """Recheck in-memory and, when present, exclusively published registry bytes."""
+
+    if (
+        _json_bytes(candidate) != payload
+        or hashlib.sha256(payload).hexdigest() != raw_sha256
+        or verifier.canonical_json_sha256(candidate) != canonical_sha256
+    ):
+        raise PreparationError("registry candidate bytes changed after validation")
+    if published_path is None:
+        return
+    try:
+        retained = verifier._stable_input_bytes(published_path)
+    except (OSError, ValueError) as error:
+        raise PreparationError(
+            "published registry cannot be read as an exclusive stable file"
+        ) from error
+    if retained != payload:
+        raise PreparationError("published registry bytes differ from validation")
+
+
+def _assert_only_materialized_config_changes(
+    *,
+    gpu_count: int,
+    documents: Mapping[str, Mapping[str, Any]],
+    source_revision: str,
+) -> None:
+    """Require the exact generated config set to be the sole R0 candidate change."""
+
+    if HEX_REVISION.fullmatch(source_revision) is None:
+        raise PreparationError("materialization source revision is invalid")
+    expected_names = {spec.filename for spec in _config_specs(gpu_count)}
+    if set(documents) != expected_names:
+        raise PreparationError("materialized config documents are not the exact six")
+
+    directory = _config_directory(gpu_count)
+    expected_payloads = {name: _json_bytes(documents[name]) for name in expected_names}
+
+    def require_exact_files() -> None:
+        if not directory.is_dir() or directory.is_symlink():
+            raise PreparationError(
+                "materialized config directory is unavailable or unsafe"
+            )
+        observed_names = {entry.name for entry in directory.iterdir()}
+        if observed_names != expected_names:
+            raise PreparationError(
+                "materialized config directory must contain exactly six expected files"
+            )
+        for name in sorted(expected_names):
+            path = directory / name
+            if not path.is_file() or path.is_symlink():
+                raise PreparationError(
+                    f"materialized config is not a regular file: {path}"
+                )
+            if path.read_bytes() != expected_payloads[name]:
+                raise PreparationError(
+                    f"materialized config bytes changed during publication: {path}"
+                )
+
+    def require_source_revision() -> None:
+        for reference in ("HEAD", "@{upstream}"):
+            observed_revision = _run_git(
+                ["rev-parse", "--verify", reference]
+            ).stdout.strip()
+            if observed_revision != source_revision:
+                raise PreparationError(
+                    "source revision changed during materialized-config publication"
+                )
+
+    require_exact_files()
+    require_source_revision()
+
+    repository = REPOSITORY_ROOT.resolve(strict=True)
+    expected_status = {
+        "?? " + (directory / name).relative_to(repository).as_posix()
+        for name in expected_names
+    }
+    raw_status = _run_git(
+        ["status", "--porcelain=v1", "-z", "--untracked-files=all"]
+    ).stdout
+    if not raw_status.endswith("\0"):
+        raise PreparationError(
+            "materialized-config Git status is incomplete or unexpectedly empty"
+        )
+    observed_status = raw_status[:-1].split("\0")
+    if (
+        len(observed_status) != len(expected_status)
+        or set(observed_status) != expected_status
+    ):
+        raise PreparationError(
+            "exactly the six materialized configs must be the only worktree changes"
+        )
+
+    # Recheck path bytes and refs after Git inspection.  This makes a mutation
+    # concurrent with the boundary observable instead of trusting stale reads.
+    require_exact_files()
+    require_source_revision()
+
+
+def _single_parent_revision(revision: str) -> str:
+    """Return the sole parent of R0, rejecting merges and root commits."""
+
+    if HEX_REVISION.fullmatch(revision) is None:
+        raise PreparationError("R0 revision is invalid")
+    fields = (
+        _run_git(["rev-list", "--parents", "-n", "1", revision]).stdout.strip().split()
+    )
+    if len(fields) != 2 or fields[0] != revision:
+        raise PreparationError(
+            "R0 must be a single-parent commit immediately after the health source"
+        )
+    parent = fields[1]
+    if HEX_REVISION.fullmatch(parent) is None:
+        raise PreparationError("R0 parent revision is invalid")
+    return parent
+
+
+def _git_tree_paths(revision: str, directory: str) -> set[str]:
+    """List exact blob paths below one committed directory."""
+
+    raw = _run_git(
+        ["ls-tree", "-r", "--name-only", "-z", revision, "--", directory]
+    ).stdout
+    if not raw:
+        return set()
+    if not raw.endswith("\0"):
+        raise PreparationError("Git tree path listing is truncated")
+    paths = raw[:-1].split("\0")
+    if len(paths) != len(set(paths)) or any(not path for path in paths):
+        raise PreparationError("Git tree path listing is malformed")
+    return set(paths)
+
+
+def _validate_health_to_r0_transition(
+    *, health_source_revision: str, r0_revision: str, gpu_count: int
+) -> dict[str, Any]:
+    """Prove R0 is exactly H plus the selected-W six-config family."""
+
+    if _single_parent_revision(r0_revision) != health_source_revision:
+        raise PreparationError(
+            "the screen-config R0 parent must equal the validated health source"
+        )
+    selected_directory = CONFIG_DIRECTORY_TEMPLATE.format(gpu_count=gpu_count)
+    expected_paths = {
+        f"{selected_directory}/{spec.filename}" for spec in _config_specs(gpu_count)
+    }
+    changed_raw = _run_git(
+        [
+            "diff",
+            "--name-only",
+            "--no-renames",
+            "-z",
+            health_source_revision,
+            r0_revision,
+            "--",
+        ]
+    ).stdout
+    if not changed_raw.endswith("\0"):
+        raise PreparationError("H-to-R0 Git diff is empty or truncated")
+    changed_paths = changed_raw[:-1].split("\0")
+    if (
+        len(changed_paths) != len(expected_paths)
+        or set(changed_paths) != expected_paths
+    ):
+        raise PreparationError(
+            "R0 must differ from the health source by exactly the selected six configs"
+        )
+    if _git_tree_paths(health_source_revision, selected_directory):
+        raise PreparationError(
+            "selected GPU-count configs already existed at the health source"
+        )
+    if _git_tree_paths(r0_revision, selected_directory) != expected_paths:
+        raise PreparationError(
+            "R0 selected GPU-count config directory is not the exact six-file set"
+        )
+    other_gpu_count = 2 if gpu_count == 1 else 1
+    other_directory = CONFIG_DIRECTORY_TEMPLATE.format(gpu_count=other_gpu_count)
+    if _git_tree_paths(health_source_revision, other_directory) or _git_tree_paths(
+        r0_revision, other_directory
+    ):
+        raise PreparationError(
+            "the unselected GPU-count config family must be absent from H and R0"
+        )
+    return {
+        "health_source_revision": health_source_revision,
+        "registry_source_revision": r0_revision,
+        "allowed_config_paths": sorted(expected_paths),
+        "health_source_is_registry_source_parent": True,
+        "exact_config_only_transition_verified": True,
+        "opposite_gpu_config_family_absent": True,
+    }
+
+
+def _require_no_config_family_at_health_source(source_revision: str) -> None:
+    """Keep W as the sole materialization choice at the health revision."""
+
+    for gpu_count in (1, 2):
+        directory = CONFIG_DIRECTORY_TEMPLATE.format(gpu_count=gpu_count)
+        if _git_tree_paths(source_revision, directory) or os.path.lexists(
+            REPOSITORY_ROOT / directory
+        ):
+            raise PreparationError(
+                "optimization-screen config families must both be absent before "
+                "materialization"
+            )
 
 
 def _ensure_registry_absent_at_revision(revision: str, relative_path: str) -> None:
@@ -561,6 +853,8 @@ def _build_registry_document(
     *,
     revision: str,
     gpu_count: int,
+    health_evidence: Mapping[str, Any],
+    health_source_transition: Mapping[str, Any],
     checkpoint_reference: Mapping[str, Any],
     source_references: Sequence[Mapping[str, Any]],
     panel_reference: Mapping[str, Any],
@@ -659,6 +953,10 @@ def _build_registry_document(
             "unregistered_attempts_allowed": False,
             "failed_or_missing_evidence_policy": "incomplete_no_winner",
         },
+        "prerequisite_health_gate": {
+            "evidence": dict(health_evidence),
+            "source_transition": dict(health_source_transition),
+        },
         "source": {
             "revision": revision,
             "clean": True,
@@ -752,11 +1050,21 @@ def _assert_only_registry_change(relative_path: str) -> None:
 def freeze_registry(gpu_count: int) -> dict[str, Any]:
     """Freeze a verifier-approved registry as the sole prospective R1 file."""
 
+    revision = _require_clean_pushed_source()
+    health_source_revision = _single_parent_revision(revision)
+    health_evidence = _validate_health_prerequisite(
+        gpu_count=gpu_count,
+        health_source_revision=health_source_revision,
+    )
+    health_source_transition = _validate_health_to_r0_transition(
+        health_source_revision=health_source_revision,
+        r0_revision=revision,
+        gpu_count=gpu_count,
+    )
     launcher, verifier = _runtime_modules()
     specs = _config_specs(gpu_count)
     _validate_fresh_output_paths(specs)
     registry_path = REPOSITORY_ROOT / REGISTRY_RELATIVE_PATH
-    revision = _require_clean_pushed_source()
     _ensure_registry_absent_at_revision(revision, REGISTRY_RELATIVE_PATH)
     if os.path.lexists(registry_path):
         raise FileExistsError(f"refusing to replace registry: {registry_path}")
@@ -789,6 +1097,8 @@ def freeze_registry(gpu_count: int) -> dict[str, Any]:
     candidate = _build_registry_document(
         revision=revision,
         gpu_count=gpu_count,
+        health_evidence=health_evidence,
+        health_source_transition=health_source_transition,
         checkpoint_reference=checkpoint,
         source_references=source_references,
         panel_reference=panel,
@@ -812,16 +1122,47 @@ def freeze_registry(gpu_count: int) -> dict[str, Any]:
         loader=verifier.local_blob_loader,
         git_blob_loader=verifier.git_blob_loader,
         git_ancestor_checker=verifier.git_ancestor_checker,
+        git_sole_parent_checker=verifier.git_sole_parent_checker,
+        git_tree_paths_loader=verifier.git_tree_paths_loader,
         git_pushed_checker=verifier.git_pushed_checker,
         git_diff_checker=verifier.git_diff_checker,
     )
+    if _require_clean_pushed_source() != revision:
+        raise PreparationError(
+            "source revision changed while the registry candidate was validated"
+        )
+    _require_registry_candidate_bytes(
+        candidate=candidate,
+        payload=payload,
+        raw_sha256=raw_sha256,
+        canonical_sha256=canonical_sha256,
+        verifier=verifier,
+    )
     _publish_bytes_exclusive(registry_path, payload)
-    if registry_path.read_bytes() != payload:
-        raise PreparationError("published registry bytes differ from validation")
+    _require_exact_pushed_revision(revision)
+    _require_registry_candidate_bytes(
+        candidate=candidate,
+        payload=payload,
+        raw_sha256=raw_sha256,
+        canonical_sha256=canonical_sha256,
+        verifier=verifier,
+        published_path=registry_path,
+    )
     _assert_only_registry_change(REGISTRY_RELATIVE_PATH)
+    _require_exact_pushed_revision(revision)
+    _require_registry_candidate_bytes(
+        candidate=candidate,
+        payload=payload,
+        raw_sha256=raw_sha256,
+        canonical_sha256=canonical_sha256,
+        verifier=verifier,
+        published_path=registry_path,
+    )
     return {
         "status": "validated_registry_frozen_as_only_r1_candidate",
         "source_revision": revision,
+        "health_source_revision": health_source_revision,
+        "health_terminal_receipt_sha256": health_evidence["terminal_receipt"]["sha256"],
         "gpu_count": gpu_count,
         "registry_relative_path": REGISTRY_RELATIVE_PATH,
         "registry_sha256": raw_sha256,

@@ -1,7 +1,7 @@
 # GenMol v2 project context
 
-Snapshot: 2026-09-06 11:20 Asia/Dubai. Recheck dynamic state, especially Git
-status, logs, tmux sessions, and GPU occupancy, before acting.
+Snapshot: 2026-09-06, pre-launch health-gate hardening. Recheck dynamic state,
+especially Git status, logs, tmux sessions, and GPU occupancy, before acting.
 
 ## Active objective and safe workspace
 
@@ -12,16 +12,18 @@ status, logs, tmux sessions, and GPU occupancy, before acting.
   `/home/aidar.alimbayev/Documents/genmolv2/run_sources/udlm_genmol_worktree`
   on branch `codex/udlm-genmol`, not in the dirty main checkout. Preserve all
   unrelated and uncommitted work.
-- The current reviewed implementation revision is clean and pushed at
-  `ddb3be8c7938731e82fd865b64f9f0c43678b04f`. It includes strict optimizer-step
+- The current pushed parent implementation revision is
+  `b7a8f6bde90a981b46e5ac5fd9da6d821c95af70`. It includes strict optimizer-step
   scheduler identity, prospective E-L0/E-L1 bundles, the warm-start-compatible
   A1 post-BERT FiLM conditioner, exact conditioning checkpoint identity,
   constructor-RNG isolation, the registry preparer and registry-aware launcher,
   evidence producers/collector, independent verifier, teaching, and tests. The
   pilot configs use the training-only audited empirical floor `0.0002`, and the
   screen registry/verifier bind that audit's exact bytes and producing source.
-  The screen arms remain deliberately unauthorized until the user chooses a GPU
-  count and the exact registry is frozen. The distinct source revision
+  The screen arms remain deliberately unauthorized until the exact health gate
+  passes and the selected-world-size registry is frozen. The user selected one
+  GPU for this lineage on 2026-09-06; later permission to use up to three GPUs
+  does not change this lineage's fixed world size. The distinct source revision
   used to produce the immutable current-code MDLM rescore is
   `74482c2742ab5ad15def122c809a6b4e403e94cf`. It contains the hardened
   completion contract, pilot-only distributed-stream repair and scheduler
@@ -133,7 +135,7 @@ canonical SHA-256
 It binds the ordered names and shapes of all 24 FiLM and four timestep-MLP
 tensors plus optimizer observations 1--3. Training-summary schema 4 always
 contains `conditioning_gradient_audit`: null for non-A1 arms and a
-contract-bound staged-gradient certificate for A1. Exit-receipt schema 4
+contract-bound staged-gradient certificate for A1. Exit-receipt schema 5
 revalidates and echoes that value. Every optimization-screen arm additionally
 captures a ten-field `screen_initialization_state_audit` after the verified
 MDLM-EMA warm start and before RNG reseeding or optimizer construction. It
@@ -155,10 +157,19 @@ result, or a quality claim; the audit must be rerun under the later frozen
 registry and pushed conditioning-authorization revision.
 
 The CPU-side screen authority is now implemented but has intentionally not
-been instantiated. `prepare_optimization_screen_registry.py` first composes
-six exact GPU-count-specific configurations and later, only from a clean
-pushed source revision, validates and writes a registry as the sole prospective
-next-commit change. `launch_optimization_screen.py` accepts only a registered
+been instantiated. The exact `launch_health_panel.py` wrapper fixes a
+ten-update, seed-1, full-vocabulary R/S/E contract and advances only the first
+missing member of its deterministic source-bound chain. The CPU-only
+`validate_health_panel.py` independently reconstructs the registered argv and
+Hydra configuration, revalidates the complete successful receipt/checkpoint
+chain, and returns evidence eligible only for screen authorization—not
+generation, ranking, superiority, or candidate locking.
+`prepare_optimization_screen_registry.py` refuses to compose the six exact
+GPU-count-specific configurations until that health evidence passes. It later
+revalidates the same evidence, proves that R0 is the sole-parent child of the
+health source H adding exactly those six selected-world-size configs, and
+writes registry v2 as the sole prospective R0-to-R1 change.
+`launch_optimization_screen.py` accepts only a registered
 stage and arm: the registry, not CLI overrides, fixes GPU count, seed, updates,
 checkpoint, batch arithmetic, configuration, and output path. The launcher
 reuses the repository-global job lease and last-moment idle-UUID re-probe.
@@ -167,14 +178,16 @@ artifacts and preflights its no-clobber evidence through the independent
 `verify_optimization_screen.py`; missing or invalid evidence yields no winner,
 whereas a complete threshold miss explicitly retains the registered control.
 
-The Git chronology is part of the experimental contract. R0 will contain the
-pushed implementation plus the six resolved configs but no registry. R1 may
-add only the frozen registry and is the scheduler-run source. After both
+The Git chronology is part of the experimental contract. H contains the pushed
+health implementation and neither GPU-count config family. The one-GPU health
+runs are named `health-w1-{r,s,e}-{H}`. R0 must be H's single-parent child and
+add exactly the six one-GPU resolved configs but no registry or other file. R1
+may add only the frozen registry and is the scheduler-run source. After both
 scheduler arms finish, their collected evidence and deterministic selection
 are the only permitted R1-to-R2 additions; pushed R2 then authorizes the two
-fresh conditioning arms. No resolved configs or registry exist yet because the
-user has not selected one or two GPUs, so no screen arm is currently
-authorized despite the completed CPU implementation.
+fresh conditioning arms. No resolved configs or registry exist yet. The user
+has selected one GPU, but no screen arm is authorized until the exact
+ten-update health chain completes.
 
 The benchmark and report pipeline now binds each run to its clean pushed source
 revision, tracked inference-config blob, checkpoint, tokenizer/data/SA inputs,
@@ -213,9 +226,9 @@ unchanged lease owned by that launch. Missing, malformed, mismatched, or
 nonzero-status evidence makes the launcher fail. The semantic checkpoint audit
 now deserializes the same open file descriptor whose bytes and identity were
 certified, so a byte-identical pathname replacement also fails. The launch
-manifest uses schema 1, runtime config schema 2, and training summary plus exit
-receipt schema 4. They record the training seed, optimizer updates, world size,
-microbatch, accumulation, requested example exposure, hosted-stream partition
+manifest uses schema 2, runtime config schema 2, training-summary schema 4, and
+exit-receipt schema 5. They record the training seed, optimizer updates, world
+size, microbatch, accumulation, requested example exposure, hosted-stream partition
 policy, trainable base/time-adapter parameter split, exact EMA shadow
 count/decay/update count, GPU telemetry, and manifest/lease bindings. These
 pilot-only guards leave ordinary release/manual training defaults unchanged.
@@ -238,8 +251,9 @@ trusted virtual-environment `.pth` files, a local upstream ref that is compared
 but not implicitly fetched, the host I/O cost of the post-fit checkpoint audit,
 and the unavoidable small interval between the final GPU probe and process
 creation. The global lease proves at most one reviewed worktree training job is
-active, but each per-run manifest does not yet bind its predecessor receipt;
-R-to-S-to-E order remains an operator protocol checked again after the runs.
+active. Each successor also binds and revalidates the exact immediately
+preceding successful receipt before its first GPU query, independently enforcing
+R-to-S-to-E order.
 The non-authoritative log is exclusively reserved but later reopened by
 `tee -a`, so its inode is not evidence-bound. A crash after receipt publication
 but before lease unlink can leave a stale lease; that state deliberately fails
@@ -427,39 +441,41 @@ training-unseen types. Pilot weight `0.0002` lowers that mass to about
 observed mass remains highly concentrated. Neither quantity predicts learned
 molecular quality.
 
-The 10-step matched `R/S/E` run is therefore a health gate only, not a ranking.
-If it succeeds, first run an `E`-only 100-update scheduler screen, then an
-`E`-only 500-update additive-versus-zero-projection-FiLM conditioning screen,
-and only then a matched 1,000-update `R/S/E` comparison. Commit the exact arm
-registry and selection rules before the 100-update screen. Use 32-sample
-diagnostics only for health; registered selection remains seeds 1000 and 1001,
-256 samples each, EMA weights, 128 reverse steps, and temperature 1.0. Do not
-touch final seeds 0, 1, and 2 until a registered winner satisfies the frozen
-eligibility and scientific gates.
+The exact 10-update matched `R/S/E` run is a training-health and provenance gate
+only, not generation or ranking. If it succeeds, materialize/freeze the registry
+and run the `E`-only 100-update scheduler screen, then the `E`-only 500-update
+additive-versus-zero-projection-FiLM conditioning screen, and only then a matched
+1,000-update `R/S/E` comparison. Only after every selected 1,000-update training
+receipt validates may seed 1100 produce a 32-request decode diagnostic, which is
+still ineligible for ranking. Registered selection remains seeds 1000 and 1001,
+256 requested samples each, EMA weights, 128 reverse steps, and temperature 1.0.
+Do not touch final seeds 0, 1, and 2 until a registered winner satisfies the
+frozen eligibility and scientific gates.
 
 The prospective screen YAMLs alone do not authorize execution and inherit
 ordinary defaults such as seed 1 and 50,000 maximum steps. The implemented
 registry preparer and launcher override and freeze seed 17, 100/500 updates,
 the user-chosen common GPU count, empirical floor `0.0002`, fresh verified
 MDLM-EMA warm starts, exact panel/corruption identities, and output paths. The
-schema-4 receipt/gate chain validates FiLM counts, staged gradients, post-init
+schema-5 receipt/gate chain validates FiLM counts, staged gradients, post-init
 RNG policy, conditioning metadata, and initialization state. Missing or
 malformed evidence means incomplete/no winner, never a silent control fallback.
 
 ## GPU status and required next pilot
 
-No UDLM GPU job has been launched, and no GPU inventory or utilization probe
-has yet been run for the pending pilot. No GPU probe or job occurred while
-producing or reviewing revisions through
-`ddb3be8c7938731e82fd865b64f9f0c43678b04f`, the CPU-only MDLM rescore, the
+At this snapshot no UDLM GPU job has been launched, and no GPU inventory or
+utilization probe has yet been run for the pending pilot. No GPU probe or job
+occurred while producing or reviewing revisions through
+`b7a8f6bde90a981b46e5ac5fd9da6d821c95af70`, the CPU-only MDLM rescore, the
 twelve historical launch dry-run invocations, the full-size A1 CPU warm-start
 smoke, the 30,000-row prior-floor replay, or the source/test integrations. No
 stale snapshot should be treated as authorization or availability evidence.
 
-Before the first GPU launch, the user must select only the GPU count: one or
-two. Recommend **one GPU** for the first matched 10-step engineering gate; the
-count can be reconsidered after memory and throughput are measured. Do not ask
-for or hard-code physical device IDs. Immediately before the job, inventory
+The user selected **one GPU** for this matched health/screen lineage and later
+authorized up to three GPUs without another permission check. The frozen W=1
+lineage must not change world size midstream; any later scale experiment needs a
+separate registered lineage. Do not ask for or hard-code physical device IDs.
+Immediately before the first job, inventory
 every NVIDIA device and its processes, dynamically choose that many genuinely
 idle devices, and re-probe the exact selected UUIDs at the last possible point.
 A selected device must have zero foreign compute processes, utilization below
@@ -467,13 +483,15 @@ the launcher's approved threshold (currently 10%), and at least 30,000 MiB
 free. Map the UUIDs through `CUDA_VISIBLE_DEVICES`; logical `cuda:0` is then
 safe. Never interrupt or reuse another user's process.
 
-The first GPU action should remain an engineering pilot: full-size BERT for 10
+The first GPU action should remain the exact wrapper-controlled R engineering
+pilot: full-size BERT for 10
 optimizer steps, checking memory, throughput, finite values, checkpoint
 save/load, exact runtime-config capture, and source/config/argv gates. Use the
-reviewed `scripts/udlm/launch_train_pilot.py`, a clearly named `tmux` session,
+reviewed `scripts/udlm/launch_health_panel.py`, which delegates to the pilot
+launcher in a clearly named `tmux` session,
 and `output/logs/`. Keep the three variants matched, preserve
-`schedule_uniform` as the causal control for `empirical_frequency`, and inspect
-32 samples before increasing to 100, 500, or 1,000 training steps. Advance to
+`schedule_uniform` as the causal control for `empirical_frequency`. Do not
+generate or rank from this health panel. Advance to
 larger training or three-seed 1,000-sample evaluation only after a small pilot
 is promising under the frozen quality/diversity criteria.
 
@@ -553,21 +571,41 @@ Completed prior items:
   `110` tests and the exact-worktree full CPU suite passed `772` tests with
   `14` dependency warnings in 175.50 seconds. Ruff, notebook structure/code,
   `py_compile`, and `git diff --check` passed; no GPU query or launch occurred.
+- Pushed revision `b7a8f6bde90a981b46e5ac5fd9da6d821c95af70`
+  hardens the pilot producer/consumer chain through exit-receipt schema 5,
+  freezes de-novo superiority protocol v2, makes every benchmark input and
+  metric denominator byte-verifiable, and prevents a health-scale or
+  single-stochastic result from entering the superiority decision. Its exact
+  CPU suite passed `1036` tests with `14` warnings in 209.33 seconds. No GPU
+  inventory or launch occurred.
+- The commit containing this snapshot adds the exact sequential health wrapper,
+  an independent full-argv/full-Hydra-config health validator, registry schema
+  v2 with a live terminal-receipt prerequisite, exact H-to-R0 sole-parent/tree
+  replay, the R0-to-R2 conditioning firewall, publication race checks, teaching,
+  and adversarial tests. Its exact CPU suite passed `1118` tests with `14`
+  warnings in 221.88 seconds. Ruff, format, `py_compile`, standard-library CLI
+  help, notebook regeneration/idempotence, and `git diff --check` passed. Real
+  CPU reconstruction produced the one-GPU common-config SHA-256
+  `da1c2fde8d0315b374d58aec9c469f060b53361b74d757f9b65ef57c80e71d50`.
+  No GPU inventory or launch occurred during this tranche.
 
 Remaining sequence:
 
-1. Ask the user whether the first pilot should use one or two GPUs; recommend
-   one GPU for this first matched health gate.
-2. Only after that choice, perform the first fresh GPU inventory and exact-UUID
-   re-probe, then launch the matched 10-step `R/S/E` engineering pilot.
+1. Finish validating, commit, and push the exact health launcher/validator,
+   registry-v2 prerequisite, complete Git-boundary replay, teaching, and tests.
+2. From that clean pushed H and the user's selected `W=1`, run the CPU-only
+   health wrapper dry-run. Immediately afterward perform the first fresh GPU
+   inventory/process inspection; if and only if one GPU meets the frozen safety
+   thresholds, let the wrapper dynamically select/re-probe its UUID and launch R.
+   Invoke the wrapper again only after each preceding receipt succeeds, producing
+   the exact matched 10-step `R/S/E` health chain.
 3. Review its authoritative manifests, receipts, checkpoints, and
    non-authoritative logs. If the health gate passes, materialize the six exact
    configs for the user-selected GPU count, commit and push them with the
    reviewed implementation as R0, then run the CPU-only freezer and commit/push
    its registry as the sole R1 change. The launcher, evidence schemas,
    initialization/gradient producers, collector, and independent selector are
-   already implemented. Do not rank variants from 10-step losses or 32-sample
-   health diagnostics.
+   already implemented. Do not generate or rank from the 10-step health panel.
 4. Run E-L0/E-L1 only under the frozen 100-update registry. If complete, use
    its verified scheduler decision for two fresh 500-update A0/A1 warm starts;
    never continue a scheduler-screen checkpoint or use final seeds.

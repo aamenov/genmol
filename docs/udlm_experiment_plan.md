@@ -83,10 +83,12 @@ Training accounting records requested example exposure; it does not claim a
 content-token exposure count. Pilot selection may use only seeds at least 1000.
 The registered comparison that can make a candidate eligible uses generation
 seeds 1000 and 1001, 256 requested samples per seed, 128 NFE, and the
-released-compatible quality and diversity metrics. Smaller 32-sample or
-32/64-NFE runs remain disclosed engineering evidence but cannot enter the
-selection score. The machine-readable winner is the highest mean quality,
-then highest mean diversity, then lexicographically smallest attempt ID.
+released-compatible quality and diversity metrics. The planned seed-1100,
+32-request decode diagnostic occurs only after a candidate has completed its
+1,000-update training run. It and any other smaller or 32/64-NFE run remain
+disclosed engineering evidence but cannot authorize an optimization screen or
+enter the selection score. The machine-readable winner is the highest mean
+quality, then highest mean diversity, then lexicographically smallest attempt ID.
 Artifacts using benchmark-run schema 6 or aggregate-report schema 5 are
 rejected; the required versions are candidate lock 2, candidate ledger 2,
 pilot envelope 2, launcher failure receipt 1, benchmark 7, report 6, launch
@@ -249,6 +251,33 @@ a schedule bundle hypothesis rather than an exact official-recipe replay.
    plumbing check only. The current constant schedule warms up for 2,500 steps;
    with peak learning rate $3\times10^{-4}$, its learning rate is only about
    $1.2\times10^{-6}$ by update 10. Ten steps therefore cannot rank methods.
+   The only supported entry point is `scripts/udlm/launch_health_panel.py`,
+   whose only choices are the user-selected world size $W\in\{1,2\}$ and a
+   CPU-only `--dry-run`. It fixes launcher variants `udlm` (R),
+   `schedule_uniform` (S), and `udlm_categorical` (E); seed 1; one loader
+   worker; 10 optimizer updates; full-vocabulary training; and the verified
+   MDLM EMA warm start from `outputs/paper_v1/checkpoints/50000.ckpt`, whose
+   size is 1,396,998,679 bytes and SHA-256 is
+   `8d00aa47b02f64bf39ff6b0b2e786f213587366fc2c3d29712a00f3f84108dd6`.
+   With per-process microbatch $m=2$, accumulation is $a_1=8$ for one GPU and
+   $a_2=4$ for two, so the effective batch is exactly
+   $B_{\mathrm{eff}}=Wma_W=16$ in either case. Every arm also carries the
+   audited empirical-mixture field `0.0002` (active only for E), utilization
+   strictly below 10%, at least 30,000 MiB free, no active compute process, and
+   non-prohibited compute mode.
+
+   Let $H$ be the full 40-character clean pushed source revision used by the
+   wrapper. Its deterministic run names are `health-w{W}-r-{H}`,
+   `health-w{W}-s-{H}`, and `health-w{W}-e-{H}`; each invocation launches only
+   the first missing arm and rejects incomplete or out-of-order directories. A
+   pass is not a favorable
+   loss or generated molecule. It is
+   `output/udlm/health-w{W}-e-{H}/pilot_exit_status.json` accepted by
+   `scripts/udlm/validate_health_panel.py`, including the exact contract above,
+   the complete schema-5 R→S→E receipt chain, verified EMA loading, finite
+   training/checkpoint state, and checkpoint save/reload. The normalized result
+   allows only `screen_authorization`; generation, ranking, superiority, and
+   candidate-lock eligibility are all false.
 4. **Implemented but not yet registered or authorized scheduler screen:** on E
    only, seed 17, compare 100 updates of E-L0 (the current additive conditioner
    and constant schedule with 2,500-update warmup) against E-L1 (the same
@@ -285,8 +314,10 @@ a schedule bundle hypothesis rather than an exact official-recipe replay.
    condition retains A0; malformed or incomplete evidence yields no winner.
    This is implemented experimental plumbing, not an executed result.
 6. Train matched R/S/E controls for 1,000 updates each with the selected
-   scheduler and architecture. First decode 32 requests with generation seed
-   1100 as an ineligible health diagnostic. Candidate eligibility still
+   scheduler and architecture. Only after each 1,000-update training receipt
+   validates, decode 32 requests with generation seed 1100 as an ineligible
+   post-scale-up decode diagnostic. It cannot retroactively authorize either
+   optimization screen or rank candidates. Candidate eligibility still
    requires the registered 256-request runs for both seeds 1000 and 1001 at
    128 NFE. All smaller or mismatched panels remain disclosed but ineligible;
    final seeds 0, 1, and 2 are unavailable for tuning or selection. The user
@@ -313,19 +344,29 @@ a schedule bundle hypothesis rather than an exact official-recipe replay.
    gate both validate the result and the final gate independently re-scores all
    three raw candidate CSVs.
 
-The optimization screens use a three-revision firewall. Once the user chooses
-one or two GPUs, the CPU-only preparer composes two scheduler configs and four
-conditioning configs (A0/A1 contingent on either scheduler), all at effective
-global batch 16 with per-process microbatch 2. Those six JSON files are
-committed with the implementation in clean pushed revision R0; the registry
-path must not exist there. The preparer then validates every live/Git blob,
-replays each config through the launcher's Hydra composition, streams the exact
-MDLM checkpoint hash, and writes the registry as the only R0-to-R1 candidate.
-After that registry-only commit is pushed, R1 may run E-L0/E-L1. Their evidence
-and deterministic selection are the only permitted R1-to-R2 additions. Pushed
-R2 may then run only the A0/A1 configs contingent on the selected scheduler.
-This ordering prevents a result from changing its own registry or its later
-conditioning comparison.
+   This later 1,000-update terminal-E receipt is distinct from the 10-update
+   health-terminal receipt. The health receipt authorizes only screen
+   preparation and cannot satisfy the candidate lock; the later receipt must
+   share the locked candidate's matched-panel digest.
+
+The optimization screens use a health revision plus a three-revision firewall.
+The clean pushed revision $H$ must contain the health implementation but neither
+GPU-count-specific config family. Only after `validate_health_panel.py` accepts
+the deterministic terminal-E receipt for the chosen $W$ may the CPU-only
+preparer materialize two scheduler configs and four conditioning configs (A0/A1
+contingent on either scheduler), all at effective global batch 16 with
+per-process microbatch 2. R0 must be the single-parent child of $H$ and differ
+from it by exactly those six selected-$W$ JSON files; the unselected config
+family and registry must remain absent. Before freezing, the preparer validates
+the same H-bound terminal receipt again, proves the exact H-to-R0 diff, validates
+every live/Git blob, replays each config through the launcher's Hydra
+composition, and streams the exact MDLM checkpoint hash. It writes the registry
+as the only R0-to-R1 candidate. After that registry-only commit is pushed, R1
+may run E-L0/E-L1. Their evidence and deterministic selection are the only
+permitted R1-to-R2 additions. Pushed R2 may then run only the A0/A1 configs
+contingent on the selected scheduler. This ordering prevents a result from
+changing its health authority, its own registry, or its later conditioning
+comparison.
 
 ### What the prospective L1 and A1 arms change
 

@@ -4386,8 +4386,10 @@ def tmux_session_exists(session_name: str) -> bool:
     return result.returncode == 0
 
 
-def main():
-    args = _parse_args()
+def main(argv: list[str] | None = None):
+    """Run one bounded pilot, optionally from an explicit wrapper-supplied argv."""
+
+    args = _parse_args() if argv is None else _parse_args(argv)
     if not RUN_NAME_PATTERN.fullmatch(args.run_name):
         raise ValueError("run-name must contain only letters, digits, '.', '_', or '-'")
     gpu_count = validate_gpu_count(args.gpu_count)

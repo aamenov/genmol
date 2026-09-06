@@ -14,6 +14,8 @@ from scripts.udlm import launch_train_pilot as pilot
 
 def _registry(gpu_count: int = 1):
     return SimpleNamespace(
+        relative_path=Path("experiments/udlm/protocols/screen.json"),
+        git_diff_checker=lambda _ancestor, _descendant, _allowed: True,
         reference={
             "relative_path": "experiments/udlm/protocols/screen.json",
             "sha256": "a" * 64,
@@ -21,13 +23,14 @@ def _registry(gpu_count: int = 1):
             "schema_version": 1,
         },
         data={
+            "source": {"revision": "a" * 40},
             "common_training": {
                 "gpu_count": gpu_count,
                 "global_batch_size": 32,
                 "micro_batch_size_per_process": 4,
                 "accumulate_grad_batches": 8 // gpu_count,
                 "effective_global_batch_size": 32,
-            }
+            },
         },
     )
 
@@ -217,14 +220,100 @@ def test_conditioning_dependency_is_mandatory_and_normalized(monkeypatch, tmp_pa
         "_load_declared_scheduler_dependency",
         lambda *_args, **_kwargs: ("E-L1", "c" * 40, normalized),
     )
+    registry = _registry()
+    observed_diff_checks = []
+    registry.git_diff_checker = (
+        lambda ancestor, descendant, allowed: observed_diff_checks.append(
+            (ancestor, descendant, allowed)
+        )
+        or True
+    )
     revision, observed = launcher._conditioning_dependency(
-        _registry(),
+        registry,
         authorization_revision="c" * 40,
         scheduler_evidence=evidence,
         scheduler_selection=selection,
     )
     assert revision == "c" * 40
     assert observed == normalized
+    assert observed_diff_checks == [
+        (
+            "a" * 40,
+            "c" * 40,
+            frozenset(
+                {
+                    "experiments/udlm/protocols/screen.json",
+                    "evidence.json",
+                    "selection.json",
+                }
+            ),
+        )
+    ]
+
+
+def test_conditioning_dependency_rejects_unregistered_authorization_change(
+    monkeypatch, tmp_path
+):
+    evidence = tmp_path / "evidence.json"
+    selection = tmp_path / "selection.json"
+    evidence.write_text('{"schema_version":1}\n')
+    selection.write_text('{"schema_version":1}\n')
+    monkeypatch.setattr(
+        launcher,
+        "_repository_json_reference",
+        lambda path, expected_schema: {
+            "root": "repository",
+            "relative_path": path.name,
+            "sha256": "1" * 64,
+            "size_bytes": 1,
+            "schema_version": expected_schema,
+            "canonical_sha256": "2" * 64,
+        },
+    )
+    normalized = {
+        "authorization_revision": "c" * 40,
+        "scheduler_evidence": {"relative_path": "evidence.json"},
+        "scheduler_selection": {"relative_path": "selection.json"},
+        "selected_scheduler_arm_id": "E-L1",
+    }
+    monkeypatch.setattr(
+        launcher.verifier,
+        "_load_declared_scheduler_dependency",
+        lambda *_args, **_kwargs: ("E-L1", "c" * 40, normalized),
+    )
+    registry = _registry()
+    observed_diff_checks = []
+    registry.git_diff_checker = (
+        lambda ancestor, descendant, allowed: observed_diff_checks.append(
+            (ancestor, descendant, allowed)
+        )
+        or False
+    )
+
+    with pytest.raises(
+        launcher.verifier.ScreenValidationError,
+        match="conditioning authorization changed unregistered source bytes",
+    ):
+        launcher._conditioning_dependency(
+            registry,
+            authorization_revision="c" * 40,
+            scheduler_evidence=evidence,
+            scheduler_selection=selection,
+        )
+
+    assert observed_diff_checks == [
+        (
+            "a" * 40,
+            "c" * 40,
+            frozenset(
+                {
+                    "experiments/udlm/protocols/screen.json",
+                    "evidence.json",
+                    "selection.json",
+                }
+            ),
+        )
+    ]
 
 
 def test_screen_uses_the_shared_lock_with_an_accurate_reviewed_purpose(

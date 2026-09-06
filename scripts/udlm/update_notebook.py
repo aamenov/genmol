@@ -1149,18 +1149,41 @@ selection, but the superiority claim cannot proceed from an incomplete or
 cherry-picked panel.
 
 **Progressive experiment gate and motivation.** First run the warm-start R/S/E
-panel for only 10 optimizer updates: R is the released schedule with a uniform
-prior, S is the schedule-consistent uniform control, and E is the
-schedule-consistent empirical-frequency prior. Their canonical matched-panel
-specification registers sequential R, S, then E execution. R requires an
-explicit genesis declaration. S and E cannot reach a GPU probe without a
-validated successful receipt from the immediately preceding arm; the exact
-receipt, manifest, and summary snapshots are bound into the successor manifest
-and revalidated before its successful exit receipt. The predecessor receipt
-must predate the successor's lease acquisition and first GPU inventory query.
-The global lease separately machine-enforces one-job concurrency. The health panel checks memory, throughput, checkpoint
-save/load, finiteness, and evidence plumbing. It cannot rank the variants: the
-current constant schedule has 2,500 linear-warmup
+panel for only 10 optimizer updates. The only supported entry point is
+`scripts/udlm/launch_health_panel.py`; it exposes only the user-selected world
+size $W\in\{1,2\}$ and a CPU-only dry-run, not scientific or safety overrides.
+The fixed launcher variants are `udlm` (R, released schedule and uniform prior),
+`schedule_uniform` (S, schedule-consistent uniform control), and
+`udlm_categorical` (E, schedule-consistent empirical-frequency prior). Every arm
+uses seed 1, one loader worker, the full 1,880-token vocabulary, the audited
+empirical-mixture field 0.0002 (active only for E), and the verified MDLM EMA
+warm start from `outputs/paper_v1/checkpoints/50000.ckpt`, whose size is
+1,396,998,679 bytes and SHA-256 is
+`8d00aa47b02f64bf39ff6b0b2e786f213587366fc2c3d29712a00f3f84108dd6`.
+For per-process microbatch $m=2$, accumulation is $a_1=8$ or $a_2=4$, so
+$B_{\mathrm{eff}}=Wma_W=16$ for either supported world size. The wrapper fixes
+utilization strictly below 10%, at least 30,000 MiB free, zero compute
+processes, and non-prohibited compute mode.
+
+Let $H$ be the full clean pushed 40-character source revision. The deterministic
+run names are `health-w{W}-r-{H}`, `health-w{W}-s-{H}`, and
+`health-w{W}-e-{H}`. Each wrapper invocation launches only the first missing
+member and rejects incomplete or out-of-order directories. R requires explicit
+genesis. S and E cannot reach a GPU probe without a validated successful receipt
+from the immediately preceding arm; the exact receipt, manifest, and summary
+snapshots are bound into the successor manifest and revalidated before its
+successful exit receipt. The predecessor receipt must predate the successor's
+lease acquisition and first GPU inventory query. The global lease separately
+machine-enforces one-job concurrency.
+
+The pass artifact is the schema-5 terminal receipt at
+`output/udlm/health-w{W}-e-{H}/pilot_exit_status.json`, accepted by the CPU-only
+`scripts/udlm/validate_health_panel.py`. That validator checks the complete
+R→S→E chain and narrows it to this exact contract, including verified EMA
+loading, finite training/checkpoint state, and checkpoint save/reload. Its
+normalized result permits only screen authorization: generation, ranking,
+superiority, and candidate-lock eligibility are false. The health panel cannot
+rank the variants: the current constant schedule has 2,500 linear-warmup
 updates, so at peak learning rate $3\times10^{-4}$ its value by update 10 is
 only approximately $(10/2500)(3\times10^{-4})=1.2\times10^{-6}$.
 
@@ -1173,16 +1196,20 @@ cannot authorize these arms and no GPU screen has run. Every number below is a
 mathematical, synthetic, or CPU initialization diagnostic—not a training
 result.
 
-**Three-revision firewall.** After the user chooses one or two GPUs, the
-CPU-only preparer creates exactly six configs at effective global batch 16 and
-microbatch 2: L0/L1 plus A0/A1 contingent on either scheduler. Clean pushed R0
-contains those configs and the implementation but no registry. The preparer
-replays all six through Hydra, verifies their Git blobs and the streamed MDLM
-checkpoint, then writes the registry as the only prospective R0-to-R1 change.
-Pushed R1 is the scheduler-run source. Only its collected scheduler evidence
-and deterministic selection may be added in R2; pushed R2 then authorizes the
-fresh conditioning arms. The verifier recomputes this chronology and returns
-no winner for missing or unmatched evidence.
+**Health revision and three-revision firewall.** Revision $H$ contains the
+reviewed implementation but neither GPU-count config family. Both config
+materialization at $H$ and registry freezing at R0 independently reconstruct
+and validate the deterministic H-bound terminal-E health receipt for the chosen
+$W$. The CPU-only preparer creates exactly six configs at effective global batch
+16 and microbatch 2: L0/L1 plus A0/A1 contingent on either scheduler. R0 must be
+the single-parent child of $H$ and differ by exactly those selected-$W$ configs;
+the unselected config family and registry remain absent. The preparer proves
+that H-to-R0 transition, replays all six through Hydra, verifies their Git blobs
+and the streamed MDLM checkpoint, then writes the registry as the only
+prospective R0-to-R1 change. Pushed R1 is the scheduler-run source. Only its
+collected scheduler evidence and deterministic selection may be added in R2;
+pushed R2 then authorizes the fresh conditioning arms. The verifier recomputes
+this chronology and returns no winner for missing or unmatched evidence.
 
 **Paper correspondence and motivation.** UDLM's denoiser predicts
 $x_\theta(z_t,t)$, so it needs the noise time (implemented here through total
@@ -1348,8 +1375,10 @@ warm-start-compatible architecture hypothesis, not released UDLM and not a
 paper result.
 
 With the selected scheduler and architecture, train matched R/S/E controls for
-1,000 updates each. A 32-request generation at seed 1100 is an ineligible
-health diagnostic. A candidate is eligible for selection only after exactly
+1,000 updates each. Only after each 1,000-update training receipt validates, a
+32-request generation at seed 1100 is an ineligible post-scale-up decode
+diagnostic. It cannot authorize either earlier optimization screen or rank
+candidates. A candidate is eligible for selection only after exactly
 256 requests at 128 NFE for each reserved generation seed 1000 and 1001. If
 $q_{c,s}$ and $d_{c,s}$ are released-branch quality and diversity for candidate
 attempt $c$ and generation seed $s$, the frozen scores are
@@ -1387,6 +1416,11 @@ evaluated once, with 1,000 requests each, under the same repaired definitions
 as the audited MDLM control.
 The final gate independently repeats raw-text rescoring for all three candidate
 seeds before it can publish a decision.
+
+The candidate lock's terminal-E receipt is the later 1,000-update matched-panel
+receipt, not the 10-update health-terminal receipt. The latter authorizes only
+screen preparation and is explicitly ineligible for the candidate lock; the
+later receipt must share the locked candidate's matched-panel digest.
 
 **Baseline recomputation evidence.** The immutable rescore attestation does not
 regenerate molecules. Three fresh CPU interpreters re-decode and re-score the
@@ -1427,8 +1461,11 @@ and generation seeds, initialization, added optimizer updates and requested
 example exposure, parameter counts, checkpoint-selection rule, immutable
 launch-manifest path/hash/schema, exact UUID and final-idle telemetry bindings,
 global-lease evidence, 128-NFE UDLM inference cost, wall time, and exact
-denominators. The receipt does not claim a content-token exposure count. Passing a small pilot is
-only permission to continue. If the locked candidate is an MDLM-EMA warm start
+denominators. The receipt does not claim a content-token exposure count. Passing
+the exact 10-update health panel grants only permission to prepare the screens;
+passing the frozen two-seed, 256-request selector grants permission to consider
+longer candidate training. Neither result is itself a superiority claim. If the
+locked candidate is an MDLM-EMA warm start
 with extra UDLM training, passing the gate supports only an operational
 continuation-system claim on molecular metrics, not a from-scratch causal claim
 for the diffusion method and not a speed win. A method-only claim requires a
@@ -1448,10 +1485,10 @@ smoke result is paper-scale.
 GenMol? Expected reasoning: it checks optimization mechanics on 16 memorized
 molecules, not the matched de-novo distribution. Why retain strict diagnostics
 when the headline comparison is repaired? Expected reasoning: repair can hide
-invalid raw SAFE generations, so both views are needed. Why may a 32-sample
-pilot not win even if its observed quality is highest? Expected reasoning: its
-variance and operating point differ from the frozen selector, so allowing it
-would reintroduce post-hoc selection. What does 63,000 matching row fields show?
+invalid raw SAFE generations, so both views are needed. Why may the post-scale-up
+32-request diagnostic not win even if its observed quality is highest? Expected
+reasoning: its variance and operating point differ from the frozen selector, so
+allowing it would reintroduce post-hoc selection. What does 63,000 matching row fields show?
 Expected reasoning: current decoding/scoring exactly reproduces the frozen raw
 MDLM evidence within the declared numeric tolerance; it does not repair the
 historical training or GPU-provenance limitations. Why must the same manifest
@@ -1463,7 +1500,11 @@ $1.2\times10^{-6}$ by update 10 under the 2,500-step warmup, meaningful learning
 has barely started. Why are both a global lease and predecessor receipts needed?
 Expected reasoning: the lease prevents concurrent reviewed jobs, while each
 successor's immutable predecessor binding proves R-to-S-to-E order and successful
-advancement. Why is L1 an optimizer-schedule bundle rather than a clean cosine
+advancement. What does the health-terminal E receipt authorize? Expected
+reasoning: config materialization and registry freezing only; it permits no
+generation, ranking, superiority claim, or candidate lock, and the later
+1,000-update panel needs its own terminal E receipt. Why is L1 an
+optimizer-schedule bundle rather than a clean cosine
 ablation? Expected reasoning: shortening warmup changes its first-100-update
 cumulative learning-rate exposure by about 37.57 times, so early exposure and
 curve shape cannot be separated. Why must both 500-update arms freshly reload
@@ -1563,6 +1604,8 @@ assert stage20_selection_firewall["eligible_metric_branch"] == "released_compara
 stage20_future_pilot_plan = {{
     "status": "implemented_cpu_plumbing_not_registered_not_authorized_not_executed",
     "execution_authority": {{
+        "exact_health_launcher_implemented": True,
+        "exact_health_validator_implemented": True,
         "two_phase_registry_preparer_implemented": True,
         "registry_aware_launcher_implemented": True,
         "evidence_collector_implemented": True,
@@ -1572,9 +1615,14 @@ stage20_future_pilot_plan = {{
         "gpu_screen_executed": False,
     }},
     "registry_git_firewall": {{
-        "R0": "clean pushed implementation plus six resolved configs; registry absent",
+        "H": "clean pushed health source; both GPU-count config families absent",
+        "R0": "single-parent child of H adding only six selected-W configs; registry absent",
         "R1": "registry-only pushed descendant and scheduler run source",
         "R2": "scheduler evidence and selection-only pushed descendant authorizing conditioning",
+        "terminal_e_health_receipt_required_before_materialize": True,
+        "same_terminal_e_health_receipt_revalidated_before_freeze": True,
+        "H_to_R0_exact_selected_config_only_transition_required": True,
+        "unselected_gpu_count_config_family_absent_in_H_and_R0": True,
         "resolved_config_count": 6,
         "effective_global_batch_size": 16,
         "micro_batch_size_per_process": 2,
@@ -1597,9 +1645,66 @@ stage20_future_pilot_plan = {{
         "registered_selection_evidence": False,
     }},
     "health_panel": {{
+        "launcher": "scripts/udlm/launch_health_panel.py",
+        "validator": "scripts/udlm/validate_health_panel.py",
+        "launcher_choices": ["gpu_count_1_or_2", "cpu_only_dry_run"],
+        "source_revision_symbol": "H",
+        "source_revision_requirement": "full_clean_pushed_40_character_revision",
+        "run_name_templates": [
+            "health-w{{W}}-r-{{H}}",
+            "health-w{{W}}-s-{{H}}",
+            "health-w{{W}}-e-{{H}}",
+        ],
+        "terminal_receipt_template": (
+            "output/udlm/health-w{{W}}-e-{{H}}/pilot_exit_status.json"
+        ),
         "variant_order": ["R_release_uniform", "S_schedule_uniform", "E_empirical_frequency"],
+        "launcher_variant_order": ["udlm", "schedule_uniform", "udlm_categorical"],
+        "supported_world_sizes": [1, 2],
+        "num_nodes": 1,
         "optimizer_updates_each": 10,
+        "training_seed": 1,
+        "loader_workers": 1,
+        "micro_batch_size_per_process": 2,
+        "gradient_accumulation_by_world_size": {{1: 8, 2: 4}},
+        "effective_global_batch_size": 16,
+        "vocabulary_size": 1880,
+        "exclude_special_tokens": False,
+        "scratch_mode": False,
+        "empirical_uniform_mix": 0.0002,
+        "warm_start": {{
+            "weights": "ema",
+            "checkpoint_project_relative_path": (
+                "outputs/paper_v1/checkpoints/50000.ckpt"
+            ),
+            "checkpoint_size_bytes": 1396998679,
+            "checkpoint_sha256": (
+                "8d00aa47b02f64bf39ff6b0b2e786f213587366fc2c3d29712a00f3f84108dd6"
+            ),
+            "byte_identity_verified_before_and_after_load": True,
+        }},
+        "gpu_safety_policy": {{
+            "max_utilization_percent": 10,
+            "utilization_comparison": "strictly_less_than",
+            "min_free_memory_mib": 30000,
+            "active_compute_processes_allowed": False,
+            "compute_mode_prohibited_allowed": False,
+        }},
         "purpose": "health_and_provenance_only",
+        "normalized_evidence_schema_version": 1,
+        "successful_exit_receipt_schema_version": 5,
+        "terminal_e_receipt_required_before": [
+            "screen_config_materialization",
+            "screen_registry_freeze",
+        ],
+        "eligibility": {{
+            "screen_authorization": True,
+            "generation": False,
+            "ranking": False,
+            "superiority": False,
+            "candidate_lock": False,
+        }},
+        "distinct_from_later_1000_update_terminal_e_receipt": True,
         "single_job_concurrency_machine_enforced": True,
         "order_and_predecessor_receipt_gate_machine_enforced": True,
     }},
@@ -1673,7 +1778,14 @@ stage20_future_pilot_plan = {{
     "matched_scale_up": {{
         "variant_order": ["R_release_uniform", "S_schedule_uniform", "E_empirical_frequency"],
         "optimizer_updates_each": 1000,
-        "health_generation": {{"seed": 1100, "requested": 32, "eligible": False}},
+        "post_training_decode_diagnostic": {{
+            "after_optimizer_updates_each": 1000,
+            "seed": 1100,
+            "requested": 32,
+            "eligible": False,
+            "can_authorize_optimization_screen": False,
+            "can_rank_candidates": False,
+        }},
         "registered_selection_generation": {{
             "seeds": [1000, 1001],
             "requested_per_seed": 256,
@@ -1684,6 +1796,8 @@ stage20_future_pilot_plan = {{
 }}
 stage20_screen_authority = stage20_future_pilot_plan["execution_authority"]
 for stage20_implemented_authority in (
+    "exact_health_launcher_implemented",
+    "exact_health_validator_implemented",
     "two_phase_registry_preparer_implemented",
     "registry_aware_launcher_implemented",
     "evidence_collector_implemented",
@@ -1698,6 +1812,49 @@ assert (
     ]
     == 16
 )
+stage20_health_contract = stage20_future_pilot_plan["health_panel"]
+assert stage20_health_contract["launcher"] == (
+    "scripts/udlm/launch_health_panel.py"
+)
+assert stage20_health_contract["validator"] == (
+    "scripts/udlm/validate_health_panel.py"
+)
+assert stage20_health_contract["run_name_templates"] == [
+    "health-w{{W}}-r-{{H}}",
+    "health-w{{W}}-s-{{H}}",
+    "health-w{{W}}-e-{{H}}",
+]
+assert stage20_health_contract["terminal_e_receipt_required_before"] == [
+    "screen_config_materialization",
+    "screen_registry_freeze",
+]
+assert stage20_health_contract["eligibility"] == {{
+    "screen_authorization": True,
+    "generation": False,
+    "ranking": False,
+    "superiority": False,
+    "candidate_lock": False,
+}}
+for stage20_health_world_size in stage20_health_contract["supported_world_sizes"]:
+    stage20_health_effective_batch = (
+        stage20_health_world_size
+        * stage20_health_contract["micro_batch_size_per_process"]
+        * stage20_health_contract["gradient_accumulation_by_world_size"][
+            stage20_health_world_size
+        ]
+    )
+    assert stage20_health_effective_batch == (
+        stage20_health_contract["effective_global_batch_size"]
+    )
+stage20_post_training_decode = stage20_future_pilot_plan["matched_scale_up"][
+    "post_training_decode_diagnostic"
+]
+assert stage20_post_training_decode["after_optimizer_updates_each"] == 1000
+assert stage20_post_training_decode["seed"] == 1100
+assert stage20_post_training_decode["requested"] == 32
+assert stage20_post_training_decode["eligible"] is False
+assert stage20_post_training_decode["can_authorize_optimization_screen"] is False
+assert stage20_post_training_decode["can_rank_candidates"] is False
 stage20_initialization_diagnostic = stage20_future_pilot_plan[
     "pre_registry_full_size_initialization_diagnostic"
 ]
@@ -2168,10 +2325,12 @@ stage20_decision_gate_report_rows = [
     (
         "Registered pilot selector",
         "Future execution plan; CPU plumbing implemented but screen arms not yet "
-        "registered or launcher-authorized: 10-update R/S/E health; E optimizer-"
-        "schedule-bundle screen at 100 updates, seed 17; fresh MDLM-EMA E "
+        "registered or launcher-authorized: exact H-bound 10-update R/S/E health "
+        "receipt required before materialize and freeze; E optimizer-schedule-"
+        "bundle screen at 100 updates, seed 17; fresh MDLM-EMA E "
         "conditioning arms at 500 updates, seed 17, with post-init reseeding; "
-        "selected matched R/S/E at 1000 updates. Seed 1100 x 32 is ineligible. "
+        "selected matched R/S/E at 1000 updates. Only afterward, seed 1100 x 32 "
+        "is an ineligible decode diagnostic. "
         "Selection uses seeds 1000,1001 x 256 requests at 128 NFE; released-"
         "compatible quality then diversity then lexical attempt ID. Scores are "
         "recomputed from raw model text; failed siblings remain disclosed.",
@@ -2240,6 +2399,10 @@ stage20_summary = {{
         "a1_warm_start_tensor_counts": stage20_a1_warm_start_tensor_counts,
         "fresh_mdlm_ema_start_each_500_update_arm": True,
         "post_initialization_reseed_each_500_update_arm": True,
+        "exact_health_launcher_implemented": True,
+        "exact_health_validator_implemented": True,
+        "health_terminal_e_required_before_materialize_and_freeze": True,
+        "health_evidence_screen_authorization_only": True,
         "two_phase_registry_preparer_implemented": True,
         "registry_aware_launcher_implemented": True,
         "evidence_collector_implemented": True,
@@ -3525,10 +3688,16 @@ def _update_completion_gate(notebook: dict) -> None:
   final-idle telemetry, repository-global single-job lease, and exact R/S/E
   predecessor artifacts. The lease machine-enforces one-job concurrency; the
   genesis/predecessor chain independently machine-enforces registered order.
-- The prospective small-first ladder is a 10-update R/S/E health panel, an
-  E-only 100-update scheduler screen, an E-only 500-update conditioning screen,
-  then selected matched R/S/E runs at 1,000 updates. Seed 1100 x 32 requests is
-  ineligible; only seeds 1000/1001 x 256 requests at 128 NFE may select.
+- `launch_health_panel.py` fixes the exact seed-1, full-vocabulary, MDLM-EMA
+  10-update contract and deterministic `health-w{{W}}-{{r,s,e}}-{{H}}` names;
+  `validate_health_panel.py` grants screen authorization only. Its terminal-E
+  receipt is required independently before config materialization and registry
+  freezing and cannot satisfy the later candidate lock.
+- The prospective small-first ladder continues with an E-only 100-update
+  scheduler screen, an E-only 500-update conditioning screen, then selected
+  matched R/S/E runs at 1,000 updates. Only after those training runs, seed
+  1100 x 32 requests is an ineligible decode diagnostic; only seeds 1000/1001 x
+  256 requests at 128 NFE may select.
 - Completed selection seeds publish schema-2 reference-only envelopes after
   structural validation and fresh-process raw-text rescoring. Failed seeds use
   launcher-authored schema-1 receipts; a partial failure retains the completed

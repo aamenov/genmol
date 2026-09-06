@@ -7,6 +7,7 @@ import json
 import math
 import subprocess
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
 from fractions import Fraction
@@ -18,10 +19,11 @@ import pytest
 from scripts.udlm import verify_optimization_screen as screen
 
 
+HEALTH_REVISION = "d" * 40
 REGISTRY_REVISION = "a" * 40
 PUBLICATION_REVISION = "b" * 40
 AUTHORIZATION_REVISION = "c" * 40
-REGISTRY_PATH = "experiments/udlm/protocols/optimization_screen_registry_v1.json"
+REGISTRY_PATH = "experiments/udlm/protocols/optimization_screen_registry_v2.json"
 FIXTURE_PATH = Path(__file__).parents[1] / screen.EXPECTED_INITIALIZATION_FIXTURE_PATH
 
 
@@ -42,6 +44,7 @@ class Harness:
     registry_document: dict[str, Any] | None = None
     registry_payload: bytes | None = None
     registry: screen.ValidatedRegistry | None = None
+    validated_health_evidence: dict[str, Any] | None = None
 
     def add_blob(
         self,
@@ -105,6 +108,15 @@ class Harness:
         return (
             ancestor == descendant
             or (
+                ancestor == HEALTH_REVISION
+                and descendant
+                in {
+                    REGISTRY_REVISION,
+                    PUBLICATION_REVISION,
+                    AUTHORIZATION_REVISION,
+                }
+            )
+            or (
                 ancestor == REGISTRY_REVISION
                 and descendant in {PUBLICATION_REVISION, AUTHORIZATION_REVISION}
             )
@@ -112,6 +124,23 @@ class Harness:
                 ancestor == PUBLICATION_REVISION
                 and descendant == AUTHORIZATION_REVISION
             )
+        )
+
+    @staticmethod
+    def sole_parent(revision: str, expected_parent: str) -> bool:
+        parents = {
+            REGISTRY_REVISION: (HEALTH_REVISION,),
+            PUBLICATION_REVISION: (REGISTRY_REVISION,),
+            AUTHORIZATION_REVISION: (PUBLICATION_REVISION,),
+        }
+        return parents.get(revision) == (expected_parent,)
+
+    def tree_paths(self, revision: str, directory: PurePosixPath) -> frozenset[str]:
+        prefix = directory.as_posix() + "/"
+        return frozenset(
+            path
+            for observed_revision, path in self.git_blobs
+            if observed_revision == revision and path.startswith(prefix)
         )
 
     @staticmethod
@@ -123,6 +152,22 @@ class Harness:
         _ancestor: str, _descendant: str, _allowed_paths: frozenset[str]
     ) -> bool:
         return True
+
+    def health_validator(
+        self,
+        terminal_receipt_path: Path,
+        *,
+        expected_gpu_count: int,
+        expected_source_revision: str,
+    ) -> dict[str, Any]:
+        assert self.validated_health_evidence is not None
+        evidence = self.validated_health_evidence
+        assert terminal_receipt_path == (
+            screen.REPOSITORY_ROOT / evidence["terminal_receipt"]["relative_path"]
+        )
+        assert expected_gpu_count == evidence["gpu_count"]
+        assert expected_source_revision == evidence["health_source_revision"]
+        return copy.deepcopy(evidence)
 
     def freeze(self) -> screen.ValidatedRegistry:
         assert self.registry_document is not None
@@ -140,8 +185,11 @@ class Harness:
             loader=self.loader,
             git_blob_loader=self.git_loader,
             git_ancestor_checker=self.ancestor,
+            git_sole_parent_checker=self.sole_parent,
+            git_tree_paths_loader=self.tree_paths,
             git_pushed_checker=self.pushed,
             git_diff_checker=self.allowed_diff,
+            health_gate_validator=self.health_validator,
         )
         return self.registry
 
@@ -245,6 +293,84 @@ def _source_ref(harness: Harness, path: str) -> dict[str, Any]:
     )
 
 
+def _health_gate(harness: Harness, *, gpu_count: int) -> dict[str, Any]:
+    variants = screen.EXPECTED_HEALTH_VARIANT_ORDER
+    slugs = screen.EXPECTED_HEALTH_VARIANT_SLUGS
+    run_names = [f"health-w{gpu_count}-{slug}-{HEALTH_REVISION}" for slug in slugs]
+    terminal_receipt_value = {
+        "schema_version": screen.EXPECTED_HEALTH_RECEIPT_SCHEMA_VERSION,
+        "status": "success",
+        "recorded_at_utc": "2026-09-06T00:00:02Z",
+    }
+    terminal_ref = harness.add_json(
+        "repository",
+        f"output/udlm/{run_names[-1]}/pilot_exit_status.json",
+        terminal_receipt_value,
+        screen.EXPECTED_HEALTH_RECEIPT_SCHEMA_VERSION,
+    )
+    receipt_members = []
+    checkpoint_members = []
+    for position, (variant, run_name) in enumerate(
+        zip(variants, run_names, strict=True)
+    ):
+        receipt_sha256 = (
+            terminal_ref["sha256"]
+            if position == 2
+            else _sha(f"health-receipt-{position}\n".encode())
+        )
+        receipt_members.append(
+            {
+                "position": position,
+                "training_variant": variant,
+                "run_name": run_name,
+                "relative_path": (f"output/udlm/{run_name}/pilot_exit_status.json"),
+                "sha256": receipt_sha256,
+                "schema_version": screen.EXPECTED_HEALTH_RECEIPT_SCHEMA_VERSION,
+                "recorded_at_utc": f"2026-09-06T00:00:0{position}Z",
+            }
+        )
+        checkpoint_members.append(
+            {
+                "position": position,
+                "training_variant": variant,
+                "run_name": run_name,
+                "relative_path": f"output/udlm/{run_name}/checkpoints/10.ckpt",
+                "sha256": _sha(f"health-checkpoint-{position}\n".encode()),
+                "size_bytes": 1000 + position,
+                "global_step": 10,
+            }
+        )
+    evidence = {
+        "schema_version": screen.EXPECTED_HEALTH_SCHEMA_VERSION,
+        "status": screen.EXPECTED_HEALTH_STATUS,
+        "claim_scope": screen.EXPECTED_HEALTH_CLAIM_SCOPE,
+        "health_source_revision": HEALTH_REVISION,
+        "gpu_count": gpu_count,
+        "matched_panel_spec_sha256": _sha(b"health-panel\n"),
+        "terminal_receipt": {
+            **terminal_ref,
+            "training_variant": variants[-1],
+            "position": 2,
+        },
+        "receipt_members": receipt_members,
+        "checkpoint_members": checkpoint_members,
+        "eligibility": dict(screen.EXPECTED_HEALTH_ELIGIBILITY),
+    }
+    harness.validated_health_evidence = copy.deepcopy(evidence)
+    config_paths = list(screen._expected_screen_config_paths(gpu_count))
+    return {
+        "evidence": evidence,
+        "source_transition": {
+            "health_source_revision": HEALTH_REVISION,
+            "registry_source_revision": REGISTRY_REVISION,
+            "allowed_config_paths": config_paths,
+            "health_source_is_registry_source_parent": True,
+            "exact_config_only_transition_verified": True,
+            "opposite_gpu_config_family_absent": True,
+        },
+    }
+
+
 def build_harness(*, gpu_count: int = 1) -> Harness:
     harness = Harness()
     required_sources = (
@@ -257,9 +383,12 @@ def build_harness(*, gpu_count: int = 1) -> Harness:
         screen.EXPECTED_PRIOR_FLOOR_AUDIT_PATH,
         "scripts/udlm/collect_optimization_screen_evidence.py",
         "scripts/udlm/evaluate_denoising_panel.py",
+        "scripts/udlm/launch_health_panel.py",
         "scripts/udlm/launch_optimization_screen.py",
         "scripts/udlm/launch_train_pilot.py",
+        "scripts/udlm/validate_health_panel.py",
         "scripts/udlm/verify_optimization_screen.py",
+        "scripts/udlm/write_pilot_evidence.py",
         "scripts/udlm/write_pilot_exit_status.py",
         "src/genmol/backbone.py",
         "src/genmol/diffusion.py",
@@ -365,6 +494,17 @@ def build_harness(*, gpu_count: int = 1) -> Harness:
     ):
         harness.git_blobs[(revision, fixture_ref["relative_path"])] = fixture_payload
 
+    config_filenames = {
+        ("E-L0", None): "scheduler_e_l0.json",
+        ("E-L1", None): "scheduler_e_l1.json",
+        ("E-A0", "E-L0"): "conditioning_e_a0__e_l0.json",
+        ("E-A0", "E-L1"): "conditioning_e_a0__e_l1.json",
+        ("E-A1", "E-L0"): "conditioning_e_a1__e_l0.json",
+        ("E-A1", "E-L1"): "conditioning_e_a1__e_l1.json",
+    }
+    config_directory = screen.EXPECTED_SCREEN_CONFIG_DIRECTORY_TEMPLATE.format(
+        gpu_count=gpu_count
+    )
     config_entries: dict[tuple[str, str | None], dict[str, Any]] = {}
     for stage_id, arms in (
         ("scheduler", ("E-L0", "E-L1")),
@@ -388,7 +528,7 @@ def build_harness(*, gpu_count: int = 1) -> Harness:
                     gpu_count=gpu_count,
                 )
                 config_ref = harness.add_config(
-                    f"experiments/udlm/protocols/configs/{arm_id.lower()}{suffix}.json",
+                    f"{config_directory}/{config_filenames[(arm_id, contingent)]}",
                     config,
                 )
                 config_entries[(arm_id, contingent)] = {
@@ -469,8 +609,9 @@ def build_harness(*, gpu_count: int = 1) -> Harness:
         for ref in source_refs
         if ref["relative_path"] == "scripts/udlm/evaluate_denoising_panel.py"
     )
+    prerequisite_health_gate = _health_gate(harness, gpu_count=gpu_count)
     harness.registry_document = {
-        "schema_version": 1,
+        "schema_version": screen.REGISTRY_SCHEMA_VERSION,
         "registry_id": screen.EXPECTED_REGISTRY_ID,
         "status": screen.EXPECTED_REGISTRY_STATUS,
         "claim_scope": screen.EXPECTED_CLAIM_SCOPE,
@@ -489,6 +630,7 @@ def build_harness(*, gpu_count: int = 1) -> Harness:
             "pushed": True,
             "blobs": source_refs,
         },
+        "prerequisite_health_gate": prerequisite_health_gate,
         "common_training": {
             "training_seed": 17,
             "gpu_count": gpu_count,
@@ -543,6 +685,49 @@ def _artifact_json(
         f"{output_directory}/{name}.json",
         value,
         schema_version,
+    )
+
+
+def _load_registry_document(
+    harness: Harness,
+    document: Mapping[str, Any],
+    *,
+    git_ancestor_checker=None,
+    git_sole_parent_checker=None,
+    git_tree_paths_loader=None,
+    git_diff_checker=None,
+    health_gate_validator=None,
+) -> screen.ValidatedRegistry:
+    payload = _bytes(document)
+    return screen.load_validated_registry(
+        payload,
+        relative_path=REGISTRY_PATH,
+        expected_raw_sha256=_sha(payload),
+        expected_canonical_sha256=screen.canonical_json_sha256(document),
+        loader=harness.loader,
+        git_blob_loader=harness.git_loader,
+        git_ancestor_checker=(
+            harness.ancestor if git_ancestor_checker is None else git_ancestor_checker
+        ),
+        git_sole_parent_checker=(
+            harness.sole_parent
+            if git_sole_parent_checker is None
+            else git_sole_parent_checker
+        ),
+        git_tree_paths_loader=(
+            harness.tree_paths
+            if git_tree_paths_loader is None
+            else git_tree_paths_loader
+        ),
+        git_pushed_checker=harness.pushed,
+        git_diff_checker=(
+            harness.allowed_diff if git_diff_checker is None else git_diff_checker
+        ),
+        health_gate_validator=(
+            harness.health_validator
+            if health_gate_validator is None
+            else health_gate_validator
+        ),
     )
 
 
@@ -1504,6 +1689,116 @@ def test_gradient_lr_or_scheduler_dependency_tamper_is_incomplete() -> None:
     assert decision["selected_arm_id"] is None
 
 
+def test_registry_requires_exact_health_gate_shape_and_world_size() -> None:
+    harness = build_harness()
+    assert harness.registry_document is not None
+
+    missing = copy.deepcopy(harness.registry_document)
+    del missing["prerequisite_health_gate"]
+    with pytest.raises(screen.ScreenValidationError, match="missing=.*health"):
+        _load_registry_document(harness, missing)
+
+    wrong_world_size = copy.deepcopy(harness.registry_document)
+    wrong_world_size["prerequisite_health_gate"]["evidence"]["gpu_count"] = 2
+    with pytest.raises(screen.ScreenValidationError, match="GPU count differs"):
+        _load_registry_document(harness, wrong_world_size)
+
+
+def test_registry_rejects_health_eligibility_or_order_tampering() -> None:
+    harness = build_harness()
+    assert harness.registry_document is not None
+
+    eligible_for_ranking = copy.deepcopy(harness.registry_document)
+    eligible_for_ranking["prerequisite_health_gate"]["evidence"]["eligibility"][
+        "ranking"
+    ] = True
+    with pytest.raises(screen.ScreenValidationError, match="eligibility"):
+        _load_registry_document(harness, eligible_for_ranking)
+
+    wrong_order = copy.deepcopy(harness.registry_document)
+    wrong_order["prerequisite_health_gate"]["evidence"]["receipt_members"].reverse()
+    with pytest.raises(screen.ScreenValidationError, match="receipt member"):
+        _load_registry_document(harness, wrong_order)
+
+
+def test_registry_revalidates_live_health_evidence() -> None:
+    harness = build_harness()
+    assert harness.registry_document is not None
+    assert harness.validated_health_evidence is not None
+    stale = copy.deepcopy(harness.validated_health_evidence)
+    stale["matched_panel_spec_sha256"] = "f" * 64
+
+    def stale_validator(*_args, **_kwargs):
+        return stale
+
+    with pytest.raises(screen.ScreenValidationError, match="live health-gate"):
+        _load_registry_document(
+            harness,
+            harness.registry_document,
+            health_gate_validator=stale_validator,
+        )
+
+
+def test_registry_revalidates_health_to_r0_git_transition() -> None:
+    harness = build_harness()
+    assert harness.registry_document is not None
+
+    with pytest.raises(screen.ScreenValidationError, match="sole immediate parent"):
+        _load_registry_document(
+            harness,
+            harness.registry_document,
+            git_sole_parent_checker=lambda _revision, _parent: False,
+        )
+
+    with pytest.raises(screen.ScreenValidationError, match="not an ancestor"):
+        _load_registry_document(
+            harness,
+            harness.registry_document,
+            git_ancestor_checker=lambda _ancestor, _descendant: False,
+        )
+
+    with pytest.raises(screen.ScreenValidationError, match="not limited"):
+        _load_registry_document(
+            harness,
+            harness.registry_document,
+            git_diff_checker=lambda _ancestor, _descendant, _paths: False,
+        )
+
+    selected_path = screen._expected_screen_config_paths(1)[0]
+    harness.git_blobs[(HEALTH_REVISION, selected_path)] = b"preexisting"
+    with pytest.raises(screen.ScreenValidationError, match="unexpectedly exists"):
+        _load_registry_document(harness, harness.registry_document)
+
+    harness = build_harness()
+    assert harness.registry_document is not None
+    selected_directory = screen.EXPECTED_SCREEN_CONFIG_DIRECTORY_TEMPLATE.format(
+        gpu_count=1
+    )
+    harness.git_blobs[
+        (REGISTRY_REVISION, f"{selected_directory}/unregistered.json")
+    ] = b"extra"
+    with pytest.raises(screen.ScreenValidationError, match="exact six-file set"):
+        _load_registry_document(harness, harness.registry_document)
+
+    harness = build_harness()
+    assert harness.registry_document is not None
+    opposite_path = screen._expected_screen_config_paths(2)[0]
+    harness.git_blobs[(REGISTRY_REVISION, opposite_path)] = b"wrong-family"
+    with pytest.raises(screen.ScreenValidationError, match="unexpectedly exists"):
+        _load_registry_document(harness, harness.registry_document)
+
+    harness = build_harness()
+    assert harness.registry_document is not None
+    opposite_directory = screen.EXPECTED_SCREEN_CONFIG_DIRECTORY_TEMPLATE.format(
+        gpu_count=2
+    )
+    harness.git_blobs[
+        (HEALTH_REVISION, f"{opposite_directory}/arbitrary-extra.txt")
+    ] = b"wrong-family"
+    with pytest.raises(screen.ScreenValidationError, match="unexpectedly exists"):
+        _load_registry_document(harness, harness.registry_document)
+
+
 def test_registry_semantic_and_git_root_tampering_is_rejected() -> None:
     two_gpu = build_harness(gpu_count=2)
     assert two_gpu.registry is not None
@@ -1523,8 +1818,11 @@ def test_registry_semantic_and_git_root_tampering_is_rejected() -> None:
             loader=harness.loader,
             git_blob_loader=harness.git_loader,
             git_ancestor_checker=harness.ancestor,
+            git_sole_parent_checker=harness.sole_parent,
+            git_tree_paths_loader=harness.tree_paths,
             git_pushed_checker=harness.pushed,
             git_diff_checker=harness.allowed_diff,
+            health_gate_validator=harness.health_validator,
         )
 
 
@@ -1567,8 +1865,11 @@ def test_registry_rejects_self_consistent_prior_floor_audit_tampering(
             loader=harness.loader,
             git_blob_loader=harness.git_loader,
             git_ancestor_checker=harness.ancestor,
+            git_sole_parent_checker=harness.sole_parent,
+            git_tree_paths_loader=harness.tree_paths,
             git_pushed_checker=harness.pushed,
             git_diff_checker=harness.allowed_diff,
+            health_gate_validator=harness.health_validator,
         )
 
 
@@ -1606,8 +1907,11 @@ def test_registry_rejects_self_consistent_empirical_floor_config_drift() -> None
             loader=harness.loader,
             git_blob_loader=harness.git_loader,
             git_ancestor_checker=harness.ancestor,
+            git_sole_parent_checker=harness.sole_parent,
+            git_tree_paths_loader=harness.tree_paths,
             git_pushed_checker=harness.pushed,
             git_diff_checker=harness.allowed_diff,
+            health_gate_validator=harness.health_validator,
         )
 
 
@@ -1646,8 +1950,11 @@ def test_registry_rejects_self_consistent_mislabeled_config_and_source_omission(
             loader=harness.loader,
             git_blob_loader=harness.git_loader,
             git_ancestor_checker=harness.ancestor,
+            git_sole_parent_checker=harness.sole_parent,
+            git_tree_paths_loader=harness.tree_paths,
             git_pushed_checker=harness.pushed,
             git_diff_checker=harness.allowed_diff,
+            health_gate_validator=harness.health_validator,
         )
 
     harness = build_harness()
@@ -1668,8 +1975,11 @@ def test_registry_rejects_self_consistent_mislabeled_config_and_source_omission(
             loader=harness.loader,
             git_blob_loader=harness.git_loader,
             git_ancestor_checker=harness.ancestor,
+            git_sole_parent_checker=harness.sole_parent,
+            git_tree_paths_loader=harness.tree_paths,
             git_pushed_checker=harness.pushed,
             git_diff_checker=harness.allowed_diff,
+            health_gate_validator=harness.health_validator,
         )
 
     bad = copy.deepcopy(harness.registry_document)
@@ -1684,8 +1994,11 @@ def test_registry_rejects_self_consistent_mislabeled_config_and_source_omission(
             loader=harness.loader,
             git_blob_loader=harness.git_loader,
             git_ancestor_checker=harness.ancestor,
+            git_sole_parent_checker=harness.sole_parent,
+            git_tree_paths_loader=harness.tree_paths,
             git_pushed_checker=harness.pushed,
             git_diff_checker=harness.allowed_diff,
+            health_gate_validator=harness.health_validator,
         )
 
 
@@ -1820,6 +2133,7 @@ def test_verifier_has_only_standard_library_imports_and_no_gpu_probe() -> None:
         "decimal",
         "fractions",
         "hashlib",
+        "importlib",
         "json",
         "math",
         "os",
@@ -1827,6 +2141,7 @@ def test_verifier_has_only_standard_library_imports_and_no_gpu_probe() -> None:
         "re",
         "stat",
         "subprocess",
+        "sys",
         "tempfile",
         "typing",
     }

@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import copy
 import hashlib
+import importlib
 import json
 import math
 import os
@@ -34,7 +35,7 @@ from typing import Any
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 PROJECT_ROOT = REPOSITORY_ROOT.parents[1]
-REGISTRY_SCHEMA_VERSION = 1
+REGISTRY_SCHEMA_VERSION = 2
 EVIDENCE_SCHEMA_VERSION = 1
 SELECTION_SCHEMA_VERSION = 1
 DENOISING_REPORT_SCHEMA_VERSION = 1
@@ -61,7 +62,7 @@ EXPECTED_INITIALIZATION_FIXTURE_CANONICAL_SHA256 = (
     "96ed170d2e3db2c68101dd07d603ff44db7f77a95c3b9578d6c378d1e1f85d1b"
 )
 EXPECTED_INITIALIZATION_FIXTURE_SIZE_BYTES = 643
-EXPECTED_REGISTRY_ID = "genmol_udlm_scheduler_conditioning_screen_v1"
+EXPECTED_REGISTRY_ID = "genmol_udlm_scheduler_conditioning_screen_v2"
 EXPECTED_REGISTRY_STATUS = "frozen_before_any_screen_training"
 EXPECTED_CLAIM_SCOPE = "engineering_selection_only_not_superiority_or_causal_evidence"
 EXPECTED_PANEL_PATH = "experiments/udlm/validation_panel/first_256.json"
@@ -102,6 +103,35 @@ EXPECTED_TRAINING_SEED = 17
 EXPECTED_CORRUPTION_SEED = 17
 FINAL_GENERATION_SEEDS = (0, 1, 2)
 EXPECTED_STAGE_ORDER = ("scheduler", "conditioning")
+EXPECTED_HEALTH_VARIANT_ORDER = (
+    "udlm",
+    "schedule_uniform",
+    "udlm_categorical",
+)
+EXPECTED_HEALTH_VARIANT_SLUGS = ("r", "s", "e")
+EXPECTED_HEALTH_ELIGIBILITY = {
+    "generation": False,
+    "ranking": False,
+    "superiority": False,
+    "candidate_lock": False,
+    "screen_authorization": True,
+}
+EXPECTED_HEALTH_CLAIM_SCOPE = "training_health_and_provenance_only"
+EXPECTED_HEALTH_STATUS = "validated"
+EXPECTED_HEALTH_SCHEMA_VERSION = 1
+EXPECTED_HEALTH_RECEIPT_SCHEMA_VERSION = 5
+EXPECTED_HEALTH_CHECKPOINT_STEP = 10
+EXPECTED_SCREEN_CONFIG_DIRECTORY_TEMPLATE = (
+    "experiments/udlm/protocols/optimization_screen_configs_gpu{gpu_count}"
+)
+EXPECTED_SCREEN_CONFIG_FILENAMES = (
+    "scheduler_e_l0.json",
+    "scheduler_e_l1.json",
+    "conditioning_e_a0__e_l0.json",
+    "conditioning_e_a0__e_l1.json",
+    "conditioning_e_a1__e_l0.json",
+    "conditioning_e_a1__e_l1.json",
+)
 EXPECTED_ARM_ORDER = {
     "scheduler": ("E-L0", "E-L1"),
     "conditioning": ("E-A0", "E-A1"),
@@ -149,8 +179,11 @@ class BlobSnapshot:
 BlobLoader = Callable[[str, PurePosixPath], bytes | BlobSnapshot]
 GitBlobLoader = Callable[[str, PurePosixPath], bytes]
 GitAncestorChecker = Callable[[str, str], bool]
+GitSoleParentChecker = Callable[[str, str], bool]
+GitTreePathsLoader = Callable[[str, PurePosixPath], frozenset[str]]
 GitPushedChecker = Callable[[str], bool]
 GitDiffChecker = Callable[[str, str, frozenset[str]], bool]
+HealthGateValidator = Callable[..., Mapping[str, Any]]
 
 
 class ScreenValidationError(ValueError):
@@ -172,6 +205,8 @@ class ValidatedRegistry:
     canonical_sha256: str
     git_blob_loader: GitBlobLoader
     git_ancestor_checker: GitAncestorChecker
+    git_sole_parent_checker: GitSoleParentChecker
+    git_tree_paths_loader: GitTreePathsLoader
     git_pushed_checker: GitPushedChecker
     git_diff_checker: GitDiffChecker
 
@@ -428,6 +463,50 @@ def _config_ref(value: object, label: str) -> dict[str, Any]:
         "canonical_sha256": _sha256(
             ref.get("canonical_sha256"), f"{label}.canonical_sha256"
         ),
+    }
+
+
+def _expected_screen_config_paths(gpu_count: int) -> tuple[str, ...]:
+    """Return the exact selected-world-size R0 config family."""
+
+    if gpu_count not in {1, 2}:  # pragma: no cover - caller validates first
+        raise ScreenValidationError("screen GPU count must equal 1 or 2")
+    directory = EXPECTED_SCREEN_CONFIG_DIRECTORY_TEMPLATE.format(gpu_count=gpu_count)
+    return tuple(
+        sorted(
+            f"{directory}/{filename}" for filename in EXPECTED_SCREEN_CONFIG_FILENAMES
+        )
+    )
+
+
+def _health_run_name(
+    *, gpu_count: int, variant_slug: str, health_source_revision: str
+) -> str:
+    return f"health-w{gpu_count}-{variant_slug}-{health_source_revision}"
+
+
+def _health_terminal_receipt_ref(value: object) -> dict[str, Any]:
+    label = "health-gate terminal receipt"
+    ref = _mapping(value, label)
+    _exact_keys(
+        ref,
+        _JSON_REF_KEYS | {"training_variant", "position"},
+        label,
+    )
+    json_ref = _json_ref(
+        {key: ref[key] for key in _JSON_REF_KEYS},
+        label,
+        required_root="repository",
+    )
+    if (
+        ref.get("training_variant") != EXPECTED_HEALTH_VARIANT_ORDER[-1]
+        or _integer(ref.get("position"), f"{label}.position") != 2
+    ):
+        raise ScreenValidationError("health-gate terminal receipt must identify E")
+    return {
+        **json_ref,
+        "training_variant": EXPECTED_HEALTH_VARIANT_ORDER[-1],
+        "position": 2,
     }
 
 
@@ -1240,6 +1319,305 @@ def _validate_registry_stage(
     }
 
 
+def _validate_prerequisite_health_gate(
+    value: object,
+    *,
+    loader: BlobLoader,
+    registry_source_revision: str,
+    gpu_count: int,
+    stages: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Validate the frozen health evidence and its declared H-to-R0 boundary."""
+
+    gate = _mapping(value, "registry prerequisite health gate")
+    _exact_keys(
+        gate,
+        {"evidence", "source_transition"},
+        "registry prerequisite health gate",
+    )
+    evidence = _mapping(gate.get("evidence"), "registry health-gate evidence")
+    _exact_keys(
+        evidence,
+        {
+            "schema_version",
+            "status",
+            "claim_scope",
+            "health_source_revision",
+            "gpu_count",
+            "matched_panel_spec_sha256",
+            "terminal_receipt",
+            "receipt_members",
+            "checkpoint_members",
+            "eligibility",
+        },
+        "registry health-gate evidence",
+    )
+    if (
+        _integer(evidence.get("schema_version"), "health-gate evidence schema")
+        != EXPECTED_HEALTH_SCHEMA_VERSION
+        or evidence.get("status") != EXPECTED_HEALTH_STATUS
+        or evidence.get("claim_scope") != EXPECTED_HEALTH_CLAIM_SCOPE
+    ):
+        raise ScreenValidationError("registry health-gate identity is invalid")
+    health_source_revision = _git_revision(
+        evidence.get("health_source_revision"), "health-gate source revision"
+    )
+    health_gpu_count = _integer(evidence.get("gpu_count"), "health-gate GPU count")
+    if health_gpu_count != gpu_count:
+        raise ScreenValidationError(
+            "health-gate GPU count differs from screen common training"
+        )
+    matched_panel_sha256 = _sha256(
+        evidence.get("matched_panel_spec_sha256"),
+        "health-gate matched-panel digest",
+    )
+
+    terminal_receipt = _health_terminal_receipt_ref(evidence.get("terminal_receipt"))
+    _load_json_ref(
+        terminal_receipt,
+        loader=loader,
+        label="health-gate terminal receipt",
+    )
+
+    raw_receipts = evidence.get("receipt_members")
+    if not isinstance(raw_receipts, list) or len(raw_receipts) != 3:
+        raise ScreenValidationError(
+            "health-gate receipt membership must contain exactly R, S, E"
+        )
+    receipt_members: list[dict[str, Any]] = []
+    for position, (raw_member, variant, variant_slug) in enumerate(
+        zip(
+            raw_receipts,
+            EXPECTED_HEALTH_VARIANT_ORDER,
+            EXPECTED_HEALTH_VARIANT_SLUGS,
+            strict=True,
+        )
+    ):
+        label = f"health-gate receipt member {position}"
+        member = _mapping(raw_member, label)
+        _exact_keys(
+            member,
+            {
+                "position",
+                "training_variant",
+                "run_name",
+                "relative_path",
+                "sha256",
+                "schema_version",
+                "recorded_at_utc",
+            },
+            label,
+        )
+        run_name = _health_run_name(
+            gpu_count=gpu_count,
+            variant_slug=variant_slug,
+            health_source_revision=health_source_revision,
+        )
+        expected_path = f"output/udlm/{run_name}/pilot_exit_status.json"
+        recorded_at_utc = member.get("recorded_at_utc")
+        if not isinstance(recorded_at_utc, str) or not recorded_at_utc.strip():
+            raise ScreenValidationError(f"{label}.recorded_at_utc must be nonempty")
+        if (
+            _integer(member.get("position"), f"{label}.position") != position
+            or member.get("training_variant") != variant
+            or member.get("run_name") != run_name
+            or _relative_path(
+                member.get("relative_path"),
+                f"{label}.relative_path",
+                suffix=".json",
+            ).as_posix()
+            != expected_path
+            or _integer(member.get("schema_version"), f"{label}.schema_version")
+            != EXPECTED_HEALTH_RECEIPT_SCHEMA_VERSION
+        ):
+            raise ScreenValidationError(
+                f"{label} is not the deterministic {variant} receipt"
+            )
+        receipt_members.append(
+            {
+                "position": position,
+                "training_variant": variant,
+                "run_name": run_name,
+                "relative_path": expected_path,
+                "sha256": _sha256(member.get("sha256"), f"{label}.sha256"),
+                "schema_version": EXPECTED_HEALTH_RECEIPT_SCHEMA_VERSION,
+                "recorded_at_utc": recorded_at_utc,
+            }
+        )
+
+    raw_checkpoints = evidence.get("checkpoint_members")
+    if not isinstance(raw_checkpoints, list) or len(raw_checkpoints) != 3:
+        raise ScreenValidationError(
+            "health-gate checkpoint membership must contain exactly R, S, E"
+        )
+    checkpoint_members: list[dict[str, Any]] = []
+    for position, (raw_member, variant, variant_slug) in enumerate(
+        zip(
+            raw_checkpoints,
+            EXPECTED_HEALTH_VARIANT_ORDER,
+            EXPECTED_HEALTH_VARIANT_SLUGS,
+            strict=True,
+        )
+    ):
+        label = f"health-gate checkpoint member {position}"
+        member = _mapping(raw_member, label)
+        _exact_keys(
+            member,
+            {
+                "position",
+                "training_variant",
+                "run_name",
+                "relative_path",
+                "sha256",
+                "size_bytes",
+                "global_step",
+            },
+            label,
+        )
+        run_name = _health_run_name(
+            gpu_count=gpu_count,
+            variant_slug=variant_slug,
+            health_source_revision=health_source_revision,
+        )
+        expected_path = (
+            f"output/udlm/{run_name}/checkpoints/"
+            f"{EXPECTED_HEALTH_CHECKPOINT_STEP}.ckpt"
+        )
+        if (
+            _integer(member.get("position"), f"{label}.position") != position
+            or member.get("training_variant") != variant
+            or member.get("run_name") != run_name
+            or _relative_path(
+                member.get("relative_path"),
+                f"{label}.relative_path",
+                suffix=".ckpt",
+            ).as_posix()
+            != expected_path
+            or _integer(member.get("global_step"), f"{label}.global_step")
+            != EXPECTED_HEALTH_CHECKPOINT_STEP
+        ):
+            raise ScreenValidationError(
+                f"{label} is not the deterministic step-10 {variant} checkpoint"
+            )
+        checkpoint_members.append(
+            {
+                "position": position,
+                "training_variant": variant,
+                "run_name": run_name,
+                "relative_path": expected_path,
+                "sha256": _sha256(member.get("sha256"), f"{label}.sha256"),
+                "size_bytes": _integer(
+                    member.get("size_bytes"), f"{label}.size_bytes", minimum=1
+                ),
+                "global_step": EXPECTED_HEALTH_CHECKPOINT_STEP,
+            }
+        )
+
+    if (
+        terminal_receipt["relative_path"] != receipt_members[-1]["relative_path"]
+        or terminal_receipt["sha256"] != receipt_members[-1]["sha256"]
+        or terminal_receipt["schema_version"] != receipt_members[-1]["schema_version"]
+    ):
+        raise ScreenValidationError(
+            "health-gate terminal receipt differs from the E receipt member"
+        )
+    eligibility = _mapping(
+        evidence.get("eligibility"), "registry health-gate eligibility"
+    )
+    _exact_keys(
+        eligibility,
+        set(EXPECTED_HEALTH_ELIGIBILITY),
+        "registry health-gate eligibility",
+    )
+    for key, expected in EXPECTED_HEALTH_ELIGIBILITY.items():
+        if (
+            _boolean(eligibility.get(key), f"health-gate eligibility {key}")
+            is not expected
+        ):
+            raise ScreenValidationError("registry health-gate eligibility is invalid")
+
+    transition = _mapping(
+        gate.get("source_transition"), "registry health source transition"
+    )
+    _exact_keys(
+        transition,
+        {
+            "health_source_revision",
+            "registry_source_revision",
+            "allowed_config_paths",
+            "health_source_is_registry_source_parent",
+            "exact_config_only_transition_verified",
+            "opposite_gpu_config_family_absent",
+        },
+        "registry health source transition",
+    )
+    expected_config_paths = _expected_screen_config_paths(gpu_count)
+    allowed_config_paths = transition.get("allowed_config_paths")
+    if not isinstance(allowed_config_paths, list) or allowed_config_paths != list(
+        expected_config_paths
+    ):
+        raise ScreenValidationError(
+            "health source transition must name the exact selected-W six configs"
+        )
+    registered_config_paths = [
+        config["config"]["relative_path"]
+        for stage in stages
+        for arm in stage["arms"]
+        for config in arm["resolved_configs"]
+    ]
+    if len(registered_config_paths) != len(expected_config_paths) or set(
+        registered_config_paths
+    ) != set(expected_config_paths):
+        raise ScreenValidationError(
+            "registered configs are not the exact selected-W six-file family"
+        )
+    if (
+        _git_revision(
+            transition.get("health_source_revision"),
+            "health transition source revision",
+        )
+        != health_source_revision
+        or _git_revision(
+            transition.get("registry_source_revision"),
+            "health transition registry revision",
+        )
+        != registry_source_revision
+        or any(
+            _boolean(transition.get(field), f"health transition {field}") is not True
+            for field in (
+                "health_source_is_registry_source_parent",
+                "exact_config_only_transition_verified",
+                "opposite_gpu_config_family_absent",
+            )
+        )
+    ):
+        raise ScreenValidationError("registry health source transition is invalid")
+
+    normalized_evidence = {
+        "schema_version": EXPECTED_HEALTH_SCHEMA_VERSION,
+        "status": EXPECTED_HEALTH_STATUS,
+        "claim_scope": EXPECTED_HEALTH_CLAIM_SCOPE,
+        "health_source_revision": health_source_revision,
+        "gpu_count": gpu_count,
+        "matched_panel_spec_sha256": matched_panel_sha256,
+        "terminal_receipt": terminal_receipt,
+        "receipt_members": receipt_members,
+        "checkpoint_members": checkpoint_members,
+        "eligibility": dict(EXPECTED_HEALTH_ELIGIBILITY),
+    }
+    return {
+        "evidence": normalized_evidence,
+        "source_transition": {
+            "health_source_revision": health_source_revision,
+            "registry_source_revision": registry_source_revision,
+            "allowed_config_paths": list(expected_config_paths),
+            "health_source_is_registry_source_parent": True,
+            "exact_config_only_transition_verified": True,
+            "opposite_gpu_config_family_absent": True,
+        },
+    }
+
+
 def validate_registry(
     registry: Mapping[str, Any],
     *,
@@ -1257,6 +1635,7 @@ def validate_registry(
             "claim_scope",
             "firewall",
             "source",
+            "prerequisite_health_gate",
             "common_training",
             "panel",
             "stages",
@@ -1307,9 +1686,12 @@ def validate_registry(
         EXPECTED_PRIOR_FLOOR_AUDIT_PATH,
         "scripts/udlm/collect_optimization_screen_evidence.py",
         "scripts/udlm/evaluate_denoising_panel.py",
+        "scripts/udlm/launch_health_panel.py",
         "scripts/udlm/launch_optimization_screen.py",
         "scripts/udlm/launch_train_pilot.py",
+        "scripts/udlm/validate_health_panel.py",
         "scripts/udlm/verify_optimization_screen.py",
+        "scripts/udlm/write_pilot_evidence.py",
         "scripts/udlm/write_pilot_exit_status.py",
         "src/genmol/model.py",
         "src/genmol/backbone.py",
@@ -1566,9 +1948,17 @@ def validate_registry(
             "registry output directories must be globally unique"
         )
     _validate_matched_config_pairs(normalized_stages)
+    prerequisite_health_gate = _validate_prerequisite_health_gate(
+        registry.get("prerequisite_health_gate"),
+        loader=loader,
+        registry_source_revision=source_revision,
+        gpu_count=gpu_count,
+        stages=normalized_stages,
+    )
     return {
         **dict(registry),
         "source": {**dict(source), "blobs": normalized_source_blobs},
+        "prerequisite_health_gate": prerequisite_health_gate,
         "common_training": {
             **dict(common),
             "initialization": {**dict(initialization), "checkpoint": checkpoint_ref},
@@ -1629,6 +2019,161 @@ def _validate_matched_config_pairs(stages: Sequence[Mapping[str, Any]]) -> None:
             )
 
 
+def _default_health_gate_validator(
+    terminal_receipt_path: Path,
+    *,
+    expected_gpu_count: int,
+    expected_source_revision: str,
+) -> Mapping[str, Any]:
+    """Import the producer validator only when a registry is actually loaded."""
+
+    import sys
+
+    if str(REPOSITORY_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPOSITORY_ROOT))
+    health_module = importlib.import_module("scripts.udlm.validate_health_panel")
+    return health_module.validate_health_panel(
+        terminal_receipt_path,
+        expected_gpu_count=expected_gpu_count,
+        expected_source_revision=expected_source_revision,
+    )
+
+
+def _load_git_tree_paths(
+    *,
+    revision: str,
+    directory: PurePosixPath,
+    git_tree_paths_loader: GitTreePathsLoader,
+    label: str,
+) -> frozenset[str]:
+    """Load and type-check the complete committed blob set below a directory."""
+
+    try:
+        paths = git_tree_paths_loader(revision, directory)
+    except ScreenValidationError:
+        raise
+    except Exception as error:
+        raise ScreenValidationError(f"cannot enumerate {label}") from error
+    if not isinstance(paths, frozenset) or any(
+        not isinstance(path, str) or not path for path in paths
+    ):
+        raise ScreenValidationError(f"{label} Git tree loader returned invalid paths")
+    prefix = directory.as_posix() + "/"
+    if any(not path.startswith(prefix) for path in paths):
+        raise ScreenValidationError(f"{label} Git tree loader escaped its directory")
+    return paths
+
+
+def _revalidate_health_gate_boundary(
+    registry: Mapping[str, Any],
+    *,
+    git_ancestor_checker: GitAncestorChecker,
+    git_sole_parent_checker: GitSoleParentChecker,
+    git_tree_paths_loader: GitTreePathsLoader,
+    git_diff_checker: GitDiffChecker,
+    health_gate_validator: HealthGateValidator,
+) -> None:
+    """Replay the H-to-R0 Git boundary and the live health validator."""
+
+    gate = registry["prerequisite_health_gate"]
+    evidence = gate["evidence"]
+    transition = gate["source_transition"]
+    health_revision = evidence["health_source_revision"]
+    registry_revision = registry["source"]["revision"]
+    allowed_paths = frozenset(transition["allowed_config_paths"])
+    if health_revision == registry_revision:
+        raise ScreenValidationError(
+            "health source and registry source must be distinct revisions"
+        )
+    try:
+        health_is_sole_parent = git_sole_parent_checker(
+            registry_revision, health_revision
+        )
+    except Exception as error:
+        raise ScreenValidationError("health-to-R0 sole-parent check failed") from error
+    if not health_is_sole_parent:
+        raise ScreenValidationError(
+            "health source is not the sole immediate parent of R0"
+        )
+    try:
+        health_is_ancestor = git_ancestor_checker(health_revision, registry_revision)
+    except Exception as error:
+        raise ScreenValidationError("health-to-R0 ancestry check failed") from error
+    if not health_is_ancestor:
+        raise ScreenValidationError("health source is not an ancestor of R0")
+    try:
+        config_only_transition = git_diff_checker(
+            health_revision, registry_revision, allowed_paths
+        )
+    except Exception as error:
+        raise ScreenValidationError("health-to-R0 diff check failed") from error
+    if not config_only_transition:
+        raise ScreenValidationError(
+            "health-to-R0 diff is not limited to the selected-W six configs"
+        )
+    selected_directory = PurePosixPath(
+        EXPECTED_SCREEN_CONFIG_DIRECTORY_TEMPLATE.format(
+            gpu_count=evidence["gpu_count"]
+        )
+    )
+    selected_at_health = _load_git_tree_paths(
+        revision=health_revision,
+        directory=selected_directory,
+        git_tree_paths_loader=git_tree_paths_loader,
+        label="selected-W config family at health source",
+    )
+    selected_at_r0 = _load_git_tree_paths(
+        revision=registry_revision,
+        directory=selected_directory,
+        git_tree_paths_loader=git_tree_paths_loader,
+        label="selected-W config family at R0",
+    )
+    if selected_at_health:
+        raise ScreenValidationError(
+            "selected-W config family unexpectedly exists at health source"
+        )
+    if selected_at_r0 != allowed_paths:
+        raise ScreenValidationError(
+            "selected-W config family at R0 is not the exact six-file set"
+        )
+    other_gpu_count = 2 if evidence["gpu_count"] == 1 else 1
+    other_directory = PurePosixPath(
+        EXPECTED_SCREEN_CONFIG_DIRECTORY_TEMPLATE.format(gpu_count=other_gpu_count)
+    )
+    for revision, revision_label in (
+        (health_revision, "health source"),
+        (registry_revision, "R0"),
+    ):
+        if _load_git_tree_paths(
+            revision=revision,
+            directory=other_directory,
+            git_tree_paths_loader=git_tree_paths_loader,
+            label=f"opposite-W config family at {revision_label}",
+        ):
+            raise ScreenValidationError(
+                f"opposite-W config family unexpectedly exists at {revision_label}"
+            )
+
+    terminal_ref = evidence["terminal_receipt"]
+    terminal_path = _root_path(
+        terminal_ref["root"], PurePosixPath(terminal_ref["relative_path"])
+    )
+    try:
+        live_evidence = health_gate_validator(
+            terminal_path,
+            expected_gpu_count=evidence["gpu_count"],
+            expected_source_revision=health_revision,
+        )
+    except Exception as error:
+        raise ScreenValidationError("live health-gate validation failed") from error
+    if not isinstance(live_evidence, Mapping) or not _exact_json_equal(
+        dict(live_evidence), evidence
+    ):
+        raise ScreenValidationError(
+            "live health-gate evidence differs from the frozen registry"
+        )
+
+
 def load_validated_registry(
     payload: bytes,
     *,
@@ -1638,8 +2183,11 @@ def load_validated_registry(
     loader: BlobLoader,
     git_blob_loader: GitBlobLoader,
     git_ancestor_checker: GitAncestorChecker,
+    git_sole_parent_checker: GitSoleParentChecker,
+    git_tree_paths_loader: GitTreePathsLoader,
     git_pushed_checker: GitPushedChecker,
     git_diff_checker: GitDiffChecker,
+    health_gate_validator: HealthGateValidator | None = None,
 ) -> ValidatedRegistry:
     raw_sha = hashlib.sha256(payload).hexdigest()
     if raw_sha != _sha256(expected_raw_sha256, "expected registry raw digest"):
@@ -1660,6 +2208,18 @@ def load_validated_registry(
     )
     if not git_pushed_checker(normalized["source"]["revision"]):
         raise ScreenValidationError("registry implementation revision is not pushed")
+    _revalidate_health_gate_boundary(
+        normalized,
+        git_ancestor_checker=git_ancestor_checker,
+        git_sole_parent_checker=git_sole_parent_checker,
+        git_tree_paths_loader=git_tree_paths_loader,
+        git_diff_checker=git_diff_checker,
+        health_gate_validator=(
+            _default_health_gate_validator
+            if health_gate_validator is None
+            else health_gate_validator
+        ),
+    )
     return ValidatedRegistry(
         data=normalized,
         relative_path=_relative_path(relative_path, "registry path", suffix=".json"),
@@ -1668,6 +2228,8 @@ def load_validated_registry(
         canonical_sha256=canonical_sha,
         git_blob_loader=git_blob_loader,
         git_ancestor_checker=git_ancestor_checker,
+        git_sole_parent_checker=git_sole_parent_checker,
+        git_tree_paths_loader=git_tree_paths_loader,
         git_pushed_checker=git_pushed_checker,
         git_diff_checker=git_diff_checker,
     )
@@ -3728,6 +4290,61 @@ def git_ancestor_checker(ancestor: str, descendant: str) -> bool:
     return result.returncode == 0
 
 
+def git_sole_parent_checker(revision: str, expected_parent: str) -> bool:
+    """Return whether ``revision`` has exactly ``expected_parent`` as its parent."""
+
+    fields = (
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(REPOSITORY_ROOT),
+                "rev-list",
+                "--parents",
+                "-n",
+                "1",
+                revision,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        .stdout.strip()
+        .split()
+    )
+    return len(fields) == 2 and fields[0] == revision and fields[1] == expected_parent
+
+
+def git_tree_paths_loader(revision: str, directory: PurePosixPath) -> frozenset[str]:
+    """Return every committed blob path recursively below ``directory``."""
+
+    payload = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(REPOSITORY_ROOT),
+            "ls-tree",
+            "-r",
+            "--name-only",
+            "-z",
+            revision,
+            "--",
+            directory.as_posix(),
+        ],
+        check=True,
+        capture_output=True,
+    ).stdout
+    if not payload:
+        return frozenset()
+    if not payload.endswith(b"\0"):
+        raise ScreenValidationError("Git tree path listing is truncated")
+    raw_paths = payload[:-1].split(b"\0")
+    paths = tuple(os.fsdecode(path) for path in raw_paths)
+    if any(not path for path in paths) or len(paths) != len(set(paths)):
+        raise ScreenValidationError("Git tree path listing is malformed")
+    return frozenset(paths)
+
+
 def git_pushed_checker(revision: str) -> bool:
     upstream = subprocess.run(
         ["git", "-C", str(REPOSITORY_ROOT), "rev-parse", "@{upstream}"],
@@ -3836,6 +4453,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         loader=local_blob_loader,
         git_blob_loader=git_blob_loader,
         git_ancestor_checker=git_ancestor_checker,
+        git_sole_parent_checker=git_sole_parent_checker,
+        git_tree_paths_loader=git_tree_paths_loader,
         git_pushed_checker=git_pushed_checker,
         git_diff_checker=git_diff_checker,
     )

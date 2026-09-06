@@ -428,6 +428,8 @@ def _load_validated_registry(
             loader=screen.local_blob_loader,
             git_blob_loader=screen.git_blob_loader,
             git_ancestor_checker=screen.git_ancestor_checker,
+            git_sole_parent_checker=screen.git_sole_parent_checker,
+            git_tree_paths_loader=screen.git_tree_paths_loader,
             git_pushed_checker=screen.git_pushed_checker,
             git_diff_checker=screen.git_diff_checker,
         )
