@@ -27,6 +27,9 @@ optim:
 trainer:
   _target_: lightning.Trainer
   accelerator: cuda
+  # The reviewed pilot launcher overrides this to true. Release/manual
+  # training keeps Lightning's normal, lower-overhead backward path.
+  detect_anomaly: False
   num_nodes: 1
   devices: ${device_count:}
   accumulate_grad_batches: ${div_up:${loader.global_batch_size}, ${eval:${trainer.devices} * ${loader.batch_size} * ${trainer.num_nodes}}}
@@ -66,6 +69,9 @@ training:
   antithetic_sampling: True
   sampling_eps: 1e-3
   global_mean_loss: True
+  # This guard is activated only by the reviewed pilot launcher. Keeping the
+  # default false preserves released/manual training behavior.
+  pilot_fail_on_nonfinite_loss: False
   # Within each process-local microbatch, sum token losses and divide by its
   # token count. DDP and gradient accumulation then average those local ratios;
   # they do not form one exact token ratio across ranks/accumulation windows.

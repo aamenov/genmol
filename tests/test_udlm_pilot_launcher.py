@@ -246,8 +246,10 @@ def test_training_command_records_bounded_pilot_controls(monkeypatch, tmp_path):
     assert "--config-name udlm" in joined
     assert "trainer.devices=2" in joined
     assert "trainer.max_steps=10" in joined
+    assert "trainer.detect_anomaly=true" in joined
     assert "loader.global_batch_size=16" in joined
     assert "loader.batch_size=2" in joined
+    assert "training.pilot_fail_on_nonfinite_loss=true" in joined
     assert "training.init_from_mdlm_checkpoint=/project/50000.ckpt" in joined
     assert f"training.init_from_mdlm_checkpoint_sha256={'a' * 64}" in joined
     assert "training.udlm.exclude_special_tokens=true" in joined
@@ -324,6 +326,8 @@ def test_resolved_hydra_config_is_bound_before_launch(monkeypatch, tmp_path):
     assert config["seed"] == 7
     assert config["trainer"]["devices"] == 2
     assert config["trainer"]["accumulate_grad_batches"] == 4
+    assert config["trainer"]["detect_anomaly"] is True
+    assert config["training"]["pilot_fail_on_nonfinite_loss"] is True
     assert config["training"]["udlm"]["prior_variant"] == "schedule_uniform"
     assert "hydra" not in config
 
@@ -343,12 +347,18 @@ def test_child_command_sanitizes_python_and_binds_source_argv_config(
         "seed=7",
     ]
     runtime_path = launcher.REPOSITORY_ROOT / "output/udlm/test/runtime_config.json"
+    summary_path = launcher.REPOSITORY_ROOT / "output/udlm/test/training_summary.json"
+    checkpoint_path = launcher.REPOSITORY_ROOT / "output/udlm/test/checkpoints/10.ckpt"
 
     child_command, environment = launcher.build_child_environment_command(
         command=command,
         source_revision="a" * 40,
         resolved_config_sha256="b" * 64,
         runtime_config_path=runtime_path,
+        training_summary_path=summary_path,
+        final_checkpoint_path=checkpoint_path,
+        expected_max_steps=10,
+        expected_world_size=2,
         visible_uuids="GPU-one,GPU-two",
         seed=7,
     )
@@ -360,6 +370,13 @@ def test_child_command_sanitizes_python_and_binds_source_argv_config(
         launcher.canonical_json_sha256(command[2:])
     )
     assert environment["PYTHONHASHSEED"] == "7"
+    assert environment["GENMOL_TRAIN_SUMMARY_PATH"] == str(summary_path)
+    assert environment["GENMOL_TRAIN_EXPECTED_SUMMARY_SCHEMA_VERSION"] == "1"
+    assert environment["GENMOL_TRAIN_EXPECTED_FINAL_CHECKPOINT_PATH"] == str(
+        checkpoint_path
+    )
+    assert environment["GENMOL_TRAIN_EXPECTED_MAX_STEPS"] == "10"
+    assert environment["GENMOL_TRAIN_EXPECTED_WORLD_SIZE"] == "2"
     assert environment["PYTHONPATH"] == launcher.os.pathsep.join(
         [
             str(launcher.REPOSITORY_ROOT / "src"),
@@ -370,6 +387,51 @@ def test_child_command_sanitizes_python_and_binds_source_argv_config(
         assert ["-u", hostile_key] in [
             child_command[index : index + 2] for index in range(len(child_command) - 1)
         ]
+
+
+def test_tmux_command_captures_both_pipeline_statuses_for_receipt(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(launcher, "REPOSITORY_ROOT", tmp_path)
+    monkeypatch.setattr(launcher, "_python_executable", lambda: Path("/venv/python"))
+    log_path = tmp_path / "output/logs/pilot.log"
+    summary_path = tmp_path / "output/udlm/pilot/training_summary.json"
+    receipt_path = tmp_path / "output/udlm/pilot/pilot_exit_status.json"
+    shell_command = launcher.build_tmux_shell_command(
+        ["bash", "-c", "exit 0"],
+        log_path=log_path,
+        training_summary_path=summary_path,
+        exit_receipt_path=receipt_path,
+        expected_source_revision="a" * 40,
+        expected_config_sha256="b" * 64,
+        expected_argv_sha256="c" * 64,
+        expected_summary_schema_version=1,
+        expected_max_steps=10,
+        expected_world_size=2,
+        expected_final_checkpoint_path=(
+            tmp_path / "output/udlm/pilot/checkpoints/10.ckpt"
+        ),
+    )
+
+    assert 'pipeline_status=("${PIPESTATUS[@]}")' in shell_command
+    assert 'training_status="${pipeline_status[0]}"' in shell_command
+    assert 'tee_status="${pipeline_status[1]}"' in shell_command
+    assert "write_pilot_exit_status.py" in shell_command
+    assert str(receipt_path) in shell_command
+
+
+def test_exit_receipt_path_must_be_new_and_inside_repository(monkeypatch, tmp_path):
+    monkeypatch.setattr(launcher, "REPOSITORY_ROOT", tmp_path)
+    valid = tmp_path / "output/udlm/pilot/pilot_exit_status.json"
+    assert launcher.validate_pilot_exit_receipt_path(valid) == valid
+    with pytest.raises(ValueError, match="in-repository"):
+        launcher.validate_pilot_exit_receipt_path(
+            tmp_path.parent / "outside/pilot_exit_status.json"
+        )
+    valid.parent.mkdir(parents=True)
+    valid.write_text("existing", encoding="utf-8")
+    with pytest.raises(FileExistsError, match="refusing to replace"):
+        launcher.validate_pilot_exit_receipt_path(valid)
 
 
 @pytest.mark.parametrize(
@@ -508,9 +570,57 @@ def test_main_keeps_final_uuid_probe_adjacent_to_tmux_spawn(monkeypatch, tmp_pat
             return subprocess.CompletedProcess(command, 1)
         if command[:2] == ["tmux", "new-session"]:
             events.append("tmux_spawn")
-            assert (
+            assert command[-2] == "-lc"
+            assert "write_pilot_exit_status.py" in command[-1]
+            assert command[-1].count("--training-exit-status") == 1
+            assert "--expected-initialization-checkpoint-sha256" not in command[-1]
+            manifest_path = (
                 repository_root / "output/udlm/ordering/launch_manifest.json"
-            ).is_file()
+            )
+            assert manifest_path.is_file()
+            manifest = launcher.json.loads(manifest_path.read_text(encoding="utf-8"))
+            summary_path = (
+                repository_root / "output/udlm/ordering/training_summary.json"
+            )
+            checkpoint_path = (
+                repository_root / "output/udlm/ordering/checkpoints/1.ckpt"
+            )
+            assert manifest["training_summary_path"] == str(summary_path)
+            assert manifest["training_summary_schema_version"] == 1
+            receipt_path = (
+                repository_root / "output/udlm/ordering/pilot_exit_status.json"
+            )
+            assert manifest["pilot_exit_status_path"] == str(receipt_path)
+            assert manifest["pilot_exit_status_schema_version"] == 1
+            assert manifest["expected_final_checkpoint_path"] == str(checkpoint_path)
+            assert manifest["completion_contract"] == {
+                "status_at_launch": "pending",
+                "complete_only_if_valid_training_summary_exists": True,
+                "complete_only_if_successful_exit_receipt_exists": True,
+                "valid_training_summary_and_successful_exit_receipt_both_required": (
+                    True
+                ),
+                "missing_summary_after_tmux_exit_means": "incomplete",
+                "absent_exit_receipt_means": "incomplete",
+                "successful_exit_receipt_requires": {
+                    "training_exit_status": 0,
+                    "tee_exit_status": 0,
+                    "valid_launch_bound_training_summary": True,
+                    "clean_pushed_source_at_receipt": True,
+                },
+            }
+            assert manifest["child_environment"]["GENMOL_TRAIN_SUMMARY_PATH"] == str(
+                summary_path
+            )
+            assert manifest["child_environment"][
+                "GENMOL_TRAIN_EXPECTED_FINAL_CHECKPOINT_PATH"
+            ] == str(checkpoint_path)
+            assert (
+                manifest["child_environment"][
+                    "GENMOL_TRAIN_EXPECTED_SUMMARY_SCHEMA_VERSION"
+                ]
+                == "1"
+            )
             return subprocess.CompletedProcess(command, 0)
         raise AssertionError(f"unexpected subprocess: {command}")
 

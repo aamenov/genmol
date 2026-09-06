@@ -29,6 +29,8 @@ PROJECT_ROOT = REPOSITORY_ROOT.parents[1]
 RUN_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}\Z")
 MAX_SAFE_UTILIZATION_PERCENT = 10
 MIN_SAFE_FREE_MEMORY_MIB = 30_000
+TRAINING_SUMMARY_SCHEMA_VERSION = 1
+PILOT_EXIT_STATUS_SCHEMA_VERSION = 1
 TRAINING_VARIANTS = {
     "udlm": {
         "config_name": "udlm",
@@ -542,6 +544,23 @@ def canonical_json_sha256(value: object) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def validate_pilot_exit_receipt_path(path: Path) -> Path:
+    """Require one new JSON receipt path inside this source worktree."""
+
+    repository_root = REPOSITORY_ROOT.resolve(strict=True)
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    resolved = absolute.parent.resolve(strict=False) / absolute.name
+    if (
+        resolved == repository_root
+        or repository_root not in resolved.parents
+        or resolved.suffix != ".json"
+    ):
+        raise ValueError("pilot exit receipt must be an in-repository .json file")
+    if os.path.lexists(resolved):
+        raise FileExistsError(f"refusing to replace pilot exit receipt: {resolved}")
+    return resolved
+
+
 def training_argv_sha256(command: list[str]) -> str:
     """Fingerprint exactly the argv observed by scripts/train.py."""
 
@@ -598,6 +617,10 @@ def build_child_environment_command(
     source_revision: str,
     resolved_config_sha256: str,
     runtime_config_path: Path,
+    training_summary_path: Path,
+    final_checkpoint_path: Path,
+    expected_max_steps: int,
+    expected_world_size: int,
     visible_uuids: str,
     seed: int,
 ) -> tuple[list[str], dict[str, str]]:
@@ -613,12 +636,30 @@ def build_child_environment_command(
         not value.startswith("GPU-") for value in visible_uuids.split(",")
     ):
         raise ValueError("visible_uuids must contain NVIDIA GPU UUIDs")
-    runtime_config_path = runtime_config_path.resolve()
+    artifact_paths = {
+        "runtime config record": (runtime_config_path.resolve(), ".json"),
+        "training summary": (training_summary_path.resolve(), ".json"),
+        "final checkpoint": (final_checkpoint_path.resolve(), ".ckpt"),
+    }
+    for label, (path, suffix) in artifact_paths.items():
+        if (
+            path == REPOSITORY_ROOT
+            or REPOSITORY_ROOT not in path.parents
+            or path.suffix != suffix
+        ):
+            raise ValueError(f"{label} must be an in-repository {suffix} file")
+    runtime_config_path = artifact_paths["runtime config record"][0]
+    training_summary_path = artifact_paths["training summary"][0]
+    final_checkpoint_path = artifact_paths["final checkpoint"][0]
+    if len({runtime_config_path, training_summary_path, final_checkpoint_path}) != 3:
+        raise ValueError("pilot completion artifact paths must be distinct")
     if (
-        runtime_config_path == REPOSITORY_ROOT
-        or REPOSITORY_ROOT not in runtime_config_path.parents
+        type(expected_max_steps) is not int
+        or expected_max_steps <= 0
+        or type(expected_world_size) is not int
+        or expected_world_size not in (1, 2)
     ):
-        raise ValueError("runtime config record must remain inside the repository")
+        raise ValueError("pilot expected steps/world size are invalid")
     controlled_python = {
         **CONTROLLED_PYTHON_ENVIRONMENT,
         "PYTHONPATH": os.pathsep.join(
@@ -631,6 +672,13 @@ def build_child_environment_command(
         "GENMOL_TRAIN_EXPECTED_CONFIG_SHA256": resolved_config_sha256,
         "GENMOL_TRAIN_EXPECTED_ARGV_SHA256": training_argv_sha256(command),
         "GENMOL_TRAIN_RUNTIME_CONFIG_PATH": str(runtime_config_path),
+        "GENMOL_TRAIN_SUMMARY_PATH": str(training_summary_path),
+        "GENMOL_TRAIN_EXPECTED_SUMMARY_SCHEMA_VERSION": str(
+            TRAINING_SUMMARY_SCHEMA_VERSION
+        ),
+        "GENMOL_TRAIN_EXPECTED_FINAL_CHECKPOINT_PATH": str(final_checkpoint_path),
+        "GENMOL_TRAIN_EXPECTED_MAX_STEPS": str(expected_max_steps),
+        "GENMOL_TRAIN_EXPECTED_WORLD_SIZE": str(expected_world_size),
     }
     assigned_environment = {
         "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
@@ -686,12 +734,14 @@ def build_training_command(
         f"seed={seed}",
         f"trainer.devices={gpu_count}",
         f"trainer.max_steps={max_steps}",
+        "trainer.detect_anomaly=true",
         f"loader.global_batch_size={global_batch_size}",
         f"loader.batch_size={micro_batch_size}",
         f"loader.num_workers={num_workers}",
         f"callback.every_n_train_steps={max_steps}",
         f"callback.dirpath={run_dir / 'checkpoints'}",
         f"hydra.run.dir={run_dir / 'hydra'}",
+        "training.pilot_fail_on_nonfinite_loss=true",
         f"training.udlm.exclude_special_tokens={str(exclude_special_tokens).lower()}",
         *variant["fixed_overrides"],
     ]
@@ -703,6 +753,124 @@ def build_training_command(
             )
         command.append("training.init_from_mdlm_ema=true")
     return command
+
+
+def build_tmux_shell_command(
+    environment_command: list[str],
+    *,
+    log_path: Path,
+    training_summary_path: Path,
+    exit_receipt_path: Path,
+    expected_source_revision: str,
+    expected_config_sha256: str,
+    expected_argv_sha256: str,
+    expected_summary_schema_version: int,
+    expected_max_steps: int,
+    expected_world_size: int,
+    expected_final_checkpoint_path: Path,
+    expected_initialization_checkpoint_sha256: str | None = None,
+) -> str:
+    """Capture both pipeline statuses and publish the detached-run exit receipt."""
+
+    receipt_path = validate_pilot_exit_receipt_path(exit_receipt_path)
+    if not re.fullmatch(r"[0-9a-f]{40}", expected_source_revision):
+        raise ValueError("expected source revision must be a full commit hash")
+    for label, digest in (
+        ("expected config digest", expected_config_sha256),
+        ("expected argv digest", expected_argv_sha256),
+    ):
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError(f"{label} must be 64 lowercase hexadecimal digits")
+    if expected_initialization_checkpoint_sha256 is not None and not re.fullmatch(
+        r"[0-9a-f]{64}", expected_initialization_checkpoint_sha256
+    ):
+        raise ValueError(
+            "expected initialization checkpoint digest must be 64 lowercase "
+            "hexadecimal digits"
+        )
+    if expected_summary_schema_version != TRAINING_SUMMARY_SCHEMA_VERSION:
+        raise ValueError("unexpected training summary schema version")
+    if (
+        type(expected_max_steps) is not int
+        or expected_max_steps <= 0
+        or type(expected_world_size) is not int
+        or expected_world_size not in (1, 2)
+    ):
+        raise ValueError("pilot expected steps/world size are invalid")
+
+    receipt_python_environment = {
+        **CONTROLLED_PYTHON_ENVIRONMENT,
+        "PYTHONPATH": os.pathsep.join(
+            [str(REPOSITORY_ROOT / "src"), str(REPOSITORY_ROOT)]
+        ),
+        "PYTHONHASHSEED": "0",
+    }
+    receipt_command_parts = ["env"]
+    receipt_python_keys = sorted(
+        KNOWN_PYTHON_ENVIRONMENT_KEYS
+        | {key for key in os.environ if key.startswith("PYTHON")}
+        | set(receipt_python_environment)
+    )
+    for key in receipt_python_keys:
+        receipt_command_parts.extend(["-u", key])
+    receipt_command_parts.extend(
+        f"{key}={value}" for key, value in receipt_python_environment.items()
+    )
+    receipt_command_parts.extend(
+        [
+            str(_python_executable()),
+            "-u",
+            str(REPOSITORY_ROOT / "scripts" / "udlm" / "write_pilot_exit_status.py"),
+            "--training-exit-status",
+            "GENMOL_PIPELINE_TRAINING_STATUS",
+            "--tee-exit-status",
+            "GENMOL_PIPELINE_TEE_STATUS",
+            "--training-summary-path",
+            str(training_summary_path),
+            "--receipt-path",
+            str(receipt_path),
+            "--expected-summary-schema-version",
+            str(expected_summary_schema_version),
+            "--expected-source-revision",
+            expected_source_revision,
+            "--expected-config-sha256",
+            expected_config_sha256,
+            "--expected-argv-sha256",
+            expected_argv_sha256,
+            "--expected-max-steps",
+            str(expected_max_steps),
+            "--expected-world-size",
+            str(expected_world_size),
+            "--expected-final-checkpoint-path",
+            str(expected_final_checkpoint_path),
+        ]
+    )
+    if expected_initialization_checkpoint_sha256 is not None:
+        receipt_command_parts.extend(
+            [
+                "--expected-initialization-checkpoint-sha256",
+                expected_initialization_checkpoint_sha256,
+            ]
+        )
+    shell_status_arguments = {
+        "GENMOL_PIPELINE_TRAINING_STATUS": '"$training_status"',
+        "GENMOL_PIPELINE_TEE_STATUS": '"$tee_status"',
+    }
+    receipt_command = " ".join(
+        shell_status_arguments.get(part, shlex.quote(part))
+        for part in receipt_command_parts
+    )
+    return (
+        "set +e; set -o pipefail; "
+        + shlex.join(environment_command)
+        + " 2>&1 | tee -a "
+        + shlex.quote(str(log_path))
+        + '; pipeline_status=("${PIPESTATUS[@]}"); '
+        + 'training_status="${pipeline_status[0]}"; '
+        + 'tee_status="${pipeline_status[1]}"; '
+        + receipt_command
+        + '; receipt_writer_status=$?; exit "$receipt_writer_status"'
+    )
 
 
 def _parse_args(argv: list[str] | None = None):
@@ -838,11 +1006,20 @@ def main():
     )
     visible_uuids = ",".join(state.uuid for state in initially_selected)
     runtime_config_path = run_dir / "runtime_config.json"
+    training_summary_path = run_dir / "training_summary.json"
+    exit_receipt_path = validate_pilot_exit_receipt_path(
+        run_dir / "pilot_exit_status.json"
+    )
+    final_checkpoint_path = run_dir / "checkpoints" / f"{args.max_steps}.ckpt"
     environment_command, child_environment = build_child_environment_command(
         command=command,
         source_revision=git_sha,
         resolved_config_sha256=resolved_config_sha256,
         runtime_config_path=runtime_config_path,
+        training_summary_path=training_summary_path,
+        final_checkpoint_path=final_checkpoint_path,
+        expected_max_steps=args.max_steps,
+        expected_world_size=gpu_count,
         visible_uuids=visible_uuids,
         seed=args.seed,
     )
@@ -878,6 +1055,25 @@ def main():
         "resolved_training_config": resolved_config,
         "resolved_training_config_sha256": resolved_config_sha256,
         "runtime_config_path": str(runtime_config_path),
+        "training_summary_path": str(training_summary_path),
+        "training_summary_schema_version": TRAINING_SUMMARY_SCHEMA_VERSION,
+        "pilot_exit_status_path": str(exit_receipt_path),
+        "pilot_exit_status_schema_version": PILOT_EXIT_STATUS_SCHEMA_VERSION,
+        "expected_final_checkpoint_path": str(final_checkpoint_path),
+        "completion_contract": {
+            "status_at_launch": "pending",
+            "complete_only_if_valid_training_summary_exists": True,
+            "complete_only_if_successful_exit_receipt_exists": True,
+            "valid_training_summary_and_successful_exit_receipt_both_required": True,
+            "missing_summary_after_tmux_exit_means": "incomplete",
+            "absent_exit_receipt_means": "incomplete",
+            "successful_exit_receipt_requires": {
+                "training_exit_status": 0,
+                "tee_exit_status": 0,
+                "valid_launch_bound_training_summary": True,
+                "clean_pushed_source_at_receipt": True,
+            },
+        },
         "child_environment": child_environment,
         "log_path": str(log_path),
         "checkpoint": None if checkpoint is None else str(checkpoint),
@@ -921,11 +1117,19 @@ def main():
         print(manifest_json)
         return
 
-    shell_command = (
-        "set -o pipefail; "
-        + shlex.join(environment_command)
-        + " 2>&1 | tee -a "
-        + shlex.quote(str(log_path))
+    shell_command = build_tmux_shell_command(
+        environment_command,
+        log_path=log_path,
+        training_summary_path=training_summary_path,
+        exit_receipt_path=exit_receipt_path,
+        expected_source_revision=git_sha,
+        expected_config_sha256=resolved_config_sha256,
+        expected_argv_sha256=argv_sha256,
+        expected_summary_schema_version=TRAINING_SUMMARY_SCHEMA_VERSION,
+        expected_max_steps=args.max_steps,
+        expected_world_size=gpu_count,
+        expected_final_checkpoint_path=final_checkpoint_path,
+        expected_initialization_checkpoint_sha256=checkpoint_sha256,
     )
     subprocess.run(
         [
