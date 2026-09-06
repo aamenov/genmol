@@ -1,0 +1,310 @@
+{
+  "claim_scope": "This held-out unigram/concentration analysis performs no model training or molecular generation. It cannot rank generators, estimate chemical quality, or establish that UDLM beats GenMol.",
+  "configured_process_contract": {
+    "active_token_count": 1880,
+    "configured_probability_sum": 1.0,
+    "exact_process_backend": "genmol.diffusion.ContinuousCategoricalDiffusion",
+    "prior_metadata": {
+      "active_token_ids_sha256": "2fd62050919fdf6ee578df881733e47834f662406c219a1f247116e04396a5ae",
+      "active_vocab_size": 1880,
+      "antithetic_sampling": true,
+      "comparison_role": "empirical_prior_treatment",
+      "excluded_token_ids": [],
+      "frequency_active_token_count": 517090,
+      "frequency_artifact_path": "experiments/udlm/token_frequency/train_first_10000.json",
+      "frequency_artifact_schema_version": 1,
+      "frequency_artifact_sha256": "088c78e75611f3cc42c4011e1da6f65a377e673b9cba07a28b126b0fc62f06ed",
+      "frequency_content_token_count": 517090,
+      "frequency_dataset_repo_id": "datamol-io/safe-gpt",
+      "frequency_dataset_revision": "b83175cd7394e7a4027478a35b2f9d1dda3ac62f",
+      "frequency_dataset_selection": "first 10000 streaming rows",
+      "frequency_dataset_split": "train",
+      "frequency_example_count": 10000,
+      "frequency_implementation_git_sha": "56a96b2cd02f9be648a641c51c3d2d8b1ff3033b",
+      "frequency_ordered_text_sha256": "53aee8e5592fc96159788e86519abbbcc9f1ab7c6348a1cb59a939bd57051d8f",
+      "full_vocab_size": 1880,
+      "noise_eps": 0.001,
+      "objective_scope": "model_dependent_ct_integrand_without_parameter_independent_endpoint_kl",
+      "prior_source": "pinned_frequency_artifact_uniform_mixture",
+      "process_family": "rank_one_continuous_categorical",
+      "sampling_eps": 0.001,
+      "schedule_variant": "schedule_consistent_residual_forward_and_loss",
+      "schema_version": 1,
+      "stationary_probs_sha256": "51aa38acaf5cf4d5642c30dbdf14246e9540d4711917265cd1961e0df1902c97",
+      "tokenizer_json_sha256": "0db5f4dbdc7e8ff759e98483759611a426e187ee7f3f0a91edc8800abe7bf140",
+      "tokenizer_repo_id": "datamol-io/safe-gpt",
+      "tokenizer_revision": "3d5fa0988383e898d5ac5db7cd52bf715bc37061",
+      "uniform_mixture_weight": 0.01,
+      "variant": "empirical_frequency"
+    },
+    "prior_metadata_sha256": "21cc62825086fa381e7918c6feb81ee6b4f8bcabd0857e26b3d32fc701540bbe",
+    "resolved_relevant_config": {
+      "model": {
+        "vocab_size": 1880
+      },
+      "training": {
+        "antithetic_sampling": true,
+        "diffusion": "udlm",
+        "sampling_eps": 0.001,
+        "udlm": {
+          "empirical_uniform_mix": 0.01,
+          "exclude_special_tokens": false,
+          "noise_eps": 0.001,
+          "prior_variant": "empirical_frequency"
+        }
+      }
+    },
+    "resolved_relevant_config_sha256": "c030d4948365b1be7bc3b8e67a12c733dd3dfc6e32b1305ff92b567976a3708e"
+  },
+  "created_at_utc": "2026-09-06T01:26:45.413087+00:00",
+  "definitions": {
+    "effective_vocabulary": "exp(-sum_j pi_j log pi_j)",
+    "stationary_prior": "For active alphabet A, pi_j(w)=(1-w)*c_j/sum_{k in A}(c_k)+w/|A| for j in A, normalized in binary64; excluded IDs are outside the stationary support and 0<w<1",
+    "training_unseen_token_mass": "sum of pi_j over active IDs with c_j=0 in the pinned 10,000-example training prefix",
+    "validation_nll": "negative mean log pi_j(w) over non-special token IDs in the ordered frozen validation panel"
+  },
+  "geometry": {
+    "configured_0_01": {
+      "maximum_token_probability": 0.18293198568667624,
+      "minimum_token_probability": 5.319148936170213e-06,
+      "stationary_effective_vocabulary": 17.47562729522436,
+      "stationary_entropy_nats": 2.860807184198026,
+      "top_10_token_mass": 0.790211384453836,
+      "training_unseen_token_mass": 0.009021276595744681,
+      "uniform_mixture_weight": 0.01,
+      "validation_content_token_nll_nats": 2.759559111037053,
+      "validation_content_token_perplexity": 15.792878507273613
+    },
+    "configured_process_agreement": {
+      "maximum_absolute_formula_difference": 2.7755575615628914e-17,
+      "probability_count": 1880,
+      "probability_sum": 1.0,
+      "status": "live_process_matches_audited_formula",
+      "uniform_mixture_weight": 0.01
+    },
+    "grid_minimum_validation_nll": {
+      "maximum_token_probability": 0.1847559863946068,
+      "minimum_token_probability": 5.319148936170213e-08,
+      "qualification": "Descriptive minimum on a fixed unigram grid; not a generator selection rule. Exploratory reuse of this panel requires a fresh confirmatory panel before a prior claim. This panel has no tokens unseen in the pinned training prefix, so it cannot evaluate the proposed unseen-token-support benefit.",
+      "stationary_effective_vocabulary": 15.826725212740346,
+      "stationary_entropy_nats": 2.761699980270834,
+      "top_10_token_mass": 0.7980603068090126,
+      "training_unseen_token_mass": 9.021276595744681e-05,
+      "uniform_mixture_weight": 0.0001,
+      "validation_content_token_nll_nats": 2.7502090487521036,
+      "validation_content_token_perplexity": 15.645902298689302
+    },
+    "mixture_grid": [
+      {
+        "maximum_token_probability": 0.1847559863946068,
+        "minimum_token_probability": 5.319148936170213e-08,
+        "stationary_effective_vocabulary": 15.826725212740346,
+        "stationary_entropy_nats": 2.761699980270834,
+        "top_10_token_mass": 0.7980603068090126,
+        "training_unseen_token_mass": 9.021276595744681e-05,
+        "uniform_mixture_weight": 0.0001,
+        "validation_content_token_nll_nats": 2.7502090487521036,
+        "validation_content_token_perplexity": 15.645902298689302
+      },
+      {
+        "maximum_token_probability": 0.1845901681484313,
+        "minimum_token_probability": 5.319148936170213e-07,
+        "stationary_effective_vocabulary": 15.99753547960064,
+        "stationary_entropy_nats": 2.7724346778505935,
+        "top_10_token_mass": 0.7973467684130875,
+        "training_unseen_token_mass": 0.0009021276595744681,
+        "uniform_mixture_weight": 0.001,
+        "validation_content_token_nll_nats": 2.751048181099169,
+        "validation_content_token_perplexity": 15.6590367914253
+      },
+      {
+        "maximum_token_probability": 0.18422168315693016,
+        "minimum_token_probability": 1.5957446808510639e-06,
+        "stationary_effective_vocabulary": 16.342277991384847,
+        "stationary_entropy_nats": 2.79375549167237,
+        "top_10_token_mass": 0.7957611275332538,
+        "training_unseen_token_mass": 0.002706382978723404,
+        "uniform_mixture_weight": 0.003,
+        "validation_content_token_nll_nats": 2.752922615734179,
+        "validation_content_token_perplexity": 15.688416158587682
+      },
+      {
+        "maximum_token_probability": 0.18293198568667624,
+        "minimum_token_probability": 5.319148936170213e-06,
+        "stationary_effective_vocabulary": 17.47562729522436,
+        "stationary_entropy_nats": 2.860807184198026,
+        "top_10_token_mass": 0.790211384453836,
+        "training_unseen_token_mass": 0.009021276595744681,
+        "uniform_mixture_weight": 0.01,
+        "validation_content_token_nll_nats": 2.759559111037053,
+        "validation_content_token_perplexity": 15.792878507273613
+      },
+      {
+        "maximum_token_probability": 0.17924713577166493,
+        "minimum_token_probability": 1.5957446808510637e-05,
+        "stationary_effective_vocabulary": 20.717472885210903,
+        "stationary_entropy_nats": 3.030977444953473,
+        "top_10_token_mass": 0.7743549756554993,
+        "training_unseen_token_mass": 0.02706382978723404,
+        "uniform_mixture_weight": 0.03,
+        "validation_content_token_nll_nats": 2.7789531730657706,
+        "validation_content_token_perplexity": 16.10215595165209
+      },
+      {
+        "maximum_token_probability": 0.17556228585665362,
+        "minimum_token_probability": 2.6595744680851067e-05,
+        "stationary_effective_vocabulary": 24.215627383924954,
+        "stationary_entropy_nats": 3.186998184415906,
+        "top_10_token_mass": 0.7584985668571625,
+        "training_unseen_token_mass": 0.04510638297872341,
+        "uniform_mixture_weight": 0.05,
+        "validation_content_token_nll_nats": 2.798859064498527,
+        "validation_content_token_perplexity": 16.42589518899372
+      },
+      {
+        "maximum_token_probability": 0.16635016106912537,
+        "minimum_token_probability": 5.3191489361702134e-05,
+        "stationary_effective_vocabulary": 34.66479125104234,
+        "stationary_entropy_nats": 3.54572451048226,
+        "top_10_token_mass": 0.7188575448613209,
+        "training_unseen_token_mass": 0.09021276595744682,
+        "uniform_mixture_weight": 0.1,
+        "validation_content_token_nll_nats": 2.850712337116934,
+        "validation_content_token_perplexity": 17.300100956402943
+      },
+      {
+        "maximum_token_probability": 0.1479259114940689,
+        "minimum_token_probability": 0.00010638297872340427,
+        "stationary_effective_vocabulary": 65.93165040156347,
+        "stationary_entropy_nats": 4.1886186054459555,
+        "top_10_token_mass": 0.6395755008696375,
+        "training_unseen_token_mass": 0.18042553191489363,
+        "uniform_mixture_weight": 0.2,
+        "validation_content_token_nll_nats": 2.9639911552145075,
+        "validation_content_token_perplexity": 19.37514686257411
+      },
+      {
+        "maximum_token_probability": 0.09265316276889944,
+        "minimum_token_probability": 0.00026595744680851064,
+        "stationary_effective_vocabulary": 329.3744294597253,
+        "stationary_entropy_nats": 5.797195187103539,
+        "top_10_token_mass": 0.40172936889458727,
+        "training_unseen_token_mass": 0.451063829787234,
+        "uniform_mixture_weight": 0.5,
+        "validation_content_token_nll_nats": 3.415327231806949,
+        "validation_content_token_perplexity": 30.42690444959935
+      },
+      {
+        "maximum_token_probability": 0.04659253883125823,
+        "minimum_token_probability": 0.00039893617021276594,
+        "stationary_effective_vocabulary": 952.6834844182457,
+        "stationary_entropy_nats": 6.85928272300904,
+        "top_10_token_mass": 0.20352425891537873,
+        "training_unseen_token_mass": 0.676595744680851,
+        "uniform_mixture_weight": 0.75,
+        "validation_content_token_nll_nats": 4.0715385315431964,
+        "validation_content_token_perplexity": 58.64712366595711
+      }
+    ],
+    "proposed_followup_grid": {
+      "rationale": "Span a 50-fold unseen-token-mass range around the configured 0.01 treatment while holding the process family and noise schedule fixed and varying only the stationary prior pi.",
+      "required_matched_control": "Interpret empirical-prior rows against schedule_uniform only after matching initialization, seed, data order, budget, checkpoint, sampling protocol, and uncertainty analysis. This audit alone cannot select a weight or establish a causal effect.",
+      "status": "hypothesis_to_test_after_the_matched_R_S_E_health_gate",
+      "uniform_mixture_weights": [
+        0.001,
+        0.01,
+        0.05
+      ]
+    },
+    "training": {
+      "active_content_tokens": 517090,
+      "active_observed_token_types": 184,
+      "active_unobserved_token_types": 1696,
+      "active_vocabulary_size": 1880,
+      "examples": 10000,
+      "excluded_token_ids": [],
+      "full_content_tokens": 517090,
+      "full_vocabulary_size": 1880
+    },
+    "uniform_baseline": {
+      "maximum_token_probability": 0.0005319148936170213,
+      "minimum_token_probability": 0.0005319148936170213,
+      "stationary_effective_vocabulary": 1880.0,
+      "stationary_entropy_nats": 7.539027055823995,
+      "top_10_token_mass": 0.005319148936170213,
+      "training_unseen_token_mass": 0.902127659574468,
+      "validation_content_token_nll_nats": 7.539027055823995,
+      "validation_content_token_perplexity": 1880.0
+    },
+    "validation": {
+      "content_tokens": 13627,
+      "examples": 256,
+      "observed_token_types": 64,
+      "tokens_unseen_in_training_prefix": 0
+    }
+  },
+  "git": {
+    "commit": "6b312750bcc8861d8ff423f959e44764d121c3b1",
+    "dirty": false,
+    "upstream": "6b312750bcc8861d8ff423f959e44764d121c3b1"
+  },
+  "inputs": {
+    "frequency_artifact": {
+      "path": "experiments/udlm/token_frequency/train_first_10000.json",
+      "sha256": "088c78e75611f3cc42c4011e1da6f65a377e673b9cba07a28b126b0fc62f06ed"
+    },
+    "source_files": {
+      "configs/base.yaml": {
+        "git_blob_verified": true,
+        "sha256": "482cdbc8278cdf6891fd8efa879b2c5b51126abccff5fc5ba9dbec4904cae5be",
+        "size_bytes": 4279
+      },
+      "configs/udlm.yaml": {
+        "git_blob_verified": true,
+        "sha256": "2dfeca56388fe2adaafbd3467b6604f6bcbd865d7757d3d8da5fa9d3eca7728b",
+        "size_bytes": 416
+      },
+      "configs/udlm_categorical.yaml": {
+        "git_blob_verified": true,
+        "sha256": "4a56aba22429d71b3e4ceaa5330391a7f3b624e8daff2b54204ecfc6b104c7dd",
+        "size_bytes": 627
+      },
+      "experiments/udlm/token_frequency/train_first_10000.json": {
+        "git_blob_verified": true,
+        "sha256": "088c78e75611f3cc42c4011e1da6f65a377e673b9cba07a28b126b0fc62f06ed",
+        "size_bytes": 21043
+      },
+      "experiments/udlm/validation_panel/first_256.json": {
+        "git_blob_verified": true,
+        "sha256": "e2493da4f3cb3217b48c78dc2901dc7524d7d90dc3959cffa87a1b6f8a9a7658",
+        "size_bytes": 216103
+      },
+      "scripts/udlm/audit_prior_geometry.py": {
+        "git_blob_verified": true,
+        "sha256": "be6929f2fbcb089dd8b4400bd9905469124a92f14d54a343578bd9259838e381",
+        "size_bytes": 32519
+      },
+      "src/genmol/diffusion.py": {
+        "git_blob_verified": true,
+        "sha256": "cad5e2093ebe62754def96f8652892ce16cb5e82ad5f2f0f9ddc2deaafa92d84",
+        "size_bytes": 39479
+      },
+      "src/genmol/model.py": {
+        "git_blob_verified": true,
+        "sha256": "d3b785ef04a956f4d6e9c2c9a54cde8b888eb3e0c538c8826e1d80d8198c0e0d",
+        "size_bytes": 41084
+      },
+      "src/genmol/utils/utils_data.py": {
+        "git_blob_verified": true,
+        "sha256": "68ff3b776899d12371131800f773fd6e8e4943a012b592c9605497143afdafd5",
+        "size_bytes": 4657
+      }
+    },
+    "validation_panel": {
+      "path": "experiments/udlm/validation_panel/first_256.json",
+      "sha256": "e2493da4f3cb3217b48c78dc2901dc7524d7d90dc3959cffa87a1b6f8a9a7658"
+    }
+  },
+  "purpose": "CPU-only empirical-UDLM stationary-prior geometry audit",
+  "schema_version": 1
+}

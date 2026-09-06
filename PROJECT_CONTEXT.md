@@ -1,6 +1,6 @@
 # GenMol v2 project context
 
-Snapshot: 2026-09-06 04:15 Asia/Dubai. Recheck dynamic state, especially Git
+Snapshot: 2026-09-06 05:29 Asia/Dubai. Recheck dynamic state, especially Git
 status, logs, tmux sessions, and GPU occupancy, before acting.
 
 ## Active objective and safe workspace
@@ -12,12 +12,18 @@ status, logs, tmux sessions, and GPU occupancy, before acting.
   `/home/aidar.alimbayev/Documents/genmolv2/run_sources/udlm_genmol_worktree`
   on branch `codex/udlm-genmol`, not in the dirty main checkout. Preserve all
   unrelated and uncommitted work.
-- The pushed source revision used by the current CPU evidence is
-  `a9bb67c445da8cb3d4f7b6017c05f9b77896bf9b`; at evidence collection, `HEAD`
-  and `origin/codex/udlm-genmol` were equal and the source worktree was clean.
-  The resulting panel was subsequently committed and pushed as
+- The clean pushed implementation revision that produced the prior-geometry
+  evidence is
+  `6b312750bcc8861d8ff423f959e44764d121c3b1`; before the prior-geometry
+  artifact and this documentation update were added, `HEAD` and
+  `origin/codex/udlm-genmol` were equal and the source worktree was clean. This
+  revision contains the hardened pilot-completion contract and the
+  prior-geometry audit implementation.
+- The matched categorical CPU panel was produced from pushed source revision
+  `a9bb67c445da8cb3d4f7b6017c05f9b77896bf9b` and subsequently committed as
   `4cdfd90a6b3f633eac6bf8364bf405b279469063` without changing those source
-  bytes.
+  bytes. Preserve the distinction between an evidence-producing source commit
+  and the later commit that adds its immutable result.
 - Use `/home/aidar.alimbayev/Documents/genmolv2/.venv` and set
   `PYTHONPATH=<worktree>/src:<worktree>` for tests and commands. Bare `pytest`
   can otherwise resolve the main checkout through the environment.
@@ -89,19 +95,35 @@ path, size, and SHA-256.
 
 The training-pilot launcher resolves and hashes the complete Hydra task config
 before exposing GPUs. It binds source revision, base argv, resolved-config
-digest, seed/hash seed, and runtime-config record into the child environment;
-the training entry point verifies them before model imports and again at the
-start of training. DDP workers accept only Lightning's exact rank suffix. This
-contract applies to reviewed pilot launches without changing ordinary release
-training behavior.
+digest, seed/hash seed, expected world size and steps, runtime-config record,
+final checkpoint, training summary, and exit receipt into the child
+environment. The entry point verifies those bindings before model imports and
+again at training start; DDP workers accept only Lightning's exact rank suffix.
 
-At source revision `a9bb67c`, the exact-worktree full test suite passed `412`
-tests with `10` warnings. Focused pilot/DDP checks passed `25` tests, the
-expanded benchmark pipeline passed `202`, and `git diff --check` was clean.
-Independent review found no P0/P1 blocker. Remaining boundaries are the trusted
-virtual-environment `.pth` files, a local upstream ref that is compared but not
-implicitly fetched, and the unavoidable small interval between the final GPU
-probe and process creation.
+Pilot success is now fail-closed rather than inferred from a log tail. Every
+microbatch loss must be finite, and every optimizer step must observe pre-clip
+floating-point gradients that are finite and not all zero. After fitting, rank
+zero deserializes the exact final checkpoint, verifies its global step, checks
+all raw-model, EMA, optimizer, and nested floating tensors for finiteness,
+requires exact serialized-versus-live raw and EMA tensor equality, and validates
+the UDLM prior identity. Only then may it atomically publish the no-clobber
+`training_summary.json`, bound to the runtime record, source, configuration,
+argv, checkpoint hash, world size, and warm-start provenance. A separate
+post-pipeline helper atomically publishes `pilot_exit_status.json`; it records
+the training and `tee` statuses separately and revalidates runtime, checkpoint,
+summary, and source bindings. Missing, malformed, mismatched, or nonzero-status
+evidence makes the launcher fail. These pilot-only guards leave ordinary
+release/manual training defaults unchanged.
+
+At source revision `6b312750bcc8861d8ff423f959e44764d121c3b1`, the
+exact-worktree full test suite passed `487` tests with `10` dependency warnings,
+and `git diff --check` was clean. Independent compatibility review found no
+P0/P1 blocker in the
+Lightning 2.5.1 callback and checkpoint ordering. Remaining boundaries are the
+trusted virtual-environment `.pth` files, a local upstream ref that is compared
+but not implicitly fetched, the host I/O cost of the post-fit checkpoint audit,
+and the unavoidable small interval between the final GPU probe and process
+creation.
 
 ## Matched categorical CPU smoke panel
 
@@ -133,19 +155,55 @@ not rank priors, estimate molecular quality, or support a UDLM-over-GenMol
 superiority claim. Preserve that limitation in the notebook, reports, and any
 discussion of the apparent `2/32`, `4/32`, and `5/32` ordering.
 
+## Empirical-prior geometry audit
+
+The CPU-only stationary-prior audit is
+`experiments/udlm/prior_geometry/validation_grid.json`, 14,582 bytes, SHA-256
+`b818e145cdde1a29532c64a351f1aff2eecf36b174828038c14902d9b515d560`.
+It was generated from clean, pushed source revision
+`6b312750bcc8861d8ff423f959e44764d121c3b1` and binds the exact resolved
+`udlm_categorical` process, source blobs, 10,000-example frequency artifact,
+and frozen 256-example validation panel. The configured process uses all 1,880
+token IDs, uniform mixture weight `0.01`, and stationary-probability digest
+`51aa38acaf5cf4d5642c30dbdf14246e9540d4711917265cd1961e0df1902c97`.
+Its live process probabilities agree with the audited count-mixture formula to
+maximum absolute difference `2.7755575615628914e-17`.
+
+The training prefix contains 517,090 content tokens, 184 observed active token
+types, and 1,696 unseen active types. At the configured weight `0.01`, the
+validation unigram NLL is `2.759559111037053`, perplexity is
+`15.792878507273613`, stationary entropy is `2.860807184198026`, effective
+vocabulary is `17.47562729522436`, and training-unseen stationary mass is
+`0.009021276595744681`. The fixed validation panel contains 13,627 content
+tokens and zero tokens unseen in the training prefix. It therefore cannot test
+the proposed unseen-token-support benefit.
+
+The descriptive grid minimum occurs at weight `0.0001`, with validation NLL
+`2.7502090487521036`, but that value was found on the same exploratory panel
+and supplies about 100 times less training-unseen mass than the configured
+`0.01` value. It is not a selection result. A fresh confirmatory panel is
+required before any prior choice, and the proposed weights
+`[0.001, 0.01, 0.05]` remain a hypothesis to test only after the matched
+`release_uniform`/`schedule_uniform`/`empirical_frequency` health gate. This
+audit performs no training or generation and supports no quality, ranking, or
+UDLM-over-GenMol superiority claim.
+
 ## GPU status and required next pilot
 
-No UDLM GPU job has been launched yet, and no stale GPU snapshot should be
-treated as authorization or availability evidence.
+No UDLM GPU job has been launched, and no GPU inventory or utilization probe
+has yet been run for the pending pilot. No stale snapshot should be treated as
+authorization or availability evidence.
 
-Before the first GPU launch, ask the user to select only the GPU count: one or
-two. Do not ask for or hard-code physical device IDs. Immediately before the
-job, inventory every NVIDIA device and its processes, dynamically choose that
-many genuinely idle devices, and re-probe the exact selected UUIDs at the last
-possible point. A selected device must have zero foreign compute processes,
-utilization below the launcher's approved threshold (currently 10%), and at
-least 30,000 MiB free. Map the UUIDs through `CUDA_VISIBLE_DEVICES`; logical
-`cuda:0` is then safe. Never interrupt or reuse another user's process.
+Before the first GPU launch, the user must select only the GPU count: one or
+two. Recommend **one GPU** for the first matched 10-step engineering gate; the
+count can be reconsidered after memory and throughput are measured. Do not ask
+for or hard-code physical device IDs. Immediately before the job, inventory
+every NVIDIA device and its processes, dynamically choose that many genuinely
+idle devices, and re-probe the exact selected UUIDs at the last possible point.
+A selected device must have zero foreign compute processes, utilization below
+the launcher's approved threshold (currently 10%), and at least 30,000 MiB
+free. Map the UUIDs through `CUDA_VISIBLE_DEVICES`; logical `cuda:0` is then
+safe. Never interrupt or reuse another user's process.
 
 The first GPU action should remain an engineering pilot: full-size BERT for 10
 optimizer steps, checking memory, throughput, finite values, checkpoint
@@ -166,11 +224,12 @@ single stochastic runs become headline comparisons.
 
 ## Immediate handoff sequence
 
-1. Keep the already pushed matched CPU panel immutable; validate, commit, and
-   push this handoff together with the notebook teaching update.
-2. Ask the user whether the first pilot should use one or two GPUs.
-3. Launch only the 10-step matched engineering pilot after a fresh full
-   inventory and exact-UUID re-probe.
+1. Validate, commit, and push the immutable prior-geometry artifact together
+   with this handoff and the Stage 20.7 notebook teaching update.
+2. Ask the user whether the first pilot should use one or two GPUs; recommend
+   one GPU for this first matched health gate.
+3. Only after that choice, perform the first fresh GPU inventory and exact-UUID
+   re-probe, then launch the matched 10-step `R/S/E` engineering pilot.
 4. Review its logs and artifacts before authorizing the next small training and
    32-sample stage.
 5. Update the final PDF only after the required controlled experiments and
