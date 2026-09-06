@@ -5,7 +5,8 @@ matched-panel predecessor state: genesis for R, R's successful receipt for S,
 or S's successful receipt for E. Immediately before launch, the controller
 inventories every NVIDIA GPU, selects genuinely idle devices, re-probes those
 exact UUIDs, and exposes the UUIDs as the child's logical CUDA devices. It
-never interrupts or reuses a device with an active compute process.
+records active compute processes without rejecting a device solely for their
+presence. It never interrupts or kills an existing process.
 """
 
 from __future__ import annotations
@@ -33,6 +34,10 @@ PROJECT_ROOT = REPOSITORY_ROOT.parents[1]
 RUN_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}\Z")
 MAX_SAFE_UTILIZATION_PERCENT = 10
 MIN_SAFE_FREE_MEMORY_MIB = 30_000
+# User-authorized shared-server policy: a GPU below the strict utilization
+# threshold remains eligible when process telemetry is nonempty. Processes are
+# still captured in both selection and final-probe evidence.
+ACTIVE_COMPUTE_PROCESSES_ALLOWED = True
 TRAINING_SUMMARY_SCHEMA_VERSION = 4
 PILOT_EXIT_STATUS_SCHEMA_VERSION = 5
 LAUNCH_MANIFEST_SCHEMA_VERSION = 2
@@ -172,7 +177,7 @@ class GPUState:
             )
         if self.compute_mode.lower() == "prohibited":
             reasons.append("compute mode is prohibited")
-        if self.compute_processes:
+        if self.compute_processes and not ACTIVE_COMPUTE_PROCESSES_ALLOWED:
             reasons.append(f"{len(self.compute_processes)} active compute process(es)")
         return reasons
 
@@ -734,7 +739,7 @@ def build_matched_panel_spec(
             "max_utilization_percent": max_utilization_percent,
             "utilization_comparison": "strictly_less_than",
             "min_free_memory_mib": min_free_memory_mib,
-            "active_compute_processes_allowed": False,
+            "active_compute_processes_allowed": ACTIVE_COMPUTE_PROCESSES_ALLOWED,
             "compute_mode_prohibited_allowed": False,
             "physical_gpu_identity_is_per_run_provenance": True,
         },
@@ -2276,12 +2281,22 @@ def build_predecessor_receipt_binding(
     for key in safety:
         if safety[key] != expected_safety.get(key):
             raise ValueError(f"predecessor GPU safety policy {key} is unmatched")
+    if (
+        safety["active_compute_processes_allowed"]
+        is not ACTIVE_COMPUTE_PROCESSES_ALLOWED
+    ):
+        raise ValueError(
+            "predecessor active-compute-process policy is not the reviewed policy"
+        )
     for state in (*initially_selected, *final_states):
         if (
             state["utilization_percent"] >= safety["max_utilization_percent"]
             or state["memory_total_mib"] - state["memory_used_mib"]
             < safety["min_free_memory_mib"]
-            or state["compute_processes"]
+            or (
+                state["compute_processes"]
+                and not safety["active_compute_processes_allowed"]
+            )
             or str(state["compute_mode"]).strip().lower() == "prohibited"
         ):
             raise ValueError("predecessor selected GPU state violates safety policy")
@@ -4197,7 +4212,7 @@ def _launch_locked_pilot(
             "max_utilization_percent": args.max_utilization_percent,
             "utilization_comparison": "strictly_less_than",
             "min_free_memory_mib": args.min_free_memory_mib,
-            "active_compute_processes_allowed": False,
+            "active_compute_processes_allowed": ACTIVE_COMPUTE_PROCESSES_ALLOWED,
             "compute_mode_prohibited_allowed": False,
         },
         "training_argv": command,

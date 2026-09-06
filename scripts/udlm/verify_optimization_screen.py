@@ -27,6 +27,7 @@ import subprocess
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from fractions import Fraction
 from pathlib import Path, PurePosixPath
@@ -144,6 +145,9 @@ EXPECTED_ARTIFACT_SCHEMA_VERSIONS = {
     "exit_receipt": 5,
     "denoising_report": DENOISING_REPORT_SCHEMA_VERSION,
 }
+MAX_SAFE_UTILIZATION_PERCENT = 10
+MIN_SAFE_FREE_MEMORY_MIB = 30_000
+ACTIVE_COMPUTE_PROCESSES_ALLOWED = True
 INCOMPLETE_EXIT_STATUS = 97
 EXPECTED_OBSERVATION_POINT = (
     "on_before_optimizer_step_global_rank_zero_after_gradient_accumulation"
@@ -2337,6 +2341,211 @@ def _selected_uuids(value: object, label: str, expected_count: int) -> list[str]
     return value
 
 
+_GPU_STATE_KEYS = {
+    "physical_index",
+    "uuid",
+    "name",
+    "memory_used_mib",
+    "memory_total_mib",
+    "utilization_percent",
+    "compute_mode",
+    "compute_processes",
+}
+_GPU_PROCESS_KEYS = {"pid", "process_name", "used_memory_mib"}
+_GPU_SAFETY_POLICY = {
+    "max_utilization_percent": MAX_SAFE_UTILIZATION_PERCENT,
+    "utilization_comparison": "strictly_less_than",
+    "min_free_memory_mib": MIN_SAFE_FREE_MEMORY_MIB,
+    "active_compute_processes_allowed": ACTIVE_COMPUTE_PROCESSES_ALLOWED,
+    "compute_mode_prohibited_allowed": False,
+}
+
+
+def _utc_timestamp(value: object, label: str) -> datetime:
+    if not isinstance(value, str) or not value or value.strip() != value:
+        raise ScreenValidationError(f"{label} must be a nonempty UTC timestamp")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as error:
+        raise ScreenValidationError(f"{label} is not valid ISO-8601") from error
+    if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
+        raise ScreenValidationError(f"{label} must use UTC")
+    return parsed
+
+
+def _validate_gpu_state(value: object, label: str) -> dict[str, Any]:
+    state = _mapping(value, label)
+    _exact_keys(state, _GPU_STATE_KEYS, label)
+    physical_index = _integer(
+        state.get("physical_index"), f"{label}.physical_index", minimum=0
+    )
+    uuid = _selected_uuids([state.get("uuid")], f"{label}.uuid", 1)[0]
+    name = state.get("name")
+    if not isinstance(name, str) or not name:
+        raise ScreenValidationError(f"{label}.name must be nonempty")
+    gpu_memory_used = _integer(
+        state.get("memory_used_mib"), f"{label}.memory_used_mib", minimum=0
+    )
+    memory_total = _integer(
+        state.get("memory_total_mib"), f"{label}.memory_total_mib", minimum=1
+    )
+    if gpu_memory_used > memory_total:
+        raise ScreenValidationError(f"{label} used memory exceeds total memory")
+    utilization = _integer(
+        state.get("utilization_percent"),
+        f"{label}.utilization_percent",
+        minimum=0,
+        maximum=100,
+    )
+    compute_mode = state.get("compute_mode")
+    if not isinstance(compute_mode, str) or not compute_mode.strip():
+        raise ScreenValidationError(f"{label}.compute_mode must be nonempty")
+    processes = state.get("compute_processes")
+    if not isinstance(processes, list):
+        raise ScreenValidationError(f"{label}.compute_processes must be an array")
+    normalized_processes: list[dict[str, Any]] = []
+    for index, value in enumerate(processes):
+        process_label = f"{label}.compute_processes[{index}]"
+        process = _mapping(value, process_label)
+        _exact_keys(process, _GPU_PROCESS_KEYS, process_label)
+        pid = _integer(process.get("pid"), f"{process_label}.pid", minimum=1)
+        process_name = process.get("process_name")
+        if not isinstance(process_name, str) or not process_name:
+            raise ScreenValidationError(
+                f"{process_label}.process_name must be nonempty"
+            )
+        process_memory_used = process.get("used_memory_mib")
+        if process_memory_used is not None:
+            process_memory_used = _integer(
+                process_memory_used,
+                f"{process_label}.used_memory_mib",
+                minimum=0,
+            )
+        normalized_processes.append(
+            {
+                "pid": pid,
+                "process_name": process_name,
+                "used_memory_mib": process_memory_used,
+            }
+        )
+    return {
+        "physical_index": physical_index,
+        "uuid": uuid,
+        "name": name,
+        "memory_used_mib": gpu_memory_used,
+        "memory_total_mib": memory_total,
+        "utilization_percent": utilization,
+        "compute_mode": compute_mode,
+        "compute_processes": normalized_processes,
+    }
+
+
+def _validate_launch_gpu_evidence(
+    manifest: Mapping[str, Any], *, selected_uuids: list[str]
+) -> None:
+    expected_count = len(selected_uuids)
+    if manifest.get("gpu_selection_schema_version") != 2:
+        raise ScreenValidationError("launch manifest GPU-selection schema is invalid")
+    if (
+        manifest.get("gpu_selection_method") != "dynamic_idle_discovery"
+        or manifest.get("gpu_inventory_scope") != "all_nvidia_gpus"
+    ):
+        raise ScreenValidationError("launch manifest GPU selection method is invalid")
+
+    safety = _mapping(manifest.get("gpu_safety_policy"), "launch GPU safety policy")
+    _exact_keys(safety, set(_GPU_SAFETY_POLICY), "launch GPU safety policy")
+    max_utilization = _integer(
+        safety.get("max_utilization_percent"),
+        "launch GPU maximum utilization",
+        minimum=1,
+        maximum=MAX_SAFE_UTILIZATION_PERCENT,
+    )
+    min_free_memory = _integer(
+        safety.get("min_free_memory_mib"),
+        "launch GPU minimum free memory",
+        minimum=MIN_SAFE_FREE_MEMORY_MIB,
+    )
+    if (
+        safety.get("utilization_comparison") != "strictly_less_than"
+        or safety.get("active_compute_processes_allowed")
+        is not ACTIVE_COMPUTE_PROCESSES_ALLOWED
+        or safety.get("compute_mode_prohibited_allowed") is not False
+    ):
+        raise ScreenValidationError("launch GPU safety policy is not exact")
+
+    inventory_time = _utc_timestamp(
+        manifest.get("inventory_snapshot_completed_at_utc"),
+        "launch inventory completion timestamp",
+    )
+    final_probe_time = _utc_timestamp(
+        manifest.get("final_uuid_probes_completed_at_utc"),
+        "launch final-probe completion timestamp",
+    )
+    manifest_time = _utc_timestamp(
+        manifest.get("created_at"), "launch manifest creation timestamp"
+    )
+    if not inventory_time <= final_probe_time <= manifest_time:
+        raise ScreenValidationError(
+            "launch GPU-probe/manifest timestamps are out of order"
+        )
+
+    inventory_raw = manifest.get("gpu_inventory_at_selection")
+    initial_raw = manifest.get("initially_selected_gpu_states")
+    final_raw = manifest.get("gpu_states_at_final_uuid_probe")
+    if not isinstance(inventory_raw, list) or not inventory_raw:
+        raise ScreenValidationError("launch GPU inventory must be nonempty")
+    if not isinstance(initial_raw, list) or len(initial_raw) != expected_count:
+        raise ScreenValidationError("launch initial GPU selection is incomplete")
+    if not isinstance(final_raw, list) or len(final_raw) != expected_count:
+        raise ScreenValidationError("launch final GPU probe is incomplete")
+    inventory = [
+        _validate_gpu_state(value, f"launch inventory GPU {index}")
+        for index, value in enumerate(inventory_raw)
+    ]
+    initial = [
+        _validate_gpu_state(value, f"launch initial GPU {index}")
+        for index, value in enumerate(initial_raw)
+    ]
+    final = [
+        _validate_gpu_state(value, f"launch final GPU {index}")
+        for index, value in enumerate(final_raw)
+    ]
+    inventory_uuids = [state["uuid"] for state in inventory]
+    inventory_indices = [state["physical_index"] for state in inventory]
+    if len(set(inventory_uuids)) != len(inventory_uuids) or len(
+        set(inventory_indices)
+    ) != len(inventory_indices):
+        raise ScreenValidationError("launch GPU inventory identities are not unique")
+    inventory_by_uuid = {state["uuid"]: state for state in inventory}
+    if any(uuid not in inventory_by_uuid for uuid in selected_uuids):
+        raise ScreenValidationError("launch selected UUID is absent from inventory")
+    if [state["uuid"] for state in initial] != selected_uuids:
+        raise ScreenValidationError("launch initial GPU UUID order is unmatched")
+    if [state["uuid"] for state in final] != selected_uuids:
+        raise ScreenValidationError("launch final GPU UUID order is unmatched")
+    if initial != [inventory_by_uuid[uuid] for uuid in selected_uuids]:
+        raise ScreenValidationError("launch initial GPU state differs from inventory")
+
+    final_indices = [state["physical_index"] for state in final]
+    if len(set(final_indices)) != len(final_indices):
+        raise ScreenValidationError("launch final GPU indices are not unique")
+    if manifest.get("physical_gpu_indices") != final_indices:
+        raise ScreenValidationError("launch physical GPU mapping is unmatched")
+    if manifest.get("logical_cuda_devices") != list(range(expected_count)):
+        raise ScreenValidationError("launch logical GPU mapping is unmatched")
+
+    for index, state in enumerate((*initial, *final)):
+        if (
+            state["utilization_percent"] >= max_utilization
+            or state["memory_total_mib"] - state["memory_used_mib"] < min_free_memory
+            or state["compute_mode"].strip().lower() == "prohibited"
+            or (state["compute_processes"] and not ACTIVE_COMPUTE_PROCESSES_ALLOWED)
+        ):
+            raise ScreenValidationError(
+                f"launch selected GPU state {index} violates the safety policy"
+            )
+
+
 def _validate_launch_manifest(
     manifest: Mapping[str, Any],
     *,
@@ -2381,11 +2590,15 @@ def _validate_launch_manifest(
     expected_gpu_count = registry.data["common_training"]["gpu_count"]
     if manifest.get("user_requested_gpu_count") != expected_gpu_count:
         raise ScreenValidationError("launch manifest GPU count is unmatched")
-    return _selected_uuids(
+    selected_uuids = _selected_uuids(
         manifest.get("cuda_visible_device_uuids"),
         "launch manifest selected GPU UUIDs",
         expected_gpu_count,
     )
+    if manifest.get("source_revision_before_final_gpu_probe") != source_revision:
+        raise ScreenValidationError("launch final-probe source revision is unmatched")
+    _validate_launch_gpu_evidence(manifest, selected_uuids=selected_uuids)
+    return selected_uuids
 
 
 def _validate_runtime_record(

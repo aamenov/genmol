@@ -86,6 +86,8 @@ def test_first_arm_forwards_the_exact_health_contract(
     expected_accumulation,
 ):
     observed: list[list[str]] = []
+    monkeypatch.setattr(pilot, "MAX_SAFE_UTILIZATION_PERCENT", 99)
+    monkeypatch.setattr(pilot, "MIN_SAFE_FREE_MEMORY_MIB", 1)
     monkeypatch.setattr(pilot, "main", lambda argv: observed.append(argv))
 
     assert launcher.main(["--gpu-count", str(gpu_count)]) == 0
@@ -109,10 +111,10 @@ def test_first_arm_forwards_the_exact_health_contract(
         launcher.EXPECTED_MDLM_CHECKPOINT_PATH
     )
     assert _value_after(argv, "--max-utilization-percent") == str(
-        pilot.MAX_SAFE_UTILIZATION_PERCENT
+        launcher.HEALTH_PANEL_MAX_UTILIZATION_PERCENT
     )
     assert _value_after(argv, "--min-free-memory-mib") == str(
-        pilot.MIN_SAFE_FREE_MEMORY_MIB
+        launcher.HEALTH_PANEL_MIN_FREE_MEMORY_MIB
     )
     assert "--genesis" in argv
     assert "--predecessor-receipt" not in argv

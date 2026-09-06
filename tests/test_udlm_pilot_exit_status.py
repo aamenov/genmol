@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import json
 import math
@@ -346,7 +347,7 @@ def _predecessor_panel():
             "max_utilization_percent": 10,
             "utilization_comparison": "strictly_less_than",
             "min_free_memory_mib": 30000,
-            "active_compute_processes_allowed": False,
+            "active_compute_processes_allowed": True,
             "compute_mode_prohibited_allowed": False,
             "physical_gpu_identity_is_per_run_provenance": True,
         },
@@ -535,7 +536,7 @@ def _write_producer_predecessor(
             "max_utilization_percent": 10,
             "utilization_comparison": "strictly_less_than",
             "min_free_memory_mib": 30000,
-            "active_compute_processes_allowed": False,
+            "active_compute_processes_allowed": True,
             "compute_mode_prohibited_allowed": False,
         },
         "training_argv": full_argv,
@@ -933,6 +934,62 @@ def test_receipt_revalidates_bound_predecessor_artifacts(tmp_path, monkeypatch):
         == receipt_writer.LAUNCH_MANIFEST_SCHEMA_VERSION
         == 2
     )
+
+
+def _set_predecessor_gpu_state_fields(manifest, **updates):
+    for field in (
+        "gpu_inventory_at_selection",
+        "initially_selected_gpu_states",
+        "gpu_states_at_final_uuid_probe",
+    ):
+        manifest[field][0].update(copy.deepcopy(updates))
+
+
+def test_receipt_accepts_recorded_process_below_utilization_threshold(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(receipt_writer, "REPOSITORY_ROOT", tmp_path)
+    process = {
+        "pid": 4321,
+        "process_name": "pre-existing-workload",
+        "used_memory_mib": 512,
+    }
+    manifest, expected_binding, _summary_path = _predecessor_chain_fixture(
+        tmp_path,
+        mutate_manifest=lambda value: _set_predecessor_gpu_state_fields(
+            value,
+            utilization_percent=9,
+            compute_processes=[process],
+        ),
+    )
+
+    assert (
+        receipt_writer._validated_predecessor_binding_at_receipt(manifest)
+        == expected_binding
+    )
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"utilization_percent": 10},
+        {"memory_used_mib": 51_921},
+        {"compute_mode": "Prohibited"},
+    ],
+)
+def test_receipt_still_rejects_unsafe_predecessor_gpu_state(
+    tmp_path, monkeypatch, updates
+):
+    monkeypatch.setattr(receipt_writer, "REPOSITORY_ROOT", tmp_path)
+    manifest, _expected_binding, _summary_path = _predecessor_chain_fixture(
+        tmp_path,
+        mutate_manifest=lambda value: _set_predecessor_gpu_state_fields(
+            value, **updates
+        ),
+    )
+
+    with pytest.raises(ValueError, match="violates the safety policy"):
+        receipt_writer._validated_predecessor_binding_at_receipt(manifest)
 
 
 @pytest.mark.parametrize(

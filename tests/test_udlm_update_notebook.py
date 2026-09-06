@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import ast
 import copy
+import csv
+import io
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -98,6 +102,95 @@ def test_update_is_byte_idempotent(tmp_path: Path) -> None:
     assert second.read_bytes() == first.read_bytes()
 
 
+def test_generated_stage0_uses_utilization_based_shared_gpu_policy(
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "updated.ipynb"
+    updater.update_notebook(SOURCE_NOTEBOOK, destination)
+    cells = _cells_by_id(json.loads(destination.read_text()))
+    code = "".join(cells["stage0-setup"]["source"])
+    markdown = " ".join("".join(cells["stage0-setup-note"]["source"]).split())
+
+    for fragment in (
+        "MIN_IDLE_FREE_MEMORY_MIB = 30000",
+        "MAX_IDLE_UTILIZATION_PERCENT = 10",
+        "memory.free,utilization.gpu,compute_mode",
+        "gpu['compute_processes'] = process_rows",
+        "if utilization_percent >= MAX_IDLE_UTILIZATION_PERCENT",
+        "-gpu['free_memory_mib']",
+        "if final['uuid'] != initial['uuid']",
+    ):
+        assert fragment in code
+    assert "if process_rows:" not in code
+    assert "a nonempty inventory is allowed" in markdown
+    assert "card at exactly 10% is rejected" in markdown
+    assert "never interrupts or kills" in markdown
+    compile(code, "stage0-setup", "exec")
+
+
+@pytest.mark.parametrize(
+    ("free_memory_mib", "utilization", "compute_mode", "eligible", "reason"),
+    [
+        (30_000, 9, "Default", True, None),
+        (30_000, 10, "Default", False, "not below 10%"),
+        (29_999, 9, "Default", False, "below 30000 MiB"),
+        (30_000, 9, "Prohibited", False, "compute mode is prohibited"),
+    ],
+)
+def test_generated_stage0_gpu_boundaries_allow_recorded_processes(
+    free_memory_mib: int,
+    utilization: int,
+    compute_mode: str,
+    eligible: bool,
+    reason: str | None,
+) -> None:
+    parsed = ast.parse(updater.STAGE0_SETUP_CODE)
+    names = {"MIN_IDLE_FREE_MEMORY_MIB", "MAX_IDLE_UTILIZATION_PERCENT"}
+    selected_nodes = [
+        node
+        for node in parsed.body
+        if (
+            isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id in names
+                for target in node.targets
+            )
+        )
+        or isinstance(node, ast.FunctionDef)
+        and node.name == "probe_physical_gpu"
+    ]
+    namespace = {"csv": csv, "io": io}
+    exec(
+        compile(
+            ast.Module(body=selected_nodes, type_ignores=[]), "stage0-policy", "exec"
+        ),
+        namespace,
+    )
+    responses = iter(
+        (
+            subprocess.CompletedProcess(
+                [],
+                0,
+                stdout=(
+                    "2, GPU-stage0-test, Synthetic GPU, "
+                    f"{free_memory_mib}, {utilization}, {compute_mode}\n"
+                ),
+                stderr="",
+            ),
+            subprocess.CompletedProcess([], 0, stdout="4321, 512 MiB\n", stderr=""),
+        )
+    )
+    namespace["_run_nvidia_smi"] = lambda *_args: next(responses)
+
+    state = namespace["probe_physical_gpu"](2)
+
+    assert state["eligible"] is eligible
+    assert state["compute_processes"] == [{"pid": 4321, "used_memory": "512 MiB"}]
+    assert state["compute_process_count"] == 1
+    if reason is not None:
+        assert any(reason in item for item in state["reasons"])
+
+
 def test_prior_floor_teaching_binds_retrospective_artifact_without_rewriting_history():
     notebook = _notebook()
     cells = _cells_by_id(notebook)
@@ -178,6 +271,7 @@ def test_generated_health_teaching_binds_exact_gate_and_later_diagnostic(
         '"checkpoint_size_bytes": 1396998679',
         "8d00aa47b02f64bf39ff6b0b2e786f213587366fc2c3d29712a00f3f84108dd6",
         '"max_utilization_percent": 10',
+        '"active_compute_processes_allowed": True',
         '"min_free_memory_mib": 30000',
         '"normalized_evidence_schema_version": 1',
         '"successful_exit_receipt_schema_version": 5',
@@ -193,6 +287,8 @@ def test_generated_health_teaching_binds_exact_gate_and_later_diagnostic(
         assert fragment in code
     assert '"health_generation"' not in code
     compact_all_markdown = " ".join(all_markdown.split())
+    assert "at exactly 10% is rejected" in compact_all_markdown
+    assert "never interrupts or kills" in compact_all_markdown
     assert "deterministic `health-w{W}-{r,s,e}-{H}` names" in compact_all_markdown
     assert "Only after those training runs, seed 1100 x 32 requests" in (
         compact_all_markdown

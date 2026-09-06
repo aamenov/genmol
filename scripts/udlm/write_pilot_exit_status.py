@@ -33,6 +33,9 @@ INCOMPLETE_EXIT_STATUS = 97
 HOSTED_STREAM_RANK_PARTITION_POLICY = (
     "huggingface_split_dataset_by_node_disjoint_rank_streams"
 )
+MAX_SAFE_UTILIZATION_PERCENT = 10
+MIN_SAFE_FREE_MEMORY_MIB = 30_000
+ACTIVE_COMPUTE_PROCESSES_ALLOWED = True
 
 
 def _canonical_integer(value: str, *, label: str, minimum: int, maximum: int) -> int:
@@ -1264,6 +1267,21 @@ def _validate_predecessor_producer_artifacts(
         panel.get("common_gpu_safety_policy"),
         label="matched-panel GPU safety policy",
     )
+    max_utilization = safety.get("max_utilization_percent")
+    min_free_memory = safety.get("min_free_memory_mib")
+    if (
+        type(max_utilization) is not int
+        or not 1 <= max_utilization <= MAX_SAFE_UTILIZATION_PERCENT
+        or safety.get("utilization_comparison") != "strictly_less_than"
+        or type(min_free_memory) is not int
+        or min_free_memory < MIN_SAFE_FREE_MEMORY_MIB
+        or safety.get("active_compute_processes_allowed")
+        is not ACTIVE_COMPUTE_PROCESSES_ALLOWED
+        or safety.get("compute_mode_prohibited_allowed") is not False
+    ):
+        raise ValueError("predecessor GPU safety policy is not the reviewed policy")
+    if expected_safety.get("physical_gpu_identity_is_per_run_provenance") is not True:
+        raise ValueError("matched-panel GPU identity policy is not the reviewed policy")
     for key, value in safety.items():
         if value != expected_safety.get(key) or type(value) is not type(
             expected_safety.get(key)
@@ -1274,7 +1292,10 @@ def _validate_predecessor_producer_artifacts(
             state["utilization_percent"] >= safety["max_utilization_percent"]
             or state["memory_total_mib"] - state["memory_used_mib"]
             < safety["min_free_memory_mib"]
-            or state["compute_processes"]
+            or (
+                state["compute_processes"]
+                and not safety["active_compute_processes_allowed"]
+            )
             or state["compute_mode"].strip().lower() == "prohibited"
         ):
             raise ValueError("predecessor selected GPU violates the safety policy")

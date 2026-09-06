@@ -104,6 +104,7 @@ PILOT_EMPIRICAL_UNIFORM_MIX_AUDIT_CANONICAL_SHA256 = (
 )
 MAX_SAFE_UTILIZATION_PERCENT = 10
 MIN_SAFE_FREE_MEMORY_MIB = 30_000
+ACTIVE_COMPUTE_PROCESSES_ALLOWED = True
 REGISTERED_SELECTION_PILOT_SEEDS = (1000, 1001)
 REGISTERED_SELECTION_SAMPLES_PER_SEED = 256
 REGISTERED_SELECTION_NFE = 128
@@ -3099,6 +3100,22 @@ def _validate_gpu_state(value: object, *, label: str) -> dict[str, Any]:
         isinstance(process, Mapping) for process in processes
     ):
         raise GateValidationError(f"{label}.compute_processes must be an object array")
+    for index, process in enumerate(processes):
+        process_label = f"{label}.compute_processes[{index}]"
+        _exact_keys(
+            process,
+            {"pid", "process_name", "used_memory_mib"},
+            process_label,
+        )
+        _integer(process.get("pid"), f"{process_label}.pid", minimum=1)
+        if (
+            not isinstance(process.get("process_name"), str)
+            or not process["process_name"]
+        ):
+            raise GateValidationError(f"{process_label}.process_name must be nonempty")
+        used_memory = process.get("used_memory_mib")
+        if used_memory is not None:
+            _integer(used_memory, f"{process_label}.used_memory_mib", minimum=0)
     return {**dict(state), "uuid": uuid}
 
 
@@ -3263,19 +3280,23 @@ def _validate_launch_manifest(
         safety.get("utilization_comparison") != "strictly_less_than"
         or max_utilization > MAX_SAFE_UTILIZATION_PERCENT
         or min_free_memory < MIN_SAFE_FREE_MEMORY_MIB
-        or safety.get("active_compute_processes_allowed") is not False
+        or safety.get("active_compute_processes_allowed")
+        is not ACTIVE_COMPUTE_PROCESSES_ALLOWED
         or safety.get("compute_mode_prohibited_allowed") is not False
     ):
         raise GateValidationError("launch GPU safety policy is unexpected")
-    for index, state in enumerate(final):
+    for index, state in enumerate((*initial, *final)):
         if (
             state["utilization_percent"] >= max_utilization
             or state["memory_total_mib"] - state["memory_used_mib"] < min_free_memory
             or state["compute_mode"].lower() == "prohibited"
-            or state["compute_processes"]
+            or (
+                state["compute_processes"]
+                and not safety["active_compute_processes_allowed"]
+            )
         ):
             raise GateValidationError(
-                f"launch manifest final GPU {index} was not genuinely idle"
+                f"launch manifest selected GPU state {index} violates safety policy"
             )
 
     training_argv = manifest.get("training_argv")

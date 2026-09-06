@@ -263,8 +263,10 @@ a schedule bundle hypothesis rather than an exact official-recipe replay.
    $a_2=4$ for two, so the effective batch is exactly
    $B_{\mathrm{eff}}=Wma_W=16$ in either case. Every arm also carries the
    audited empirical-mixture field `0.0002` (active only for E), utilization
-   strictly below 10%, at least 30,000 MiB free, no active compute process, and
-   non-prohibited compute mode.
+   strictly below 10%, at least 30,000 MiB free, and non-prohibited compute
+   mode. Active compute processes are recorded but do not disqualify a device
+   under the user's utilization-based idle definition; no launcher interrupts
+   or kills them.
 
    Let $H$ be the full 40-character clean pushed source revision used by the
    wrapper. Its deterministic run names are `health-w{W}-r-{H}`,
@@ -322,8 +324,9 @@ a schedule bundle hypothesis rather than an exact official-recipe replay.
    128 NFE. All smaller or mismatched panels remain disclosed but ineligible;
    final seeds 0, 1, and 2 are unavailable for tuning or selection. The user
    chooses one or two GPUs, and immediately before each sequential job the
-   launcher scans the full NVIDIA inventory, dynamically selects genuinely idle
-   physical GPUs, re-probes their exact UUIDs, and binds the telemetry through
+   launcher scans the full NVIDIA inventory, dynamically selects GPUs eligible
+   under the user-authorized utilization policy, re-probes their exact UUIDs,
+   and binds the telemetry through
    the launch/runtime/summary/receipt evidence chain.
    For each completed seed, run `scripts/udlm/write_pilot_evidence.py
    --outcome completed ...` to publish its reference-only envelope after

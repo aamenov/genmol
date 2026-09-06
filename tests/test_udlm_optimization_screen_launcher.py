@@ -466,6 +466,7 @@ def test_real_launch_uses_final_uuid_probe_before_manifest_and_tmux(
     assert manifest["optimization_screen"]["arm_id"] == "E-L0"
     assert manifest["cuda_visible_device_uuids"] == ["GPU-idle-seven"]
     assert manifest["physical_gpu_indices"] == [7]
+    assert manifest["gpu_safety_policy"]["active_compute_processes_allowed"] is True
     assert manifest["checkpoint_sha256"] == plan.checkpoint_sha256
     assert events == [
         "inventory",

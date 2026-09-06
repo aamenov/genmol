@@ -1,7 +1,8 @@
 # GenMol v2 project context
 
-Snapshot: 2026-09-06, pre-launch health-gate hardening. Recheck dynamic state,
-especially Git status, logs, tmux sessions, and GPU occupancy, before acting.
+Snapshot: 2026-09-06, pre-launch utilization-policy revision. Recheck dynamic
+state, especially Git status, logs, tmux sessions, and GPU occupancy, before
+acting.
 
 ## Active objective and safe workspace
 
@@ -13,7 +14,7 @@ especially Git status, logs, tmux sessions, and GPU occupancy, before acting.
   on branch `codex/udlm-genmol`, not in the dirty main checkout. Preserve all
   unrelated and uncommitted work.
 - The current pushed parent implementation revision is
-  `b7a8f6bde90a981b46e5ac5fd9da6d821c95af70`. It includes strict optimizer-step
+  `a083ece7a993fc8b09a9abc0c50c5290a7c8a2ac`. It includes strict optimizer-step
   scheduler identity, prospective E-L0/E-L1 bundles, the warm-start-compatible
   A1 post-BERT FiLM conditioner, exact conditioning checkpoint identity,
   constructor-RNG isolation, the registry preparer and registry-aware launcher,
@@ -21,7 +22,9 @@ especially Git status, logs, tmux sessions, and GPU occupancy, before acting.
   pilot configs use the training-only audited empirical floor `0.0002`, and the
   screen registry/verifier bind that audit's exact bytes and producing source.
   The screen arms remain deliberately unauthorized until the exact health gate
-  passes and the selected-world-size registry is frozen. The user selected one
+  passes and the selected-world-size registry is frozen. It also supplies the
+  exact sequential health wrapper, independent health validator, registry-v2
+  health prerequisite, and H-to-R0 Git firewalls. The user selected one
   GPU for this lineage on 2026-09-06; later permission to use up to three GPUs
   does not change this lineage's fixed world size. The distinct source revision
   used to produce the immutable current-code MDLM rescore is
@@ -463,28 +466,39 @@ malformed evidence means incomplete/no winner, never a silent control fallback.
 
 ## GPU status and required next pilot
 
-At this snapshot no UDLM GPU job has been launched, and no GPU inventory or
-utilization probe has yet been run for the pending pilot. No GPU probe or job
-occurred while producing or reviewing revisions through
-`b7a8f6bde90a981b46e5ac5fd9da6d821c95af70`, the CPU-only MDLM rescore, the
-twelve historical launch dry-run invocations, the full-size A1 CPU warm-start
-smoke, the 30,000-row prior-floor replay, or the source/test integrations. No
-stale snapshot should be treated as authorization or availability evidence.
+At this snapshot no UDLM GPU training job has been launched. The exact W=1
+health dry-run at pushed source `a083ece7a993fc8b09a9abc0c50c5290a7c8a2ac`
+passed without querying a GPU or mutating launch artifacts. Its R resolved-
+config SHA-256 was
+`b54089ddf6f0f966db46c1bc9fddcc125f15b9a90aaa41e8fbd540de4521cd09`
+and matched-panel SHA-256 was
+`5dd443114d2a7b76d4da287943548e52507472e0be4387ef4d4ca026b8305602`.
+An external waiter then polled GPU telemetry under the superseded zero-process
+rule. Its last poll saw a process-free GPU, but the exact launcher's subsequent
+fresh initial inventory saw a process and rejected every card before device
+selection or final UUID re-probe. It created no run directory, and no health
+tmux session or repository-global lease remains. Preserve
+`output/logs/wait-health-w1-a083ece.log` as the operational record, but never
+let that obsolete waiter launch this or a later source revision.
 
 The user selected **one GPU** for this matched health/screen lineage and later
 authorized up to three GPUs without another permission check. The frozen W=1
 lineage must not change world size midstream; any later scale experiment needs a
 separate registered lineage. Do not ask for or hard-code physical device IDs.
-Immediately before the first job, inventory
-every NVIDIA device and its processes, dynamically choose that many genuinely
-idle devices, and re-probe the exact selected UUIDs at the last possible point.
-A selected device must have zero foreign compute processes, utilization below
-the launcher's approved threshold (currently 10%), and at least 30,000 MiB
-free. Map the UUIDs through `CUDA_VISIBLE_DEVICES`; logical `cuda:0` is then
-safe. Never interrupt or reuse another user's process.
+The user explicitly revised the idle definition on 2026-09-06: utilization
+must be strictly below 10%, and active compute processes do not by themselves
+disqualify the device. Future reviewed UDLM training and optimization-screen
+launches must still require at least 30,000 MiB free and non-prohibited compute
+mode, record the complete process telemetry at selection and final UUID
+re-probe, and never interrupt or kill an existing process. Historical de-novo
+launch evidence retains its producing policy; update the future generation
+launcher separately before using it under the revised policy. Map the
+dynamically selected UUID through
+`CUDA_VISIBLE_DEVICES`; logical `cuda:0` then refers only to that isolated
+mapping. A fresh last-moment probe—not this snapshot—is launch authority.
 
-The first GPU action should remain the exact wrapper-controlled R engineering
-pilot: full-size BERT for 10
+The first GPU training launch should remain the exact wrapper-controlled R
+engineering pilot: full-size BERT for 10
 optimizer steps, checking memory, throughput, finite values, checkpoint
 save/load, exact runtime-config capture, and source/config/argv gates. Use the
 reviewed `scripts/udlm/launch_health_panel.py`, which delegates to the pilot
@@ -578,7 +592,7 @@ Completed prior items:
   single-stochastic result from entering the superiority decision. Its exact
   CPU suite passed `1036` tests with `14` warnings in 209.33 seconds. No GPU
   inventory or launch occurred.
-- The commit containing this snapshot adds the exact sequential health wrapper,
+- Pushed revision `a083ece7a993fc8b09a9abc0c50c5290a7c8a2ac` adds the exact sequential health wrapper,
   an independent full-argv/full-Hydra-config health validator, registry schema
   v2 with a live terminal-receipt prerequisite, exact H-to-R0 sole-parent/tree
   replay, the R0-to-R2 conditioning firewall, publication race checks, teaching,
@@ -587,16 +601,31 @@ Completed prior items:
   help, notebook regeneration/idempotence, and `git diff --check` passed. Real
   CPU reconstruction produced the one-GPU common-config SHA-256
   `da1c2fde8d0315b374d58aec9c469f060b53361b74d757f9b65ef57c80e71d50`.
-  No GPU inventory or launch occurred during this tranche.
+  No GPU inventory or launch occurred during that source/test tranche. Its W=1
+  CPU-only health dry-run later passed with the source-bound hashes recorded
+  above and still performed no GPU query or artifact mutation.
+- The policy revision prepared on top of `a083ece` supersedes the zero-process
+  launch rule: utilization must be
+  strictly below 10%; active-process telemetry is allowed and retained; the
+  30,000 MiB free-memory and non-prohibited-mode checks remain. Launcher,
+  predecessor/receipt, health, screen, superiority, notebook, and teaching
+  surfaces are changed together. Its changed-file suite passed 449 tests, its
+  cross-pipeline integration tier passed 100 tests, and its exact-worktree full
+  CPU suite passed 1,156 tests with 14 dependency warnings in 218.14 seconds.
+  Ruff, formatting, `py_compile`, notebook regeneration/idempotence, and
+  `git diff --check` passed; independent final audit found no remaining P0--P2
+  issue. This policy revision itself is not a health result and must still be
+  committed, pushed, and dry-run before a real launch.
 
 Remaining sequence:
 
-1. Finish validating, commit, and push the exact health launcher/validator,
-   registry-v2 prerequisite, complete Git-boundary replay, teaching, and tests.
+1. Finish validating, commit, and push the utilization-policy revision as the
+   new exact health source H. Do not launch from the superseded `a083ece` H.
 2. From that clean pushed H and the user's selected `W=1`, run the CPU-only
-   health wrapper dry-run. Immediately afterward perform the first fresh GPU
-   inventory/process inspection; if and only if one GPU meets the frozen safety
-   thresholds, let the wrapper dynamically select/re-probe its UUID and launch R.
+   health wrapper dry-run. Immediately afterward inspect the live inventory; if
+   one GPU has utilization strictly below 10%, at least 30,000 MiB free, and
+   non-prohibited compute mode, let the wrapper dynamically select/re-probe its
+   UUID and launch R even when recorded process telemetry is nonempty.
    Invoke the wrapper again only after each preceding receipt succeeds, producing
    the exact matched 10-step `R/S/E` health chain.
 3. Review its authoritative manifests, receipts, checkpoints, and

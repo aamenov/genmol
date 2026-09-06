@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,9 @@ HEALTH_PANEL_GLOBAL_BATCH_SIZE = 16
 HEALTH_PANEL_MICRO_BATCH_SIZE = 2
 HEALTH_PANEL_NUM_WORKERS = 1
 HEALTH_PANEL_SEED = 1
+HEALTH_PANEL_MAX_UTILIZATION_PERCENT = 10
+HEALTH_PANEL_MIN_FREE_MEMORY_MIB = 30_000
+HEALTH_PANEL_ACTIVE_COMPUTE_PROCESSES_ALLOWED = True
 EXPECTED_MDLM_CHECKPOINT_PATH = (
     PROJECT_ROOT / "outputs" / "paper_v1" / "checkpoints" / "50000.ckpt"
 )
@@ -89,6 +93,18 @@ def _git_revision(value: object, *, label: str) -> str:
             f"{label} must be a 40-character lowercase Git revision"
         )
     return value
+
+
+def _utc_timestamp(value: object, *, label: str) -> datetime:
+    if not isinstance(value, str) or not value or value.strip() != value:
+        raise HealthPanelValidationError(f"{label} must be a nonempty UTC timestamp")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as error:
+        raise HealthPanelValidationError(f"{label} is not valid ISO-8601") from error
+    if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
+        raise HealthPanelValidationError(f"{label} must use UTC")
+    return parsed
 
 
 def _artifact_path(value: object, *, label: str) -> Path:
@@ -171,8 +187,8 @@ def _expected_panel(
             num_workers=HEALTH_PANEL_NUM_WORKERS,
             seed=HEALTH_PANEL_SEED,
             exclude_special_tokens=False,
-            max_utilization_percent=(launch_train_pilot.MAX_SAFE_UTILIZATION_PERCENT),
-            min_free_memory_mib=launch_train_pilot.MIN_SAFE_FREE_MEMORY_MIB,
+            max_utilization_percent=HEALTH_PANEL_MAX_UTILIZATION_PERCENT,
+            min_free_memory_mib=HEALTH_PANEL_MIN_FREE_MEMORY_MIB,
             common_resolved_config_sha256=common_config_sha256,
         )
     except (OSError, ValueError) as error:
@@ -309,6 +325,170 @@ def _structural_checkpoint(receipt: Mapping[str, Any]) -> dict[str, object]:
     }
 
 
+_GPU_STATE_KEYS = {
+    "physical_index",
+    "uuid",
+    "name",
+    "memory_used_mib",
+    "memory_total_mib",
+    "utilization_percent",
+    "compute_mode",
+    "compute_processes",
+}
+_GPU_PROCESS_KEYS = {"pid", "process_name", "used_memory_mib"}
+
+
+def _gpu_state(value: object, *, label: str) -> dict[str, Any]:
+    state = _mapping(value, label=label)
+    if set(state) != _GPU_STATE_KEYS:
+        raise HealthPanelValidationError(f"{label} fields are not exact")
+    integer_fields = (
+        "physical_index",
+        "memory_used_mib",
+        "memory_total_mib",
+        "utilization_percent",
+    )
+    if any(type(state.get(field)) is not int for field in integer_fields):
+        raise HealthPanelValidationError(f"{label} integer fields are invalid")
+    if (
+        state["physical_index"] < 0
+        or state["memory_used_mib"] < 0
+        or state["memory_total_mib"] <= 0
+        or state["memory_used_mib"] > state["memory_total_mib"]
+        or not 0 <= state["utilization_percent"] <= 100
+    ):
+        raise HealthPanelValidationError(f"{label} numeric fields are invalid")
+    uuid = state.get("uuid")
+    if not isinstance(uuid, str) or not uuid.startswith("GPU-") or "," in uuid:
+        raise HealthPanelValidationError(f"{label} UUID is invalid")
+    for field in ("name", "compute_mode"):
+        if not isinstance(state.get(field), str) or not state[field].strip():
+            raise HealthPanelValidationError(f"{label} {field} is invalid")
+    processes = state.get("compute_processes")
+    if not isinstance(processes, list):
+        raise HealthPanelValidationError(f"{label} process evidence is not an array")
+    normalized_processes: list[dict[str, Any]] = []
+    for index, value in enumerate(processes):
+        process_label = f"{label} process {index}"
+        process = _mapping(value, label=process_label)
+        if set(process) != _GPU_PROCESS_KEYS:
+            raise HealthPanelValidationError(f"{process_label} fields are not exact")
+        pid = process.get("pid")
+        process_name = process.get("process_name")
+        used_memory = process.get("used_memory_mib")
+        if type(pid) is not int or pid <= 0:
+            raise HealthPanelValidationError(f"{process_label} PID is invalid")
+        if not isinstance(process_name, str) or not process_name:
+            raise HealthPanelValidationError(f"{process_label} name is invalid")
+        if used_memory is not None and (
+            type(used_memory) is not int or used_memory < 0
+        ):
+            raise HealthPanelValidationError(f"{process_label} memory is invalid")
+        normalized_processes.append(dict(process))
+    return {**dict(state), "compute_processes": normalized_processes}
+
+
+def _require_member_gpu_evidence(
+    manifest: Mapping[str, Any], *, variant: str, gpu_count: int
+) -> None:
+    for key, expected in (
+        ("gpu_selection_schema_version", 2),
+        ("gpu_selection_method", "dynamic_idle_discovery"),
+        ("gpu_inventory_scope", "all_nvidia_gpus"),
+    ):
+        _exact(manifest.get(key), expected, label=f"{variant} manifest {key}")
+    inventory_time = _utc_timestamp(
+        manifest.get("inventory_snapshot_completed_at_utc"),
+        label=f"{variant} inventory completion timestamp",
+    )
+    final_probe_time = _utc_timestamp(
+        manifest.get("final_uuid_probes_completed_at_utc"),
+        label=f"{variant} final-probe completion timestamp",
+    )
+    manifest_time = _utc_timestamp(
+        manifest.get("created_at"), label=f"{variant} manifest creation timestamp"
+    )
+    if not inventory_time <= final_probe_time <= manifest_time:
+        raise HealthPanelValidationError(
+            f"{variant} GPU-probe/manifest timestamps are out of order"
+        )
+    selected = manifest.get("cuda_visible_device_uuids")
+    if (
+        not isinstance(selected, list)
+        or len(selected) != gpu_count
+        or any(
+            not isinstance(uuid, str) or not uuid.startswith("GPU-") or "," in uuid
+            for uuid in selected
+        )
+        or len(set(selected)) != gpu_count
+    ):
+        raise HealthPanelValidationError(
+            f"{variant} selected GPU UUID contract is invalid"
+        )
+    inventory_raw = manifest.get("gpu_inventory_at_selection")
+    initial_raw = manifest.get("initially_selected_gpu_states")
+    final_raw = manifest.get("gpu_states_at_final_uuid_probe")
+    if not isinstance(inventory_raw, list) or not inventory_raw:
+        raise HealthPanelValidationError(f"{variant} GPU inventory is invalid")
+    if not isinstance(initial_raw, list) or len(initial_raw) != gpu_count:
+        raise HealthPanelValidationError(
+            f"{variant} initial GPU selection is incomplete"
+        )
+    if not isinstance(final_raw, list) or len(final_raw) != gpu_count:
+        raise HealthPanelValidationError(f"{variant} final GPU probe is incomplete")
+    inventory = [
+        _gpu_state(value, label=f"{variant} inventory GPU {index}")
+        for index, value in enumerate(inventory_raw)
+    ]
+    initial = [
+        _gpu_state(value, label=f"{variant} initial GPU {index}")
+        for index, value in enumerate(initial_raw)
+    ]
+    final = [
+        _gpu_state(value, label=f"{variant} final GPU {index}")
+        for index, value in enumerate(final_raw)
+    ]
+    inventory_uuids = [state["uuid"] for state in inventory]
+    inventory_indices = [state["physical_index"] for state in inventory]
+    if len(set(inventory_uuids)) != len(inventory_uuids) or len(
+        set(inventory_indices)
+    ) != len(inventory_indices):
+        raise HealthPanelValidationError(
+            f"{variant} GPU inventory identities are not unique"
+        )
+    inventory_by_uuid = {state["uuid"]: state for state in inventory}
+    if any(uuid not in inventory_by_uuid for uuid in selected):
+        raise HealthPanelValidationError(
+            f"{variant} selected UUID is absent from inventory"
+        )
+    if [state["uuid"] for state in initial] != selected:
+        raise HealthPanelValidationError(f"{variant} initial GPU UUID order is invalid")
+    if [state["uuid"] for state in final] != selected:
+        raise HealthPanelValidationError(f"{variant} final GPU UUID order is invalid")
+    if initial != [inventory_by_uuid[uuid] for uuid in selected]:
+        raise HealthPanelValidationError(
+            f"{variant} initial GPU selection differs from inventory"
+        )
+    final_indices = [state["physical_index"] for state in final]
+    if (
+        len(set(final_indices)) != gpu_count
+        or manifest.get("physical_gpu_indices") != final_indices
+    ):
+        raise HealthPanelValidationError(f"{variant} physical GPU mapping is invalid")
+    if manifest.get("logical_cuda_devices") != list(range(gpu_count)):
+        raise HealthPanelValidationError(f"{variant} logical GPU mapping is invalid")
+    for state in (*initial, *final):
+        if (
+            state["utilization_percent"] >= HEALTH_PANEL_MAX_UTILIZATION_PERCENT
+            or state["memory_total_mib"] - state["memory_used_mib"]
+            < HEALTH_PANEL_MIN_FREE_MEMORY_MIB
+            or state["compute_mode"].strip().lower() == "prohibited"
+        ):
+            raise HealthPanelValidationError(
+                f"{variant} selected GPU violates the health safety policy"
+            )
+
+
 def _require_member_contract(
     *,
     receipt_path: Path,
@@ -408,16 +588,19 @@ def _require_member_contract(
         manifest.get("gpu_safety_policy"), label=f"{variant} GPU safety policy"
     )
     expected_manifest_safety = {
-        "max_utilization_percent": launch_train_pilot.MAX_SAFE_UTILIZATION_PERCENT,
+        "max_utilization_percent": HEALTH_PANEL_MAX_UTILIZATION_PERCENT,
         "utilization_comparison": "strictly_less_than",
-        "min_free_memory_mib": launch_train_pilot.MIN_SAFE_FREE_MEMORY_MIB,
-        "active_compute_processes_allowed": False,
+        "min_free_memory_mib": HEALTH_PANEL_MIN_FREE_MEMORY_MIB,
+        "active_compute_processes_allowed": (
+            HEALTH_PANEL_ACTIVE_COMPUTE_PROCESSES_ALLOWED
+        ),
         "compute_mode_prohibited_allowed": False,
     }
     if dict(manifest_safety) != expected_manifest_safety:
         raise HealthPanelValidationError(
             f"{variant} manifest GPU safety policy is not exact"
         )
+    _require_member_gpu_evidence(manifest, variant=variant, gpu_count=gpu_count)
 
     resolved = _mapping(
         manifest.get("resolved_training_config"),

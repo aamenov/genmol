@@ -272,6 +272,7 @@ def _gpu(
     uuid: str,
     memory_used_mib: int = 1_000,
     utilization_percent: int = 2,
+    compute_mode: str = "Default",
     processes: tuple[dict[str, object], ...] = (),
 ) -> launcher.GPUState:
     return launcher.GPUState(
@@ -281,7 +282,7 @@ def _gpu(
         memory_used_mib=memory_used_mib,
         memory_total_mib=48_000,
         utilization_percent=utilization_percent,
-        compute_mode="Default",
+        compute_mode=compute_mode,
         compute_processes=processes,
     )
 
@@ -335,10 +336,11 @@ def test_gpu_request_accepts_only_a_count_capped_at_two():
         )
 
 
-def test_gpu_with_compute_process_is_not_genuinely_idle():
+def test_gpu_with_compute_process_below_utilization_threshold_is_eligible():
     state = _gpu(
         index=2,
         uuid="GPU-example",
+        utilization_percent=9,
         processes=({"pid": 123, "process_name": "python", "used_memory_mib": 900},),
     )
 
@@ -347,7 +349,41 @@ def test_gpu_with_compute_process_is_not_genuinely_idle():
         min_free_memory_mib=30_000,
     )
 
-    assert any("active compute" in reason for reason in reasons)
+    assert launcher.ACTIVE_COMPUTE_PROCESSES_ALLOWED is True
+    assert reasons == []
+    assert launcher.select_idle_gpus(
+        [state],
+        gpu_count=1,
+        max_utilization_percent=10,
+        min_free_memory_mib=30_000,
+    ) == (state,)
+    assert state.compute_processes[0]["pid"] == 123
+
+
+@pytest.mark.parametrize(
+    ("state", "reason_fragment"),
+    [
+        (
+            _gpu(index=2, uuid="GPU-at-threshold", utilization_percent=10),
+            "utilization 10% is not below 10%",
+        ),
+        (
+            _gpu(index=2, uuid="GPU-low-free", memory_used_mib=18_001),
+            "free memory 29999 MiB is below 30000 MiB",
+        ),
+        (
+            _gpu(index=2, uuid="GPU-prohibited", compute_mode="Prohibited"),
+            "compute mode is prohibited",
+        ),
+    ],
+)
+def test_gpu_eligibility_retains_strict_utilization_memory_and_mode_guards(
+    state, reason_fragment
+):
+    assert reason_fragment in state.rejection_reasons(
+        max_utilization_percent=10,
+        min_free_memory_mib=30_000,
+    )
 
 
 def test_full_inventory_probe_records_uuid_telemetry_and_processes(monkeypatch):
@@ -456,7 +492,24 @@ def test_final_probe_addresses_exact_selected_uuids(monkeypatch):
     monkeypatch.setattr(
         launcher,
         "probe_gpu_uuid",
-        lambda uuid: _gpu(index=2, uuid=uuid, processes=({"pid": 99},)),
+        lambda uuid: _gpu(
+            index=2,
+            uuid=uuid,
+            utilization_percent=9,
+            processes=({"pid": 99},),
+        ),
+    )
+    shared = launcher.reprobe_selected_gpus(
+        (initial[0],),
+        max_utilization_percent=10,
+        min_free_memory_mib=30_000,
+    )
+    assert shared[0].compute_processes == ({"pid": 99},)
+
+    monkeypatch.setattr(
+        launcher,
+        "probe_gpu_uuid",
+        lambda uuid: _gpu(index=2, uuid=uuid, utilization_percent=10),
     )
     with pytest.raises(RuntimeError, match="final idle probe"):
         launcher.reprobe_selected_gpus(
@@ -918,6 +971,14 @@ def test_matched_panel_digest_masks_only_registered_treatment_and_run_path(
             ),
             "scope": "retrospective_training_only_engineering_selection",
         }
+        assert spec["common_gpu_safety_policy"] == {
+            "max_utilization_percent": 10,
+            "utilization_comparison": "strictly_less_than",
+            "min_free_memory_mib": 30_000,
+            "active_compute_processes_allowed": True,
+            "compute_mode_prohibited_allowed": False,
+            "physical_gpu_identity_is_per_run_provenance": True,
+        }
         panel_digests.append(panel_digest)
 
     assert len(set(common_digests)) == 1
@@ -1100,7 +1161,13 @@ def _write_successful_predecessor(
             "memory_total_mib": 48_000,
             "utilization_percent": 2,
             "compute_mode": "Default",
-            "compute_processes": [],
+            "compute_processes": [
+                {
+                    "pid": 7_000 + index,
+                    "process_name": "/other/user/python",
+                    "used_memory_mib": 256,
+                }
+            ],
         }
         for index, uuid in enumerate(selected_uuids)
     ]
@@ -1178,7 +1245,9 @@ def _write_successful_predecessor(
             "max_utilization_percent": 10,
             "utilization_comparison": "strictly_less_than",
             "min_free_memory_mib": 30_000,
-            "active_compute_processes_allowed": False,
+            "active_compute_processes_allowed": (
+                launcher.ACTIVE_COMPUTE_PROCESSES_ALLOWED
+            ),
             "compute_mode_prohibited_allowed": False,
         },
         "training_argv": training_argv,
@@ -3370,6 +3439,13 @@ def test_main_keeps_final_uuid_probe_adjacent_to_tmux_spawn(monkeypatch, tmp_pat
                 "explicit_genesis_no_predecessor"
             )
             assert manifest["cuda_visible_device_uuids"] == ["GPU-idle"]
+            assert manifest["gpu_safety_policy"] == {
+                "max_utilization_percent": 10,
+                "utilization_comparison": "strictly_less_than",
+                "min_free_memory_mib": 30_000,
+                "active_compute_processes_allowed": True,
+                "compute_mode_prohibited_allowed": False,
+            }
             assert manifest["matched_panel_spec"]["execution"]["mode"] == (
                 "single_job_lease_with_machine_enforced_predecessor_receipt_chain"
             )

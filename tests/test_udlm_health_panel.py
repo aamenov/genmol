@@ -202,8 +202,27 @@ def _write_member(
         overrides=training_argv[5:],
         gpu_count=gpu_count,
     )
+    gpu_states = [
+        {
+            "physical_index": 4 + gpu_index,
+            "uuid": f"GPU-health-{position}-{gpu_index}",
+            "name": "Synthetic Accelerator",
+            "memory_used_mib": 1_000,
+            "memory_total_mib": 81_920,
+            "utilization_percent": 9,
+            "compute_mode": "Default",
+            "compute_processes": [
+                {
+                    "pid": 4_000 + position * 10 + gpu_index,
+                    "process_name": "pre-existing-workload",
+                    "used_memory_mib": 512,
+                }
+            ],
+        }
+        for gpu_index in range(gpu_count)
+    ]
     manifest = {
-        "created_at": f"2026-09-06T00:{position * 10:02d}:00+00:00",
+        "created_at": f"2026-09-06T00:{position * 10:02d}:03+00:00",
         "git_sha": SOURCE_REVISION,
         "source_revision_before_final_gpu_probe": SOURCE_REVISION,
         "run_name": run_name,
@@ -216,11 +235,26 @@ def _write_member(
         "matched_panel_variant_position": position,
         "predecessor_receipt_binding": copy.deepcopy(binding),
         "user_requested_gpu_count": gpu_count,
+        "gpu_selection_schema_version": 2,
+        "gpu_selection_method": "dynamic_idle_discovery",
+        "gpu_inventory_scope": "all_nvidia_gpus",
+        "inventory_snapshot_completed_at_utc": (
+            f"2026-09-06T00:{position * 10:02d}:01+00:00"
+        ),
+        "gpu_inventory_at_selection": copy.deepcopy(gpu_states),
+        "initially_selected_gpu_states": copy.deepcopy(gpu_states),
+        "logical_cuda_devices": list(range(gpu_count)),
+        "physical_gpu_indices": [state["physical_index"] for state in gpu_states],
+        "cuda_visible_device_uuids": [state["uuid"] for state in gpu_states],
+        "final_uuid_probes_completed_at_utc": (
+            f"2026-09-06T00:{position * 10:02d}:02+00:00"
+        ),
+        "gpu_states_at_final_uuid_probe": copy.deepcopy(gpu_states),
         "gpu_safety_policy": {
             "max_utilization_percent": 10,
             "utilization_comparison": "strictly_less_than",
             "min_free_memory_mib": 30_000,
-            "active_compute_processes_allowed": False,
+            "active_compute_processes_allowed": True,
             "compute_mode_prohibited_allowed": False,
         },
         "training_argv": training_argv,
@@ -494,6 +528,12 @@ def test_validate_health_panel_normalizes_exact_ordered_evidence(
     )
     assert json.loads(json.dumps(result, allow_nan=False)) == result
     assert health.validate_health_panel(health_panel["terminal_path"]) == result
+    for member in health_panel["members"]:
+        state = member["manifest"]["gpu_states_at_final_uuid_probe"][0]
+        assert state["utilization_percent"] == 9
+        assert state["compute_processes"][0]["process_name"] == (
+            "pre-existing-workload"
+        )
 
 
 @pytest.mark.parametrize("health_panel", [2], indirect=True)
@@ -556,6 +596,103 @@ def test_health_panel_rejects_safety_and_audit_mutations(
     with pytest.raises(
         health.HealthPanelValidationError, match="exact registered ten-update"
     ):
+        health.validate_health_panel(health_panel["terminal_path"])
+
+
+def test_health_threshold_contract_is_independent_of_launcher_default_drift(
+    health_panel: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(launch_train_pilot, "MAX_SAFE_UTILIZATION_PERCENT", 99)
+    monkeypatch.setattr(launch_train_pilot, "MIN_SAFE_FREE_MEMORY_MIB", 1)
+
+    result = health.validate_health_panel(health_panel["terminal_path"])
+
+    assert result["status"] == "validated"
+    assert health.HEALTH_PANEL_MAX_UTILIZATION_PERCENT == 10
+    assert health.HEALTH_PANEL_MIN_FREE_MEMORY_MIB == 30_000
+
+
+def test_health_panel_rejects_legacy_zero_process_manifest_policy(
+    health_panel: dict[str, object],
+) -> None:
+    terminal = health_panel["members"][-1]
+    terminal["manifest"]["gpu_safety_policy"]["active_compute_processes_allowed"] = (
+        False
+    )
+    _rewrite_manifest(terminal)
+
+    with pytest.raises(
+        health.HealthPanelValidationError, match="GPU safety policy is not exact"
+    ):
+        health.validate_health_panel(health_panel["terminal_path"])
+
+
+def _set_health_gpu_state_fields(manifest: dict[str, object], **updates) -> None:
+    for field in (
+        "gpu_inventory_at_selection",
+        "initially_selected_gpu_states",
+        "gpu_states_at_final_uuid_probe",
+    ):
+        manifest[field][0].update(copy.deepcopy(updates))
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"utilization_percent": 10},
+        {"memory_used_mib": 51_921},
+        {"compute_mode": "Prohibited"},
+    ],
+)
+def test_health_panel_rejects_unsafe_selected_gpu_state(
+    health_panel: dict[str, object], updates: dict[str, object]
+) -> None:
+    terminal = health_panel["members"][-1]
+    _set_health_gpu_state_fields(terminal["manifest"], **updates)
+    _rewrite_manifest(terminal)
+
+    with pytest.raises(
+        health.HealthPanelValidationError,
+        match="violates the health safety policy",
+    ):
+        health.validate_health_panel(health_panel["terminal_path"])
+
+
+def test_health_panel_rejects_sparse_process_evidence(
+    health_panel: dict[str, object],
+) -> None:
+    terminal = health_panel["members"][-1]
+    _set_health_gpu_state_fields(
+        terminal["manifest"],
+        compute_processes=[{"pid": 4321, "process_name": "missing-memory-field"}],
+    )
+    _rewrite_manifest(terminal)
+
+    with pytest.raises(
+        health.HealthPanelValidationError, match="process 0 fields are not exact"
+    ):
+        health.validate_health_panel(health_panel["terminal_path"])
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("inventory_snapshot_completed_at_utc", None, "must be a nonempty UTC"),
+        (
+            "final_uuid_probes_completed_at_utc",
+            "2026-09-06T00:00:00+00:00",
+            "timestamps are out of order",
+        ),
+    ],
+)
+def test_health_panel_rejects_missing_or_reversed_gpu_probe_timestamps(
+    health_panel: dict[str, object], field: str, value: object, error: str
+) -> None:
+    terminal = health_panel["members"][-1]
+    terminal["manifest"][field] = value
+    _rewrite_manifest(terminal)
+
+    with pytest.raises(health.HealthPanelValidationError, match=error):
         health.validate_health_panel(health_panel["terminal_path"])
 
 

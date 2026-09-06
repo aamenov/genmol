@@ -977,6 +977,9 @@ def _make_attempt(
     correct: list[int],
     gradients_pass: bool = True,
     scheduler_dependency: dict[str, Any] | None = None,
+    gpu_state_updates: Mapping[str, Any] | None = None,
+    gpu_policy_updates: Mapping[str, Any] | None = None,
+    gpu_timestamp_updates: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     assert harness.registry is not None
     stage = screen._stage(harness.registry, stage_id)
@@ -1020,10 +1023,41 @@ def _make_attempt(
         "ema_reset": True,
         "state_audit": state_audit,
     }
+    gpu_state = {
+        "physical_index": 7,
+        "uuid": "GPU-test-idle-1",
+        "name": "Synthetic Accelerator",
+        "memory_used_mib": 1_000,
+        "memory_total_mib": 81_920,
+        "utilization_percent": 0,
+        "compute_mode": "Default",
+        "compute_processes": [],
+    }
+    if gpu_state_updates is not None:
+        gpu_state.update(copy.deepcopy(dict(gpu_state_updates)))
+    gpu_policy = {
+        "max_utilization_percent": 10,
+        "utilization_comparison": "strictly_less_than",
+        "min_free_memory_mib": 30_000,
+        "active_compute_processes_allowed": True,
+        "compute_mode_prohibited_allowed": False,
+    }
+    if gpu_policy_updates is not None:
+        gpu_policy.update(copy.deepcopy(dict(gpu_policy_updates)))
+    gpu_timestamps = {
+        "created_at": "2026-09-06T00:00:03+00:00",
+        "inventory_snapshot_completed_at_utc": "2026-09-06T00:00:01+00:00",
+        "final_uuid_probes_completed_at_utc": "2026-09-06T00:00:02+00:00",
+    }
+    if gpu_timestamp_updates is not None:
+        gpu_timestamps.update(copy.deepcopy(dict(gpu_timestamp_updates)))
     manifest = {
+        **gpu_timestamps,
         "launch_manifest_schema_version": 2,
         "purpose": "registered UDLM optimization screen",
+        "gpu_selection_schema_version": 2,
         "git_sha": source_revision,
+        "source_revision_before_final_gpu_probe": source_revision,
         "optimization_screen": screen._screen_binding(
             harness.registry,
             stage_id=stage_id,
@@ -1035,7 +1069,15 @@ def _make_attempt(
         "udlm_prior_variant": "empirical_frequency",
         "resolved_training_config_sha256": config_entry["config"]["canonical_sha256"],
         "user_requested_gpu_count": 1,
+        "gpu_selection_method": "dynamic_idle_discovery",
+        "gpu_inventory_scope": "all_nvidia_gpus",
+        "gpu_inventory_at_selection": [copy.deepcopy(gpu_state)],
+        "initially_selected_gpu_states": [copy.deepcopy(gpu_state)],
+        "logical_cuda_devices": [0],
+        "physical_gpu_indices": [gpu_state["physical_index"]],
         "cuda_visible_device_uuids": ["GPU-test-idle-1"],
+        "gpu_states_at_final_uuid_probe": [copy.deepcopy(gpu_state)],
+        "gpu_safety_policy": gpu_policy,
     }
     manifest_ref = _artifact_json(
         harness, output_directory, "launch_manifest", manifest, 2
@@ -1200,6 +1242,9 @@ def _scheduler_evidence(
     *,
     control_losses: list[float] | None = None,
     candidate_losses: list[float] | None = None,
+    gpu_state_updates: Mapping[str, Any] | None = None,
+    gpu_policy_updates: Mapping[str, Any] | None = None,
+    gpu_timestamp_updates: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     assert harness.registry is not None
     collector = next(
@@ -1228,6 +1273,9 @@ def _scheduler_evidence(
                 source_revision=PUBLICATION_REVISION,
                 losses=control_losses or [100.0, 100.0, 100.0],
                 correct=[8000, 8000, 8000],
+                gpu_state_updates=gpu_state_updates,
+                gpu_policy_updates=gpu_policy_updates,
+                gpu_timestamp_updates=gpu_timestamp_updates,
             ),
             _make_attempt(
                 harness,
@@ -1237,6 +1285,9 @@ def _scheduler_evidence(
                 source_revision=PUBLICATION_REVISION,
                 losses=candidate_losses or [98.0, 98.0, 98.0],
                 correct=[8000, 8000, 8000],
+                gpu_state_updates=gpu_state_updates,
+                gpu_policy_updates=gpu_policy_updates,
+                gpu_timestamp_updates=gpu_timestamp_updates,
             ),
         ],
     }
@@ -1466,6 +1517,123 @@ def test_registry_and_scheduler_happy_path_select_candidate() -> None:
     assert decision["status"] == "completed"
     assert decision["selected_arm_id"] == "E-L1"
     assert decision["complete_threshold_fallback_used"] is False
+
+
+def test_screen_gpu_policy_accepts_recorded_process_below_ten_percent() -> None:
+    harness = build_harness()
+    evidence = _scheduler_evidence(
+        harness,
+        gpu_state_updates={
+            "utilization_percent": 9,
+            "compute_processes": [
+                {
+                    "pid": 4321,
+                    "process_name": "pre-existing-workload",
+                    "used_memory_mib": 512,
+                }
+            ],
+        },
+    )
+
+    decision = _evaluate(harness, evidence, "scheduler")
+
+    assert decision["status"] == "completed"
+    assert decision["selected_arm_id"] == "E-L1"
+
+
+def test_screen_gpu_policy_accepts_stricter_recorded_thresholds_round_trip() -> None:
+    harness = build_harness()
+    evidence = _scheduler_evidence(
+        harness,
+        gpu_state_updates={"utilization_percent": 4},
+        gpu_policy_updates={
+            "max_utilization_percent": 5,
+            "min_free_memory_mib": 40_000,
+        },
+    )
+
+    decision = _evaluate(harness, evidence, "scheduler")
+
+    assert decision["status"] == "completed"
+    assert decision["selected_arm_id"] == "E-L1"
+
+
+@pytest.mark.parametrize(
+    "gpu_state_updates",
+    [
+        {"utilization_percent": 10},
+        {"memory_used_mib": 51_921},
+        {"compute_mode": "Prohibited"},
+    ],
+)
+def test_screen_gpu_policy_rejects_unsafe_selected_state(
+    gpu_state_updates: dict[str, Any],
+) -> None:
+    harness = build_harness()
+    evidence = _scheduler_evidence(harness, gpu_state_updates=gpu_state_updates)
+
+    decision = _evaluate(harness, evidence, "scheduler")
+
+    assert decision["status"] == "incomplete"
+    assert decision["selected_arm_id"] is None
+    assert decision["reason_codes"] == ["evidence_invalid_or_unmatched"]
+
+
+def test_screen_gpu_policy_rejects_sparse_process_evidence() -> None:
+    harness = build_harness()
+    evidence = _scheduler_evidence(
+        harness,
+        gpu_state_updates={
+            "utilization_percent": 9,
+            "compute_processes": [
+                {"pid": 4321, "process_name": "missing-memory-field"}
+            ],
+        },
+    )
+
+    decision = _evaluate(harness, evidence, "scheduler")
+
+    assert decision["status"] == "incomplete"
+    assert decision["selected_arm_id"] is None
+
+
+@pytest.mark.parametrize(
+    "gpu_policy_updates",
+    [
+        {"max_utilization_percent": 11},
+        {"min_free_memory_mib": 29_999},
+        {"active_compute_processes_allowed": False},
+    ],
+)
+def test_screen_gpu_policy_rejects_out_of_bounds_policy(
+    gpu_policy_updates: dict[str, Any],
+) -> None:
+    harness = build_harness()
+    evidence = _scheduler_evidence(harness, gpu_policy_updates=gpu_policy_updates)
+
+    decision = _evaluate(harness, evidence, "scheduler")
+
+    assert decision["status"] == "incomplete"
+    assert decision["selected_arm_id"] is None
+
+
+@pytest.mark.parametrize(
+    "gpu_timestamp_updates",
+    [
+        {"inventory_snapshot_completed_at_utc": None},
+        {"final_uuid_probes_completed_at_utc": "2026-09-06T00:00:00+00:00"},
+    ],
+)
+def test_screen_gpu_policy_rejects_missing_or_reversed_probe_timestamps(
+    gpu_timestamp_updates: dict[str, Any],
+) -> None:
+    harness = build_harness()
+    evidence = _scheduler_evidence(harness, gpu_timestamp_updates=gpu_timestamp_updates)
+
+    decision = _evaluate(harness, evidence, "scheduler")
+
+    assert decision["status"] == "incomplete"
+    assert decision["selected_arm_id"] is None
 
 
 def test_complete_scheduler_threshold_miss_selects_registered_control() -> None:
@@ -2130,6 +2298,7 @@ def test_verifier_has_only_standard_library_imports_and_no_gpu_probe() -> None:
         "collections",
         "copy",
         "dataclasses",
+        "datetime",
         "decimal",
         "fractions",
         "hashlib",

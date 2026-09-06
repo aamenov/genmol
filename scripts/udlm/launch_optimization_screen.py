@@ -633,7 +633,9 @@ def _launch_locked_screen(
             "max_utilization_percent": max_utilization_percent,
             "utilization_comparison": "strictly_less_than",
             "min_free_memory_mib": min_free_memory_mib,
-            "active_compute_processes_allowed": False,
+            "active_compute_processes_allowed": (
+                pilot.ACTIVE_COMPUTE_PROCESSES_ALLOWED
+            ),
             "compute_mode_prohibited_allowed": False,
         },
         "training_argv": plan.command,

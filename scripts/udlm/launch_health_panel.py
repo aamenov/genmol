@@ -21,8 +21,10 @@ from scripts.udlm import launch_train_pilot
 from scripts.udlm.validate_health_panel import (
     EXPECTED_MDLM_CHECKPOINT_PATH,
     HEALTH_PANEL_GLOBAL_BATCH_SIZE,
+    HEALTH_PANEL_MAX_UTILIZATION_PERCENT,
     HEALTH_PANEL_MAX_STEPS,
     HEALTH_PANEL_MICRO_BATCH_SIZE,
+    HEALTH_PANEL_MIN_FREE_MEMORY_MIB,
     HEALTH_PANEL_NUM_WORKERS,
     HEALTH_PANEL_SEED,
     health_run_name,
@@ -148,9 +150,9 @@ def _pilot_argv(
         "--checkpoint",
         str(EXPECTED_MDLM_CHECKPOINT_PATH),
         "--max-utilization-percent",
-        str(launch_train_pilot.MAX_SAFE_UTILIZATION_PERCENT),
+        str(HEALTH_PANEL_MAX_UTILIZATION_PERCENT),
         "--min-free-memory-mib",
-        str(launch_train_pilot.MIN_SAFE_FREE_MEMORY_MIB),
+        str(HEALTH_PANEL_MIN_FREE_MEMORY_MIB),
     ]
     if predecessor_receipt is None:
         argv.append("--genesis")

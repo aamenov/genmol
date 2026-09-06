@@ -399,7 +399,7 @@ def _write_r_predecessor_chain(
             "max_utilization_percent": 10,
             "utilization_comparison": "strictly_less_than",
             "min_free_memory_mib": 30000,
-            "active_compute_processes_allowed": False,
+            "active_compute_processes_allowed": True,
             "compute_mode_prohibited_allowed": False,
         },
         "training_argv": manifest_training_argv,
@@ -846,7 +846,7 @@ def _write_valid_training_evidence(
             "max_utilization_percent": 10,
             "utilization_comparison": "strictly_less_than",
             "min_free_memory_mib": 30000,
-            "active_compute_processes_allowed": False,
+            "active_compute_processes_allowed": True,
             "compute_mode_prohibited_allowed": False,
             "physical_gpu_identity_is_per_run_provenance": True,
         },
@@ -920,7 +920,7 @@ def _write_valid_training_evidence(
             "max_utilization_percent": 10,
             "utilization_comparison": "strictly_less_than",
             "min_free_memory_mib": 30000,
-            "active_compute_processes_allowed": False,
+            "active_compute_processes_allowed": True,
             "compute_mode_prohibited_allowed": False,
         },
         "training_argv": manifest_training_argv,
@@ -3628,6 +3628,107 @@ def test_training_summary_and_exit_receipt_are_joined_to_lock(
         gate.validate_training_evidence(normalized)
 
 
+def _set_manifest_gpu_state_fields(manifest, **updates):
+    for field in (
+        "gpu_inventory_at_selection",
+        "initially_selected_gpu_states",
+        "gpu_states_at_final_uuid_probe",
+    ):
+        manifest[field][0].update(copy.deepcopy(updates))
+
+
+def _set_manifest_initial_gpu_state_fields(manifest, **updates):
+    for field in ("gpu_inventory_at_selection", "initially_selected_gpu_states"):
+        manifest[field][0].update(copy.deepcopy(updates))
+
+
+def test_gate_accepts_recorded_process_below_utilization_threshold(
+    tmp_path, monkeypatch, protocol
+):
+    monkeypatch.setattr(gate, "REPOSITORY_ROOT", tmp_path)
+    candidate_lock = _candidate_lock()
+    process = {
+        "pid": 4321,
+        "process_name": "pre-existing-workload",
+        "used_memory_mib": 512,
+    }
+    _write_valid_training_evidence(
+        tmp_path,
+        candidate_lock,
+        mutate_manifest=lambda value: _set_manifest_gpu_state_fields(
+            value,
+            utilization_percent=9,
+            compute_processes=[process],
+        ),
+    )
+    normalized = gate.validate_candidate_lock(candidate_lock, protocol)
+
+    evidence = gate.validate_training_evidence(normalized)
+
+    assert evidence["successful_exit_receipt"] is True
+    assert evidence["selected_gpu_uuids"] == ["GPU-synthetic-0001"]
+
+
+def test_gate_rejects_sparse_recorded_process_evidence(tmp_path, monkeypatch, protocol):
+    monkeypatch.setattr(gate, "REPOSITORY_ROOT", tmp_path)
+    candidate_lock = _candidate_lock()
+    _write_valid_training_evidence(
+        tmp_path,
+        candidate_lock,
+        mutate_manifest=lambda value: _set_manifest_gpu_state_fields(
+            value,
+            utilization_percent=9,
+            compute_processes=[{"pid": 4321, "process_name": "missing-memory-field"}],
+        ),
+    )
+    normalized = gate.validate_candidate_lock(candidate_lock, protocol)
+
+    with pytest.raises(gate.GateValidationError, match="compute_processes.*fields"):
+        gate.validate_training_evidence(normalized)
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"utilization_percent": 10},
+        {"memory_used_mib": 51_921},
+        {"compute_mode": "Prohibited"},
+    ],
+)
+def test_gate_still_rejects_unsafe_final_gpu_state(
+    tmp_path, monkeypatch, protocol, updates
+):
+    monkeypatch.setattr(gate, "REPOSITORY_ROOT", tmp_path)
+    candidate_lock = _candidate_lock()
+    _write_valid_training_evidence(
+        tmp_path,
+        candidate_lock,
+        mutate_manifest=lambda value: _set_manifest_gpu_state_fields(value, **updates),
+    )
+    normalized = gate.validate_candidate_lock(candidate_lock, protocol)
+
+    with pytest.raises(gate.GateValidationError, match="violates safety policy"):
+        gate.validate_training_evidence(normalized)
+
+
+def test_gate_rejects_unsafe_initial_state_even_when_final_probe_is_safe(
+    tmp_path, monkeypatch, protocol
+):
+    monkeypatch.setattr(gate, "REPOSITORY_ROOT", tmp_path)
+    candidate_lock = _candidate_lock()
+    _write_valid_training_evidence(
+        tmp_path,
+        candidate_lock,
+        mutate_manifest=lambda value: _set_manifest_initial_gpu_state_fields(
+            value, utilization_percent=10
+        ),
+    )
+    normalized = gate.validate_candidate_lock(candidate_lock, protocol)
+
+    with pytest.raises(gate.GateValidationError, match="violates safety policy"):
+        gate.validate_training_evidence(normalized)
+
+
 def test_gate_accepts_either_fixed_reviewed_venv_path(tmp_path, monkeypatch, protocol):
     monkeypatch.setattr(gate, "REPOSITORY_ROOT", tmp_path)
     candidate_lock = _candidate_lock()
@@ -3689,6 +3790,13 @@ def test_gate_stream_verifies_the_live_training_checkpoint(
             "manifest_unsafe_gpu_threshold",
             lambda document: document["gpu_safety_policy"].__setitem__(
                 "max_utilization_percent", 99
+            ),
+            "GPU safety policy is unexpected",
+        ),
+        (
+            "manifest_legacy_zero_process_policy",
+            lambda document: document["gpu_safety_policy"].__setitem__(
+                "active_compute_processes_allowed", False
             ),
             "GPU safety policy is unexpected",
         ),

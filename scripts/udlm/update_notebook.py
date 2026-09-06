@@ -219,8 +219,8 @@ assert GENMOL_SOURCE_PATH.is_relative_to(PROJECT_SOURCE_ROOT), (
     f'{PROJECT_SOURCE_ROOT}.'
 )
 
-MAX_IDLE_MEMORY_MIB = 100
-MAX_IDLE_UTILIZATION_PERCENT = 5
+MIN_IDLE_FREE_MEMORY_MIB = 30000
+MAX_IDLE_UTILIZATION_PERCENT = 10
 
 preexisting_visibility = os.environ.get('CUDA_VISIBLE_DEVICES')
 assert preexisting_visibility in (None, ''), (
@@ -278,7 +278,7 @@ def probe_physical_gpu(gpu_id: int) -> dict:
     gpu = {'index': gpu_id, 'eligible': False, 'reasons': []}
     status = _run_nvidia_smi(
         gpu_id,
-        '--query-gpu=index,uuid,name,memory.used,utilization.gpu,compute_mode',
+        '--query-gpu=index,uuid,name,memory.free,utilization.gpu,compute_mode',
     )
     if status.returncode != 0 or status.stderr.strip():
         gpu['reasons'].append(f'status query failed: {_failure_text(status)}')
@@ -296,7 +296,7 @@ def probe_physical_gpu(gpu_id: int) -> dict:
     index_text, uuid, name, memory_text, utilization_text, compute_mode = rows[0]
     try:
         reported_index = int(index_text)
-        memory_mib = int(memory_text)
+        free_memory_mib = int(memory_text)
         utilization_percent = int(utilization_text)
     except ValueError:
         gpu['reasons'].append('status query contained an N/A or non-numeric field')
@@ -309,7 +309,7 @@ def probe_physical_gpu(gpu_id: int) -> dict:
         {
             'uuid': uuid,
             'name': name,
-            'memory_mib': memory_mib,
+            'free_memory_mib': free_memory_mib,
             'utilization_percent': utilization_percent,
             'compute_mode': compute_mode,
         }
@@ -334,15 +334,14 @@ def probe_physical_gpu(gpu_id: int) -> dict:
         process_rows.append({'pid': int(fields[0]), 'used_memory': fields[1]})
 
     gpu['compute_process_count'] = len(process_rows)
-    if process_rows:
-        gpu['reasons'].append(f'{len(process_rows)} active compute process(es)')
-    if memory_mib > MAX_IDLE_MEMORY_MIB:
+    gpu['compute_processes'] = process_rows
+    if free_memory_mib < MIN_IDLE_FREE_MEMORY_MIB:
         gpu['reasons'].append(
-            f'{memory_mib} MiB used exceeds {MAX_IDLE_MEMORY_MIB} MiB'
+            f'{free_memory_mib} MiB free is below {MIN_IDLE_FREE_MEMORY_MIB} MiB'
         )
-    if utilization_percent > MAX_IDLE_UTILIZATION_PERCENT:
+    if utilization_percent >= MAX_IDLE_UTILIZATION_PERCENT:
         gpu['reasons'].append(
-            f'{utilization_percent}% utilization exceeds '
+            f'{utilization_percent}% utilization is not below '
             f'{MAX_IDLE_UTILIZATION_PERCENT}%'
         )
     if compute_mode.lower() == 'prohibited':
@@ -357,7 +356,7 @@ def print_gpu_snapshot(snapshot: list[dict]) -> None:
     for gpu in snapshot:
         if 'name' in gpu:
             details = (
-                f"{gpu['name']}, {gpu['memory_mib']} MiB, "
+                f"{gpu['name']}, {gpu['free_memory_mib']} MiB free, "
                 f"{gpu['utilization_percent']}%, "
                 f"compute_processes={gpu.get('compute_process_count', '?')}"
             )
@@ -381,7 +380,7 @@ def select_idle_gpus(num_gpus: int) -> list[dict]:
     eligible = sorted(
         (gpu for gpu in snapshot if gpu['eligible']),
         key=lambda gpu: (
-            gpu['memory_mib'],
+            -gpu['free_memory_mib'],
             gpu['utilization_percent'],
             gpu['index'],
         ),
@@ -400,6 +399,20 @@ def select_idle_gpus(num_gpus: int) -> list[dict]:
         details = {gpu['index']: gpu['reasons'] for gpu in changed}
         raise RuntimeError(
             f'A selected GPU changed state during validation: {details}. '
+            'Restart the kernel and run again.'
+        )
+    identity_changes = [
+        {
+            'physical_index': initial['index'],
+            'initial_uuid': initial['uuid'],
+            'final_uuid': final['uuid'],
+        }
+        for initial, final in zip(selected, rechecked, strict=True)
+        if final['uuid'] != initial['uuid']
+    ]
+    if identity_changes:
+        raise RuntimeError(
+            f'A selected physical GPU changed UUID: {identity_changes}. '
             'Restart the kernel and run again.'
         )
 
@@ -1123,8 +1136,11 @@ $W$ is a world size, not a physical device ID. Before any GPU query, the
 launcher must exclusively acquire the repository-global single-training-job
 lease. It then scans every NVIDIA device, chooses an ordered UUID tuple
 $U=(u_1,\ldots,u_W)$, and re-probes exactly those UUIDs immediately before
-launch. Each final record $f_i$ must have utilization below 10%, at least
-30,000 MiB free, no compute process, and non-prohibited compute mode. Thus
+launch. Each final record $f_i$ must have utilization strictly below 10%, at
+least 30,000 MiB free, and non-prohibited compute mode. Active compute
+processes are recorded as evidence but do not disqualify an otherwise eligible
+device under the user's utilization-based idle definition; the launcher never
+interrupts or kills them. Thus
 $|U|=W$, the UUID order in the final telemetry is exactly $U$, and only one
 reviewed pilot may hold the lease.
 
@@ -1162,8 +1178,9 @@ warm start from `outputs/paper_v1/checkpoints/50000.ckpt`, whose size is
 `8d00aa47b02f64bf39ff6b0b2e786f213587366fc2c3d29712a00f3f84108dd6`.
 For per-process microbatch $m=2$, accumulation is $a_1=8$ or $a_2=4$, so
 $B_{\mathrm{eff}}=Wma_W=16$ for either supported world size. The wrapper fixes
-utilization strictly below 10%, at least 30,000 MiB free, zero compute
-processes, and non-prohibited compute mode.
+utilization strictly below 10%, at least 30,000 MiB free, and non-prohibited
+compute mode. It records active compute processes without using their presence
+as a rejection criterion and never interrupts or kills them.
 
 Let $H$ be the full clean pushed 40-character source revision. The deterministic
 run names are `health-w{W}-r-{H}`, `health-w{W}-s-{H}`, and
@@ -1687,7 +1704,7 @@ stage20_future_pilot_plan = {{
             "max_utilization_percent": 10,
             "utilization_comparison": "strictly_less_than",
             "min_free_memory_mib": 30000,
-            "active_compute_processes_allowed": False,
+            "active_compute_processes_allowed": True,
             "compute_mode_prohibited_allowed": False,
         }},
         "purpose": "health_and_provenance_only",
@@ -2862,7 +2879,8 @@ def _update_stage0(notebook: dict) -> None:
 ## Goal and scientific context
 
 Before chemistry or diffusion, we need a reproducible process that uses only
-GPUs which appear unused. Stage 0 discovers the active Git worktree, verifies
+GPUs eligible under the user-authorized utilization policy. Stage 0 discovers
+the active Git worktree, verifies
 that imports come from its `src/` directory, locates the shared project virtual
 environment, records source provenance, and establishes device visibility and
 random seeds.
@@ -2874,9 +2892,9 @@ random seeds.
   global batch size of 2,048 and 50,000 optimizer steps.
 - **Released repository:** the trainer uses the CUDA devices visible to the
   process. It does not define this notebook's shared-server eligibility guard.
-- **Notebook-only safety:** the notebook checks process count, memory,
-  utilization, and compute mode before exposing devices. This local guard is
-  not an algorithm from the paper.
+- **Notebook-only safety:** the notebook records process count and checks
+  utilization, free memory, and compute mode before exposing devices. This
+  local guard is not an algorithm from the paper.
 
 An A6000 is not computationally equivalent to an A100. Matching the GPU count
 does not reproduce the paper's wall-clock time. This project lets the user
@@ -2920,16 +2938,19 @@ assumption about physical GPU 0 is encoded. Every discovered card is queried
 independently. A card is eligible only if:
 
 - its status, physical index, and UUID can be verified;
-- it has no active compute process;
-- used memory is at most 100 MiB;
-- utilization is at most 5 percent; and
+- its process inventory can be recorded (a nonempty inventory is allowed);
+- it has at least 30,000 MiB free;
+- utilization is strictly below 10 percent; and
 - compute mode is not prohibited.
 
-For example, a card with zero compute processes and 8 MiB used can pass, while
-a card with one process is rejected even if instantaneous utilization is zero.
-Querying cards independently means a fault on one physical index does not hide
-all healthy cards. Eligible cards are ordered by memory use, utilization, and
-physical index. Caches are redirected into this worktree's `.cache` directory.
+For example, a card at 9% utilization with an active process can pass when its
+free-memory and compute-mode checks also pass, while a card at exactly 10% is
+rejected. Process evidence is observational: the notebook never interrupts or
+kills another process. Querying cards independently means a fault on one
+physical index does not hide all healthy cards. Eligible cards are ordered by
+free memory (most first), utilization, and physical index; the immediate
+re-probe must retain each selected card's exact UUID. Caches are redirected into
+this worktree's `.cache` directory.
 
 Expected output includes the dynamic root, virtual environment, resolved
 `genmol` source, discovered physical indices, one status row per card, and the
@@ -2966,7 +2987,7 @@ worktree, `HEAD` matches its upstream-tracking commit, and full UDLM base commit
 `{UDLM_BASE_COMMIT}` is an ancestor. Versions, seeds, branch, tracking ref, and
 dirty paths are recorded.
 
-It does not guarantee that a card remains unused forever, that the local
+It does not guarantee that a card remains below the utilization threshold, that the local
 upstream-tracking ref was refreshed from the network moments ago, or that an
 A6000 reproduces A100 timing. It also does not distribute a model or prove
 scientific correctness.
