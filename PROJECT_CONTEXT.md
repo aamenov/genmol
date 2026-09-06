@@ -1,6 +1,6 @@
 # GenMol v2 project context
 
-Snapshot: 2026-09-06 10:36 Asia/Dubai. Recheck dynamic state, especially Git
+Snapshot: 2026-09-06 11:20 Asia/Dubai. Recheck dynamic state, especially Git
 status, logs, tmux sessions, and GPU occupancy, before acting.
 
 ## Active objective and safe workspace
@@ -13,12 +13,14 @@ status, logs, tmux sessions, and GPU occupancy, before acting.
   on branch `codex/udlm-genmol`, not in the dirty main checkout. Preserve all
   unrelated and uncommitted work.
 - The current reviewed implementation revision is clean and pushed at
-  `694d7e64039561f869841d1e95ea937bfda30cae`. It includes strict optimizer-step
+  `ddb3be8c7938731e82fd865b64f9f0c43678b04f`. It includes strict optimizer-step
   scheduler identity, prospective E-L0/E-L1 bundles, the warm-start-compatible
   A1 post-BERT FiLM conditioner, exact conditioning checkpoint identity,
   constructor-RNG isolation, the registry preparer and registry-aware launcher,
   evidence producers/collector, independent verifier, teaching, and tests. The
-  screen arms remain deliberately unauthorized until the user chooses a GPU
+  pilot configs use the training-only audited empirical floor `0.0002`, and the
+  screen registry/verifier bind that audit's exact bytes and producing source.
+  The screen arms remain deliberately unauthorized until the user chooses a GPU
   count and the exact registry is frozen. The distinct source revision
   used to produce the immutable current-code MDLM rescore is
   `74482c2742ab5ad15def122c809a6b4e403e94cf`. It contains the hardened
@@ -83,10 +85,13 @@ repair, and the stationary-prior hypothesis:
 3. `empirical_frequency` (pilot selector `udlm_categorical`) uses the same
    rank-one categorical process and the same schedule as `schedule_uniform`,
    but replaces the stationary distribution with a pinned 10,000-training-row
-   SAFE token-frequency estimate mixed with 1% uniform mass. Therefore only
-   `empirical_frequency - schedule_uniform` isolates the stationary-prior
-   effect. Comparing only with `release_uniform` would confound prior and
-   schedule changes.
+   SAFE token-frequency estimate. Historical/manual configuration and
+   immutable CPU artifacts use 1% uniform mass; reviewed pilot launches use
+   the later training-only selection `0.0002`. The same nuisance field is
+   present in R/S pilot configs but ignored by their uniform priors, preserving
+   the matched-config contract. Therefore only `empirical_frequency` minus
+   `schedule_uniform` isolates the stationary-prior effect. Comparing only
+   with `release_uniform` would confound prior and schedule changes.
 
 The categorical implementation supplies the exact forward/reverse
 probabilities and a stable model-dependent continuous-time objective. The
@@ -95,12 +100,16 @@ the training gradient. Immutable prior metadata, active-token mappings,
 frequency/tokenizer hashes, and checkpoint state are validated on load.
 
 Two prospective optimization screens are now implemented on CPU but have not
-been registered, launcher-authorized, or run on a GPU. E-L0 preserves the
-released constant schedule with 2,500 linear-warmup optimizer updates. E-L1 is
-a 50-update warmup followed by a half-cosine path over a 1,000-update horizon,
+been registered, launcher-authorized, or run on a GPU. E-L0 preserves this
+project's inherited GenMol-style constant schedule with 2,500 linear-warmup
+optimizer updates; it is not the official UDLM QM9 recipe. The pinned official
+recipe uses 25,000 updates, global batch 2,048, peak LR `3e-4`, 1,000 warmup
+updates, and cosine decay to `3e-6`. E-L1 is our scaled pilot hypothesis: a
+50-update warmup followed by a half-cosine path over a 1,000-update horizon,
 clamped at `3e-6` from a `3e-4` peak. Over the first 100 used LR indices, E-L1
 has `37.571076382108664` times E-L0's cumulative LR exposure, so it is an
-optimizer-schedule bundle rather than an isolated cosine-curvature ablation.
+optimizer-schedule bundle rather than an exact official-recipe replay or an
+isolated cosine-curvature ablation.
 
 A0 retains the exact additive state-key and initialization path. A1 retains
 GenMol's stock BERT layers but applies an outer SiLU to the normally initialized
@@ -337,12 +346,33 @@ the proposed unseen-token-support benefit.
 The descriptive grid minimum occurs at weight `0.0001`, with validation NLL
 `2.7502090487521036`, but that value was found on the same exploratory panel
 and supplies about 100 times less training-unseen mass than the configured
-`0.01` value. It is not a selection result. A fresh confirmatory panel is
-required before any prior choice, and the proposed weights
-`[0.001, 0.01, 0.05]` remain a hypothesis to test only after the matched
-`release_uniform`/`schedule_uniform`/`empirical_frequency` health gate. This
-audit performs no training or generation and supports no quality, ranking, or
-UDLM-over-GenMol superiority claim.
+`0.01` value. It is not a selection result and remains the immutable historical
+geometry record. This audit performs no training or generation and supports no
+quality, ranking, or UDLM-over-GenMol superiority claim.
+
+A distinct training-only floor-selection artifact is
+`experiments/udlm/prior_geometry/floor_selection_train_rows_10001_30000.json`,
+73,953 bytes, raw SHA-256
+`02908dafaf589ca9a49e560aa1eab470a18d6bfe616b781164784c489f54a9f1`.
+It was generated from clean pushed source
+`6424b323084358ea050ba22d7e13ef8d45962496` and committed without changing
+those producing bytes in `654b408`. The replay exactly reproduced the frozen
+first-10,000-row count vector, then evaluated that fixed estimate on disjoint
+ordered training rows 10,001--20,000 and 20,001--30,000. The two blocks had
+512,587 and 513,326 content tokens; 78 and 91 tokens came from types unseen in
+the first prefix. Their continuous maximum-likelihood uniform-floor weights
+were `0.00016593802382907556` and `0.00019334112119092408`. The rounded
+candidate `0.0002` beat historical `0.01` unigram NLL by
+`0.00860566722454914` and `0.008485138280406979` nats/token.
+
+The audit recommends `0.0002` only as a reviewed-pilot hyperparameter. Its rule
+was formalized after both blocks were inspected, so the second block is a
+retrospective replication, not preregistered confirmation. It used no final
+seeds or generation metrics and cannot rank sequence models or molecules. The
+historical/manual base configuration stays at `0.01`; pilot and optimization-
+screen launch composition uses `0.0002`, with the same otherwise-ignored field
+in R and S to maintain matching. Only later E-versus-S training and generation
+can test the stationary-prior hypothesis.
 
 ## CPU-only launch preflight and performance risks
 
@@ -372,6 +402,12 @@ resolved-config digests were:
 | 1 | `5ddcba219d9f3794282eacf4addccd70bf0b0cc7df9a74b2680947cae2d923ac` | `50851bf98e2c2f4e0cd8879a691ad81648b4b8c6158a2ab67bf1ad8072c8949b` | `747f990274c3f161fc8031d266fb389c7f33f5aa856e6a4c5420fdc8ae119149` |
 | 2 | `ae1908aa11553d7bf700635aec661329264e38d542f17edcca128501ad947e25` | `c519d32abe11f06219f618f977db8f9c298524fa6117fcaffded000fe1aa40c8` | `3ca854a20658212b685ab190593801f1d4445343795509352ada9e1703dac922` |
 
+Those digests are historical evidence for revision `3be650e` and its `0.01`
+configuration. The pilot-only `0.0002` override intentionally changes the
+current resolved-config and matched-panel digests. Recompose all three arms
+from the final clean pushed launch revision before execution; never reuse the
+table above as current launch authority.
+
 A separate full-size CPU A1 warm-start smoke loaded 202 MDLM EMA base tensors,
 retained 28 new conditioning tensors, and created 230 EMA shadows. The exact
 checkpoint digest was checked before loading; the successful pass used about
@@ -385,8 +421,11 @@ normalization, A1 is a warm-start-compatible BERT hypothesis rather than the
 official DiT, the current 2,500-step warmup yields only about `1.2e-6` learning
 rate at optimizer step 10, and the 1,880-token empirical prior is estimated
 from a prefix containing only 184 observed token types.
-The configured uniform mixture leaves about `0.0090213` stationary mass on
-training-unseen types, while the observed mass is highly concentrated.
+Historical weight `0.01` leaves about `0.0090213` stationary mass on
+training-unseen types. Pilot weight `0.0002` lowers that mass to about
+`0.0001804255`, close to the later-block unseen-token fractions, while the
+observed mass remains highly concentrated. Neither quantity predicts learned
+molecular quality.
 
 The 10-step matched `R/S/E` run is therefore a health gate only, not a ranking.
 If it succeeds, first run an `E`-only 100-update scheduler screen, then an
@@ -398,25 +437,24 @@ diagnostics only for health; registered selection remains seeds 1000 and 1001,
 touch final seeds 0, 1, and 2 until a registered winner satisfies the frozen
 eligibility and scientific gates.
 
-The prospective screen YAMLs intentionally do not authorize execution and
-inherit ordinary defaults such as seed 1 and 50,000 maximum steps. A separate
-screen registry/launcher must override and freeze seed 17, 100/500 updates, the
-user-chosen common GPU count, fresh verified MDLM-EMA warm starts, exact panel
-and corruption identities, and output paths. Before A1 authorization it must
-also add variant-aware receipt/gate validation for FiLM parameter counts and
-the post-init RNG policy, explicitly report conditioning metadata/hash from the
-denoising evaluator, and reject scratch A-screen launches. Missing or malformed
-screen evidence must mean incomplete/no winner, not a silent control fallback.
+The prospective screen YAMLs alone do not authorize execution and inherit
+ordinary defaults such as seed 1 and 50,000 maximum steps. The implemented
+registry preparer and launcher override and freeze seed 17, 100/500 updates,
+the user-chosen common GPU count, empirical floor `0.0002`, fresh verified
+MDLM-EMA warm starts, exact panel/corruption identities, and output paths. The
+schema-4 receipt/gate chain validates FiLM counts, staged gradients, post-init
+RNG policy, conditioning metadata, and initialization state. Missing or
+malformed evidence means incomplete/no winner, never a silent control fallback.
 
 ## GPU status and required next pilot
 
 No UDLM GPU job has been launched, and no GPU inventory or utilization probe
-has yet been run for the pending pilot. No probe or job occurred while producing
-or reviewing revision `3be650e3a32a0bb9fd12c7cdc684cb38ec94d953`, the CPU-only
-MDLM rescore, the twelve real launch dry-run invocations (two digest passes over
-the six R/S/E configurations), the full-size A1 CPU warm-start smoke, or this
-documentation update. No stale snapshot should be treated as authorization or
-availability evidence.
+has yet been run for the pending pilot. No GPU probe or job occurred while
+producing or reviewing revisions through
+`ddb3be8c7938731e82fd865b64f9f0c43678b04f`, the CPU-only MDLM rescore, the
+twelve historical launch dry-run invocations, the full-size A1 CPU warm-start
+smoke, the 30,000-row prior-floor replay, or the source/test integrations. No
+stale snapshot should be treated as authorization or availability evidence.
 
 Before the first GPU launch, the user must select only the GPU count: one or
 two. Recommend **one GPU** for the first matched 10-step engineering gate; the
@@ -495,6 +533,26 @@ Completed prior items:
   `py_compile`, notebook regeneration tests, and `git diff --check` also
   passed. This tranche has not queried GPUs, launched training, materialized a
   GPU-count-specific config set, or frozen a registry.
+- Pushed revision `6424b323084358ea050ba22d7e13ef8d45962496` adds the
+  clean-source CPU prior-floor auditor and a real scheduler-plus-conditioning
+  launcher-to-summary-to-receipt-to-collector-to-verifier integration test.
+  The two focused additions passed `13` tests; the broader eight-file screen
+  suite passed `139` tests. The end-to-end tamper case fails closed.
+- The 30,000-row CPU replay from that exact clean pushed source produced the
+  immutable 73,953-byte floor-selection artifact. It was independently checked
+  and committed in `654b408108a25bfd6a47958a5ca0afef89459644` without
+  changing the producer bytes. Both later training blocks support the disclosed
+  rounded pilot value `0.0002`; this remains retrospective unigram evidence.
+- Pushed implementation revision
+  `ddb3be8c7938731e82fd865b64f9f0c43678b04f` applies `0.0002` to every R/S/E
+  pilot config, embeds its audit provenance in the matched-panel contract,
+  binds the audit source/artifact in screen registries, and rejects audit or
+  config tampering. It also updates the paper/released-code teaching: official
+  QM9 uses a 25,000-step cosine recipe, whereas L0 is the inherited GenMol-style
+  constant schedule and L1 is our scaled pilot bundle. The focused suite passed
+  `110` tests and the exact-worktree full CPU suite passed `772` tests with
+  `14` dependency warnings in 175.50 seconds. Ruff, notebook structure/code,
+  `py_compile`, and `git diff --check` passed; no GPU query or launch occurred.
 
 Remaining sequence:
 
