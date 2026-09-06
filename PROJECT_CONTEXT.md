@@ -289,7 +289,8 @@ Completed prior items:
   row fields and exact aggregate metrics.
 - After adding the immutable rescore attestation and its strict protocol/gate,
   Git-firewall, notebook, and documentation bindings, the exact-worktree full
-  suite passed `610` tests with the same `14` dependency warnings.
+  suite passed `610` tests with the same `14` dependency warnings. Those
+  reviewed bindings were committed and pushed in `64743c7`.
 
 Remaining sequence:
 
