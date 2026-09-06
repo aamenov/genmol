@@ -1125,13 +1125,37 @@ with 3/16 does not rank the priors because the sample is tiny and stochastic.
 **Progressive experiment gate.** Next comes a one-GPU, full-size 10-update
 engineering check. Warm-start pilots then advance through 100, 500, and 1,000
 updates, decoding 32 samples before 256, comparing 32/64 reverse steps, and
-retaining 128 steps as the faithful official-UDLM control. The user requests a
-count of one or two GPUs; physical IDs are selected dynamically from freshly
-verified idle devices. Before final generation, one checkpoint and sampling
-configuration must be frozen in a committed, pushed manifest using only
-training, the fixed validation panel, and explicitly labeled pilot seeds. The
-three final seeds are then evaluated once, with 1,000 requests each, under the
-same repaired definitions as the audited MDLM control.
+retaining 128 steps as the faithful official-UDLM control. Those smaller runs
+are health and speed evidence, not selector inputs. A candidate is eligible for
+selection only after exactly 256 samples at 128 NFE for each reserved pilot
+generation seed 1000 and 1001. If $q_{c,s}$ and $d_{c,s}$ are released-branch
+quality and diversity for candidate attempt $c$ and pilot seed $s$, the frozen
+scores are
+$\bar q_c=\tfrac12(q_{c,1000}+q_{c,1001})$ and
+$\bar d_c=\tfrac12(d_{c,1000}+d_{c,1001})$. The ledger selects maximum
+$\bar q_c$, then maximum $\bar d_c$, then the lexicographically smallest
+attempt ID. For example, attempts A and B with scores $(0.86,0.82)$ and
+$(0.86,0.825)$ select B; a 32-sample attempt with quality 1.0 is disclosed but
+cannot enter this ordering.
+
+The user requests a count of one or two GPUs; physical IDs are selected
+dynamically from freshly verified idle devices. Before final generation, one
+checkpoint and sampling configuration must be frozen in a committed, pushed
+manifest using only training, the fixed validation panel, and those registered
+pilot seeds. The three final seeds are then evaluated once, with 1,000 requests
+each, under the same repaired definitions as the audited MDLM control.
+
+**Baseline recomputation evidence.** The immutable rescore attestation does not
+regenerate molecules. Three fresh CPU interpreters re-decode and re-score the
+1,000 historical raw rows for each MDLM seed, compare all 21 CSV fields, and
+reproduce both released and strict aggregates: $3\times1000\times21=63{,}000$
+matching cells. It binds the old row/summary hashes, current benchmark/report
+schemas, pinned SA input, loaded SAFE/RDKit module bytes, and the clean pushed
+source revision. Offline environment variables and four Python TCP/name-
+resolution APIs were guarded during computation; this is explicitly not
+OS-level or process-level network isolation. The code below reads the frozen
+protocol, baseline manifest, and attestation from their exact retained bytes
+and checks the cross-links before displaying any criterion.
 
 The exact point-estimate gates use fractions, not rounded display labels:
 
@@ -1167,15 +1191,22 @@ for the diffusion method and not a speed win. A method-only claim requires a
 from-scratch UDLM comparison or an equal-extra-update MDLM continuation control.
 
 **Difference from released code.** The full-vocabulary artifact is the faithful
-UDLM prior control. Excluding UNK/CLS/SEP/PAD/MASK is a GenMol-specific ablation.
-Neither is a paper-scale result, and the notebook keeps that distinction in the
-reproduction and PDF ledgers.
+UDLM prior control. Excluding UNK/CLS/SEP/PAD/MASK is a GenMol-specific ablation;
+the committed semantic pilot ledger, immutable MDLM rescore, and intersection-
+union publication gate are reproducibility controls added here, not features of
+the released GenMol or UDLM repositories. Neither smoke result is paper-scale.
 
 **Comprehension checkpoint.** Why does falling toy loss not show that UDLM beats
 GenMol? Expected reasoning: it checks optimization mechanics on 16 memorized
 molecules, not the matched de-novo distribution. Why retain strict diagnostics
 when the headline comparison is repaired? Expected reasoning: repair can hide
-invalid raw SAFE generations, so both views are needed.
+invalid raw SAFE generations, so both views are needed. Why may a 32-sample
+pilot not win even if its observed quality is highest? Expected reasoning: its
+variance and operating point differ from the frozen selector, so allowing it
+would reintroduce post-hoc selection. What does 63,000 matching row fields show?
+Expected reasoning: current decoding/scoring exactly reproduces the frozen raw
+MDLM evidence within the declared numeric tolerance; it does not repair the
+historical training or GPU-provenance limitations.
 """,
             f"{STAGE_TAG_PREFIX}-evidence",
         ),
@@ -1186,6 +1217,61 @@ import hashlib as stage20_hashlib
 import json as stage20_json
 import math as stage20_math
 import pandas as stage20_pd
+
+stage20_superiority_protocol_path = (
+    PROJECT_ROOT
+    / "experiments"
+    / "udlm"
+    / "protocols"
+    / "de_novo_superiority_v1.json"
+)
+stage20_superiority_protocol_bytes = stage20_superiority_protocol_path.read_bytes()
+assert stage20_hashlib.sha256(stage20_superiority_protocol_bytes).hexdigest() == (
+    "7fea3b51b492adab194ac715a1b1dce7efc6105722a6913feba5055fd2f72410"
+)
+stage20_superiority_protocol = stage20_json.loads(stage20_superiority_protocol_bytes)
+assert stage20_superiority_protocol["status"] == "frozen_before_gpu_pilots"
+stage20_selection_firewall = stage20_superiority_protocol["selection_firewall"]
+assert stage20_selection_firewall["eligible_pilot_generation_seeds"] == [1000, 1001]
+assert stage20_selection_firewall["eligible_requested_samples_per_seed"] == 256
+assert stage20_selection_firewall["eligible_nfe"] == 128
+assert stage20_selection_firewall["eligible_metric_branch"] == "released_comparable"
+
+stage20_rescore_path = (
+    PROJECT_ROOT
+    / "experiments"
+    / "udlm"
+    / "baselines"
+    / "mdlm_50000_rescore_attestation.json"
+)
+stage20_rescore_bytes = stage20_rescore_path.read_bytes()
+stage20_rescore_sha256 = stage20_hashlib.sha256(stage20_rescore_bytes).hexdigest()
+assert stage20_rescore_sha256 == (
+    "6326b63c38c7052d0b47282d611618f77637496da2785779af69097fc1441323"
+)
+stage20_mdlm_rescore = stage20_json.loads(stage20_rescore_bytes)
+assert stage20_mdlm_rescore["schema_version"] == 1
+assert stage20_mdlm_rescore["status"] == "completed_exact_match"
+assert stage20_mdlm_rescore["source"]["revision"] == (
+    "74482c2742ab5ad15def122c809a6b4e403e94cf"
+)
+assert all(stage20_mdlm_rescore["source"]["clean_pushed_checks"].values())
+assert stage20_mdlm_rescore["implementation"]["benchmark_schema_version"] == 7
+assert stage20_mdlm_rescore["implementation"]["report_schema_version"] == 6
+assert stage20_mdlm_rescore["protocol"]["network_controls"][
+    "os_or_process_network_isolation"
+] is False
+stage20_rescore_seed_rows = stage20_mdlm_rescore["seed_results"]
+assert [row["seed"] for row in stage20_rescore_seed_rows] == [0, 1, 2]
+assert all(
+    row["status"] == "exact_match"
+    and row["row_comparison"]["all_match"] is True
+    and row["row_comparison"]["row_count"] == 1000
+    and row["row_comparison"]["field_count"] == 21
+    and row["row_comparison"]["cell_count"] == 21000
+    for row in stage20_rescore_seed_rows
+)
+assert sum(row["row_comparison"]["cell_count"] for row in stage20_rescore_seed_rows) == 63000
 
 stage20_baseline_path = (
     PROJECT_ROOT / "experiments" / "udlm" / "baselines" / "mdlm_50000.json"
@@ -1228,6 +1314,20 @@ assert stage20_mdlm_baseline["checkpoint"]["sha256"] == (
 assert stage20_mdlm_baseline["source_aggregate"]["sha256"] == (
     "b474efc593b665489359425dbe1ed0873f8ae1d44b77478b871aff6d6b555904"
 )
+stage20_registered_baseline = stage20_superiority_protocol["baseline"]
+assert stage20_registered_baseline["manifest_sha256"] == (
+    stage20_baseline_manifest_sha256
+)
+assert stage20_registered_baseline["rescore_attestation_sha256"] == (
+    stage20_rescore_sha256
+)
+assert stage20_registered_baseline["rescore_source_revision"] == (
+    stage20_mdlm_rescore["source"]["revision"]
+)
+assert stage20_mdlm_rescore["manifest_comparison"] == {{
+    "all_seed_rows_metrics_failures_hashes_and_aggregates_match": True,
+    "manifest_sha256": stage20_baseline_manifest_sha256,
+}}
 stage20_exact_mdlm_means = stage20_mdlm_baseline["released_comparable"]["mean"]
 assert stage20_exact_mdlm_means == {{
     "validity": 1.0,
@@ -1235,6 +1335,10 @@ assert stage20_exact_mdlm_means == {{
     "quality": 0.858,
     "diversity": 0.8230213192558725,
 }}
+for stage20_metric_name, stage20_metric_value in stage20_exact_mdlm_means.items():
+    assert stage20_mdlm_rescore["aggregate_metrics"]["released_comparable"][
+        stage20_metric_name
+    ]["mean"] == stage20_metric_value
 
 stage20_expected_smoke_commit = "{UDLM_BASE_COMMIT}"
 assert stage20_expected_smoke_commit == UDLM_BASE_COMMIT
@@ -1326,6 +1430,10 @@ stage20_success_criteria = {{
     "baseline_manifest": {{
         "path": str(stage20_baseline_path.relative_to(PROJECT_ROOT)),
         "sha256": stage20_baseline_manifest_sha256,
+        "rescore_attestation_path": str(stage20_rescore_path.relative_to(PROJECT_ROOT)),
+        "rescore_attestation_sha256": stage20_rescore_sha256,
+        "rescore_source_revision": stage20_mdlm_rescore["source"]["revision"],
+        "rescored_row_cells_all_match": 63000,
         "source_aggregate_sha256": stage20_mdlm_baseline["source_aggregate"]["sha256"],
         "checkpoint_sha256": stage20_mdlm_baseline["checkpoint"]["sha256"],
         "metric_definition_schema": stage20_mdlm_baseline["source_aggregate"]["schema_version"],
@@ -1337,6 +1445,11 @@ stage20_success_criteria = {{
         "final_seeds_evaluated_once_after_lock": True,
         "candidate_manifest_committed_and_pushed_before_final_seeds": True,
         "candidate_selected_without_final_seed_results": True,
+        "eligible_pilot_generation_seeds": [1000, 1001],
+        "eligible_pilot_samples_per_seed": 256,
+        "eligible_pilot_nfe": 128,
+        "eligible_pilot_metric_branch": "released_comparable",
+        "selection_rule": stage20_selection_firewall["selection_rule"],
         "faithful_udlm_sampling_nfe": 128,
         "required_matching": [
             "training data and tokenizer",
@@ -1415,6 +1528,12 @@ stage20_decision_gate_report_rows = [
         f"SHA-256 {{stage20_mdlm_baseline['source_aggregate']['runner_sha256']}}; "
         f"metric schema {{stage20_mdlm_baseline['source_aggregate']['schema_version']}}",
     ),
+    (
+        "Comparator current-code rescore",
+        f"{{stage20_success_criteria['baseline_manifest']['rescored_row_cells_all_match']}}/"
+        "63000 row fields matched; exact released and strict aggregates; historical "
+        "molecules were not regenerated.",
+    ),
     *[
         (f"Comparator caveat {{index}}", caveat)
         for index, caveat in enumerate(
@@ -1445,6 +1564,12 @@ stage20_decision_gate_report_rows = [
         "Final-candidate lock",
         "Commit and push the candidate manifest before seeds 0,1,2; evaluate each "
         "final seed once; do not select or tune from final-seed results.",
+    ),
+    (
+        "Registered pilot selector",
+        "Seeds 1000,1001; 256 requests per seed; 128 NFE; released-compatible "
+        "quality then diversity then lexical attempt ID. Smaller diagnostics are "
+        "disclosed but ineligible.",
     ),
     (
         "Final evaluation protocol",
@@ -1482,7 +1607,7 @@ stage20_decision_gate_report_rows = [
     ),
     ("Claim scope", stage20_success_criteria["claim_scope"]),
 ]
-assert len(stage20_decision_gate_report_rows) == 22
+assert len(stage20_decision_gate_report_rows) == 24
 assert stage20_decision_gate_report_rows[-1][0] == "Claim scope"
 STAGE20_UDLM_SMOKE_TESTS_PASSED = True
 stage20_summary = {{
@@ -1494,6 +1619,16 @@ stage20_summary = {{
     "sampling_trace": stage20_sampling_trace,
     "cpu_artifact_count": len(stage20_cpu_evidence),
     "mdlm_baseline_manifest_sha256": stage20_baseline_manifest_sha256,
+    "mdlm_rescore_attestation_sha256": stage20_rescore_sha256,
+    "superiority_protocol_sha256": stage20_hashlib.sha256(
+        stage20_superiority_protocol_bytes
+    ).hexdigest(),
+    "registered_selection_operating_point": {{
+        "seeds": [1000, 1001],
+        "samples_per_seed": 256,
+        "nfe": 128,
+        "metric_branch": "released_comparable",
+    }},
     "paper_scale_superiority_claim": False,
 }}
 

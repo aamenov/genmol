@@ -50,6 +50,30 @@ training-summary/exit-receipt schema 1 are rejected: mandatory inference-weight,
 training-accounting, and EMA provenance begin at schemas 7, 6, and 2,
 respectively.
 
+The MDLM side of the gate is independently bound to
+`experiments/udlm/baselines/mdlm_50000_rescore_attestation.json` (SHA-256
+`6326b63c38c7052d0b47282d611618f77637496da2785779af69097fc1441323`).
+That immutable attestation was produced from clean, already-pushed revision
+`74482c2742ab5ad15def122c809a6b4e403e94cf` by three fresh CPU Python
+interpreters, one for each seed 0, 1, and 2, with `PYTHONHASHSEED` equal to the
+seed. Current code matched all 63,000 of 63,000 compared historical row cells
+under the frozen per-field rules and reproduced the exact released-compatible
+and strict per-seed metrics and aggregates. The rescore bound the verified SA
+table and hashes for the runtime metric, chemistry, RDKit, SAFE, and runner
+modules; it neither regenerated molecules nor rewrote or mutated historical
+raw rows or summaries. Its network claim is deliberately narrow: offline
+environment settings and Python-level guards covered four socket/name-resolution
+APIs, but there was no OS- or process-level isolation and no claim about native
+extensions, subprocesses, raw sockets, datagrams, or other unguarded APIs.
+
+Before evaluating a UDLM candidate, the superiority gate verifies the frozen
+MDLM manifest and this attestation by path and SHA-256, then checks their source,
+row, aggregate, and metric-provenance bindings. Candidate choice is still made
+only from the fully disclosed, immutable pilot ledger using the registered
+eligible two-seed panel and the predeclared quality-then-diversity ordering; the
+winner is committed and pushed in a single candidate lock before any final seed
+is run.
+
 ## Faithful baseline before hypotheses
 
 The first implementation follows UDLM at official revision `edb0f8c`:

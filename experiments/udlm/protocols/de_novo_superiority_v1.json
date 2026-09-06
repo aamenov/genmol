@@ -6,6 +6,10 @@
   "baseline": {
     "manifest_relative_path": "experiments/udlm/baselines/mdlm_50000.json",
     "manifest_sha256": "6da46fc615dedbcca436da087a2c1e9145f5d110036e0c15bb431ded3c2e5539",
+    "rescore_attestation_relative_path": "experiments/udlm/baselines/mdlm_50000_rescore_attestation.json",
+    "rescore_attestation_sha256": "6326b63c38c7052d0b47282d611618f77637496da2785779af69097fc1441323",
+    "rescore_source_revision": "74482c2742ab5ad15def122c809a6b4e403e94cf",
+    "rescore_status": "completed_exact_match",
     "checkpoint_sha256": "8d00aa47b02f64bf39ff6b0b2e786f213587366fc2c3d29712a00f3f84108dd6",
     "metric_branch": "released_comparable",
     "status": "audited_local_control_not_exact_paper_reproduction"

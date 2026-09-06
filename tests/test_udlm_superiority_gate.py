@@ -13,7 +13,9 @@ from scripts.udlm import superiority_gate as gate
 
 
 def _load_json(relative_path: Path) -> dict:
-    return json.loads((gate.REPOSITORY_ROOT / relative_path).read_text(encoding="utf-8"))
+    return json.loads(
+        (gate.REPOSITORY_ROOT / relative_path).read_text(encoding="utf-8")
+    )
 
 
 def _inference_weights() -> dict:
@@ -128,8 +130,7 @@ def _candidate_lock(*, startup_mode: str = "warm_start") -> dict:
                 {
                     "seed": seed,
                     "relative_path": (
-                        "output/udlm/final/schedule-uniform-synthetic/"
-                        f"seed_{seed}"
+                        "output/udlm/final/schedule-uniform-synthetic/" f"seed_{seed}"
                     ),
                 }
                 for seed in gate.EXPECTED_SEEDS
@@ -162,9 +163,7 @@ def _completed_pilot_attempt(
     assert len(seeds) == len(qualities) == len(diversities)
     refs = []
     blobs = {}
-    for seed, quality, diversity in zip(
-        seeds, qualities, diversities, strict=True
-    ):
+    for seed, quality, diversity in zip(seeds, qualities, diversities, strict=True):
         relative_path = f"experiments/udlm/pilots/{attempt_id}/seed_{seed}.json"
         evidence = {
             "schema_version": gate.PILOT_EVIDENCE_SCHEMA_VERSION,
@@ -383,25 +382,19 @@ def _candidate_report(
             "sampling_sha256": lock["inference"]["sampling_sha256"],
             "sampling": lock["inference"]["sampling_config"],
             "git_tracking": {
-                "relative_path": lock["inference"][
-                    "evaluation_config_relative_path"
-                ]
+                "relative_path": lock["inference"]["evaluation_config_relative_path"]
             },
         },
         "generation_protocol": {
             "diffusion_type": "udlm",
             "nfe": 128,
             "num_steps": 128,
-            "nfe_by_seed": [
-                {"seed": seed, "nfe": 128} for seed in gate.EXPECTED_SEEDS
-            ],
+            "nfe_by_seed": [{"seed": seed, "nfe": 128} for seed in gate.EXPECTED_SEEDS],
             "inference_weights": _inference_weights(),
         },
         "inference_weights": _inference_weights(),
         "runner_sha256": "e" * 64,
-        "implementation_inputs": {
-            "sampler_source": {"sha256": "d" * 64}
-        },
+        "implementation_inputs": {"sampler_source": {"sha256": "d" * 64}},
         "metric_inputs": {"schema_version": 1},
         "seed_runs": seed_runs,
         "aggregate_metrics": {
@@ -427,20 +420,38 @@ def baseline() -> dict:
     return _load_json(gate.BASELINE_RELATIVE_PATH)
 
 
-def test_pinned_protocol_and_baseline_hashes_and_semantics(protocol, baseline):
+@pytest.fixture
+def baseline_rescore() -> dict:
+    return _load_json(gate.BASELINE_RESCORE_RELATIVE_PATH)
+
+
+def test_pinned_protocol_and_baseline_hashes_and_semantics(
+    protocol, baseline, baseline_rescore
+):
     protocol_bytes = (gate.REPOSITORY_ROOT / gate.PROTOCOL_RELATIVE_PATH).read_bytes()
     baseline_bytes = (gate.REPOSITORY_ROOT / gate.BASELINE_RELATIVE_PATH).read_bytes()
+    baseline_rescore_bytes = (
+        gate.REPOSITORY_ROOT / gate.BASELINE_RESCORE_RELATIVE_PATH
+    ).read_bytes()
 
     assert hashlib.sha256(protocol_bytes).hexdigest() == gate.PROTOCOL_SHA256
     assert hashlib.sha256(baseline_bytes).hexdigest() == gate.BASELINE_SHA256
+    assert (
+        hashlib.sha256(baseline_rescore_bytes).hexdigest()
+        == gate.BASELINE_RESCORE_SHA256
+    )
     gate.validate_protocol(protocol)
     validated = gate.validate_baseline_manifest(baseline)
+    rescore = gate.validate_baseline_rescore_attestation(baseline_rescore, baseline)
     assert validated["means"]["quality"] == pytest.approx(0.858)
     assert validated["pooled_valid"] == 3000
+    assert rescore["source_revision"] == gate.EXPECTED_BASELINE_RESCORE_SOURCE_REVISION
+    assert rescore["all_rows_and_manifest_values_exact_match"] is True
+    assert rescore["network_controls"]["os_or_process_network_isolation"] is False
 
 
 def test_public_evaluator_rejects_weakened_protocol_with_frozen_hash_label(
-    protocol, baseline
+    protocol, baseline, baseline_rescore
 ):
     protocol["uncertainty_gates"]["quality"][
         "candidate_minus_baseline_lower_bound_strictly_greater_than"
@@ -450,6 +461,7 @@ def test_public_evaluator_rejects_weakened_protocol_with_frozen_hash_label(
         gate.evaluate_candidate_report(
             _candidate_report(quality_counts=(875, 876, 877)),
             baseline,
+            baseline_rescore,
             protocol,
             _candidate_lock(),
         )
@@ -504,9 +516,7 @@ def test_welch_interval_uses_independent_seed_level_estimates():
 
 def test_both_zero_variance_welch_inputs_fail_closed():
     with pytest.raises(gate.GateValidationError, match="both sample variances"):
-        gate.welch_lower_difference(
-            [0.9, 0.9, 0.9], [0.8, 0.8, 0.8], confidence=0.95
-        )
+        gate.welch_lower_difference([0.9, 0.9, 0.9], [0.8, 0.8, 0.8], confidence=0.95)
 
 
 def test_one_zero_variance_welch_input_remains_defined():
@@ -518,9 +528,15 @@ def test_one_zero_variance_welch_input_remains_defined():
     assert result["lower_bound"] == pytest.approx(0.07314145539151921)
 
 
-def test_complete_registered_gate_passes_strong_candidate(protocol, baseline):
+def test_complete_registered_gate_passes_strong_candidate(
+    protocol, baseline, baseline_rescore
+):
     decision = gate.evaluate_candidate_report(
-        _candidate_report(), baseline, protocol, _candidate_lock()
+        _candidate_report(),
+        baseline,
+        baseline_rescore,
+        protocol,
+        _candidate_lock(),
     )
 
     assert decision["superiority_gate_passed"] is True
@@ -528,14 +544,20 @@ def test_complete_registered_gate_passes_strong_candidate(protocol, baseline):
     assert decision["all_uncertainty_gates_passed"] is True
     assert decision["candidate"]["nfe"] == 128
     assert decision["candidate"]["inference_weights"] == _inference_weights()
+    assert decision["baseline"]["rescore_attestation"]["status"] == (
+        "completed_exact_match"
+    )
     assert decision["claim"]["scope"] == "operational_continuation_only"
     assert decision["claim"]["method_only_claim_supported"] is False
 
 
-def test_quality_equality_fails_strict_point_and_overall_gate(protocol, baseline):
+def test_quality_equality_fails_strict_point_and_overall_gate(
+    protocol, baseline, baseline_rescore
+):
     decision = gate.evaluate_candidate_report(
         _candidate_report(quality_counts=(858, 858, 858)),
         baseline,
+        baseline_rescore,
         protocol,
         _candidate_lock(),
     )
@@ -544,11 +566,12 @@ def test_quality_equality_fails_strict_point_and_overall_gate(protocol, baseline
     assert decision["superiority_gate_passed"] is False
 
 
-def test_diversity_point_margin_is_inclusive(protocol, baseline):
+def test_diversity_point_margin_is_inclusive(protocol, baseline, baseline_rescore):
     threshold = baseline["released_comparable"]["mean"]["diversity"] - 0.005
     decision = gate.evaluate_candidate_report(
         _candidate_report(diversities=(threshold, threshold, threshold)),
         baseline,
+        baseline_rescore,
         protocol,
         _candidate_lock(),
     )
@@ -556,15 +579,19 @@ def test_diversity_point_margin_is_inclusive(protocol, baseline):
     assert decision["metrics"]["diversity"]["point_gate_passed"] is True
 
 
-def test_any_wrong_final_nfe_is_rejected(protocol, baseline):
+def test_any_wrong_final_nfe_is_rejected(protocol, baseline, baseline_rescore):
     report = _candidate_report()
     report["generation_protocol"]["nfe_by_seed"][1]["nfe"] = 64
 
     with pytest.raises(gate.GateValidationError, match="NFE differs"):
-        gate.evaluate_candidate_report(report, baseline, protocol, _candidate_lock())
+        gate.evaluate_candidate_report(
+            report, baseline, baseline_rescore, protocol, _candidate_lock()
+        )
 
 
-def test_runtime_ema_application_receipt_is_required(protocol, baseline):
+def test_runtime_ema_application_receipt_is_required(
+    protocol, baseline, baseline_rescore
+):
     report = _candidate_report()
     report["generation_protocol"]["inference_weights"] = {
         "source": "raw_model",
@@ -573,12 +600,14 @@ def test_runtime_ema_application_receipt_is_required(protocol, baseline):
     }
 
     with pytest.raises(gate.GateValidationError, match="EMA inference weights"):
-        gate.evaluate_candidate_report(report, baseline, protocol, _candidate_lock())
+        gate.evaluate_candidate_report(
+            report, baseline, baseline_rescore, protocol, _candidate_lock()
+        )
 
 
 @pytest.mark.parametrize("location", ["top_level", "seed"])
 def test_runtime_ema_receipt_must_be_identical_everywhere(
-    protocol, baseline, location
+    protocol, baseline, baseline_rescore, location
 ):
     report = _candidate_report()
     if location == "top_level":
@@ -586,28 +615,42 @@ def test_runtime_ema_receipt_must_be_identical_everywhere(
     else:
         report["seed_runs"][1]["inference_weights"]["ema"]["decay"] = 0.9
 
-    with pytest.raises(gate.GateValidationError, match="inference-weight receipt disagrees"):
-        gate.evaluate_candidate_report(report, baseline, protocol, _candidate_lock())
+    with pytest.raises(
+        gate.GateValidationError, match="inference-weight receipt disagrees"
+    ):
+        gate.evaluate_candidate_report(
+            report, baseline, baseline_rescore, protocol, _candidate_lock()
+        )
 
 
-def test_observed_runner_must_equal_prelocked_runner(protocol, baseline):
+def test_observed_runner_must_equal_prelocked_runner(
+    protocol, baseline, baseline_rescore
+):
     report = _candidate_report()
     report["runner_sha256"] = "0" * 64
 
     with pytest.raises(gate.GateValidationError, match="runner differs"):
-        gate.evaluate_candidate_report(report, baseline, protocol, _candidate_lock())
+        gate.evaluate_candidate_report(
+            report, baseline, baseline_rescore, protocol, _candidate_lock()
+        )
 
 
-def test_full_implementation_and_metric_maps_must_be_prelocked(protocol, baseline):
+def test_full_implementation_and_metric_maps_must_be_prelocked(
+    protocol, baseline, baseline_rescore
+):
     report = _candidate_report()
     report["implementation_inputs"]["extra_source"] = {"sha256": "0" * 64}
     with pytest.raises(gate.GateValidationError, match="implementation inputs differ"):
-        gate.evaluate_candidate_report(report, baseline, protocol, _candidate_lock())
+        gate.evaluate_candidate_report(
+            report, baseline, baseline_rescore, protocol, _candidate_lock()
+        )
 
     report = _candidate_report()
     report["metric_inputs"]["unexpected"] = True
     with pytest.raises(gate.GateValidationError, match="metric inputs differ"):
-        gate.evaluate_candidate_report(report, baseline, protocol, _candidate_lock())
+        gate.evaluate_candidate_report(
+            report, baseline, baseline_rescore, protocol, _candidate_lock()
+        )
 
 
 def test_lock_rejects_final_seed_leak_and_non_ema_weights(protocol):
@@ -658,6 +701,110 @@ def test_tampered_baseline_count_is_rejected(baseline):
 
     with pytest.raises(gate.GateValidationError, match="quality"):
         gate.validate_baseline_manifest(baseline)
+
+
+@pytest.mark.parametrize(
+    ("path", "value", "message"),
+    [
+        (("status",), "completed", "not completed exact-match"),
+        (
+            ("source", "clean_pushed_checks", "before_computation"),
+            False,
+            "clean-source check",
+        ),
+        (("source", "revision"), "0" * 40, "source revision is unexpected"),
+        (
+            ("source", "files", "benchmark_runner", "sha256"),
+            "0" * 64,
+            "runtime module.*unbound from source",
+        ),
+        (
+            ("implementation", "benchmark_schema_version"),
+            6,
+            "schemas are stale",
+        ),
+        (
+            ("implementation", "metric_inputs_sha256"),
+            "0" * 64,
+            "metric-input self-hash",
+        ),
+        (
+            ("implementation", "runtime_modules_sha256"),
+            "0" * 64,
+            "runtime-module self-hash",
+        ),
+        (
+            ("protocol", "network_controls", "os_or_process_network_isolation"),
+            True,
+            "network-control claim",
+        ),
+        (
+            ("seed_results", 0, "row_comparison", "all_match"),
+            False,
+            "row comparison all_match",
+        ),
+        (
+            ("seed_results", 0, "inputs", "raw_samples_csv", "sha256"),
+            "0" * 64,
+            "digest disagrees with frozen manifest",
+        ),
+        (
+            ("seed_results", 0, "metrics", "strict", "quality_count"),
+            1,
+            "quality_count",
+        ),
+        (
+            ("seed_results", 0, "failure_counts", "strict_decode_failed"),
+            11,
+            "strict_decode_failed",
+        ),
+        (
+            ("aggregate_metrics", "strict", "quality", "mean"),
+            0.1,
+            "mean",
+        ),
+        (
+            ("strict_vs_repaired_funnel", "strict_valid"),
+            1,
+            "funnel disagrees",
+        ),
+        (
+            (
+                "manifest_comparison",
+                "all_seed_rows_metrics_failures_hashes_and_aggregates_match",
+            ),
+            False,
+            "manifest comparison is incomplete",
+        ),
+    ],
+)
+def test_baseline_rescore_attestation_tampering_fails_closed(
+    baseline, baseline_rescore, path, value, message
+):
+    cursor = baseline_rescore
+    for part in path[:-1]:
+        cursor = cursor[part]
+    cursor[path[-1]] = value
+
+    with pytest.raises(gate.GateValidationError, match=message):
+        gate.validate_baseline_rescore_attestation(baseline_rescore, baseline)
+
+
+def test_public_evaluator_cannot_bypass_baseline_rescore_attestation(
+    protocol, baseline, baseline_rescore
+):
+    baseline_rescore["seed_results"][2]["manifest_comparison"][
+        "all_counts_metrics_and_artifact_hashes_match"
+    ] = False
+
+    with pytest.raises(gate.GateValidationError, match="manifest comparison"):
+        gate.evaluate_candidate_report(
+            _candidate_report(),
+            baseline,
+            baseline_rescore,
+            protocol,
+            _candidate_lock(),
+        )
 
 
 def test_candidate_ledger_recomputes_scores_and_selects_deterministically():
@@ -791,9 +938,7 @@ def test_one_sample_or_mismatched_nfe_attempt_is_disclosed_but_ineligible(
     result = gate.validate_candidate_ledger(
         ledger,
         candidate_id="schedule-uniform-synthetic",
-        artifact_loader=_artifact_loader(
-            registered_blobs | engineering_blobs
-        ),
+        artifact_loader=_artifact_loader(registered_blobs | engineering_blobs),
     )
 
     assert result["eligible_attempt_count"] == 1
@@ -810,9 +955,7 @@ def test_one_sample_or_mismatched_nfe_attempt_is_disclosed_but_ineligible(
         gate.validate_candidate_ledger(
             ledger,
             candidate_id="schedule-uniform-synthetic",
-            artifact_loader=_artifact_loader(
-                registered_blobs | engineering_blobs
-            ),
+            artifact_loader=_artifact_loader(registered_blobs | engineering_blobs),
         )
 
 
@@ -843,9 +986,7 @@ def test_valid_health_pilot_with_nonregistered_seed_is_disclosed():
         artifact_loader=_artifact_loader(registered_blobs | health_blobs),
     )
 
-    assert health["ineligibility_reason"] == (
-        gate.NONREGISTERED_OPERATING_POINT_REASON
-    )
+    assert health["ineligibility_reason"] == (gate.NONREGISTERED_OPERATING_POINT_REASON)
     assert result["eligible_attempt_count"] == 1
     assert result["ineligible_completed_attempt_count"] == 1
     assert result["selected_attempt_id"] == "registered"
@@ -860,9 +1001,7 @@ def test_valid_health_pilot_with_nonregistered_seed_is_disclosed():
         ("final_seed_results_included", True),
     ],
 )
-def test_candidate_ledger_rejects_semantically_misbound_artifact(
-    field, tampered_value
-):
+def test_candidate_ledger_rejects_semantically_misbound_artifact(field, tampered_value):
     attempt, blobs = _completed_pilot_attempt(
         attempt_id="a1",
         candidate_id="schedule-uniform-synthetic",
@@ -920,11 +1059,11 @@ def test_candidate_ledger_rejects_wrong_winner_including_lexical_tie_break():
         qualities=(0.85, 0.85),
         diversities=(0.74, 0.74),
     )
-    ledger = _pilot_ledger(
-        attempts=[later, first], selected_attempt_id="z-later"
-    )
+    ledger = _pilot_ledger(attempts=[later, first], selected_attempt_id="z-later")
 
-    with pytest.raises(gate.GateValidationError, match="deterministic pilot-score winner"):
+    with pytest.raises(
+        gate.GateValidationError, match="deterministic pilot-score winner"
+    ):
         gate.validate_candidate_ledger(
             ledger,
             candidate_id="schedule-uniform-synthetic",
@@ -962,9 +1101,7 @@ def test_candidate_ledger_rejects_content_free_and_malformed_failure_evidence():
     failed, failed_blobs = _failed_pilot_attempt(
         attempt_id="f1", candidate_id="schedule-failed", seed=1001
     )
-    ledger = _pilot_ledger(
-        attempts=[winner, failed], selected_attempt_id="a1"
-    )
+    ledger = _pilot_ledger(attempts=[winner, failed], selected_attempt_id="a1")
     failure_ref = ledger["attempts"][1]["artifact_refs"][0]
     failure_evidence = json.loads(failed_blobs[failure_ref["relative_path"]])
     failure_evidence["failure"]["reason"] = ""
@@ -984,15 +1121,15 @@ def test_training_summary_and_exit_receipt_are_joined_to_lock(
 ):
     monkeypatch.setattr(gate, "REPOSITORY_ROOT", tmp_path)
     candidate_lock = _candidate_lock()
-    summary_path = tmp_path / candidate_lock["training"]["training_summary"][
-        "relative_path"
-    ]
-    receipt_path = tmp_path / candidate_lock["training"]["exit_receipt"][
-        "relative_path"
-    ]
-    runtime_path = tmp_path / candidate_lock["training"]["runtime_config"][
-        "relative_path"
-    ]
+    summary_path = (
+        tmp_path / candidate_lock["training"]["training_summary"]["relative_path"]
+    )
+    receipt_path = (
+        tmp_path / candidate_lock["training"]["exit_receipt"]["relative_path"]
+    )
+    runtime_path = (
+        tmp_path / candidate_lock["training"]["runtime_config"]["relative_path"]
+    )
     summary_path.parent.mkdir(parents=True)
     resolved_config = {
         "data": "safe",
@@ -1022,9 +1159,7 @@ def test_training_summary_and_exit_receipt_are_joined_to_lock(
     runtime_path.write_bytes(runtime_bytes)
     runtime_sha = hashlib.sha256(runtime_bytes).hexdigest()
     candidate_lock["training"]["runtime_config"]["sha256"] = runtime_sha
-    candidate_lock["training"][
-        "resolved_training_config_sha256"
-    ] = resolved_config_sha
+    candidate_lock["training"]["resolved_training_config_sha256"] = resolved_config_sha
     candidate_lock["training"]["training_argv_sha256"] = training_argv_sha
     training_accounting = {
         "training_seed": 7,
@@ -1151,8 +1286,12 @@ def test_git_firewall_requires_preexisting_exact_lock_ledger_and_config(
     tmp_path, monkeypatch, protocol
 ):
     original_root = gate.REPOSITORY_ROOT
+    original_subprocess_run = subprocess.run
     protocol_bytes = (original_root / gate.PROTOCOL_RELATIVE_PATH).read_bytes()
     baseline_bytes = (original_root / gate.BASELINE_RELATIVE_PATH).read_bytes()
+    baseline_rescore_bytes = (
+        original_root / gate.BASELINE_RESCORE_RELATIVE_PATH
+    ).read_bytes()
     monkeypatch.setattr(gate, "REPOSITORY_ROOT", tmp_path)
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     subprocess.run(
@@ -1172,10 +1311,12 @@ def test_git_firewall_requires_preexisting_exact_lock_ledger_and_config(
     config_path.parent.mkdir(parents=True)
     protocol_path = tmp_path / gate.PROTOCOL_RELATIVE_PATH
     baseline_path = tmp_path / gate.BASELINE_RELATIVE_PATH
+    baseline_rescore_path = tmp_path / gate.BASELINE_RESCORE_RELATIVE_PATH
     protocol_path.parent.mkdir(parents=True)
     baseline_path.parent.mkdir(parents=True)
     protocol_path.write_bytes(protocol_bytes)
     baseline_path.write_bytes(baseline_bytes)
+    baseline_rescore_path.write_bytes(baseline_rescore_bytes)
     sampler_bytes = b"# synthetic audited EMA sampler\n"
     runner_bytes = b"# synthetic benchmark runner\n"
     report_bytes = b"# synthetic report implementation\n"
@@ -1209,9 +1350,7 @@ def test_git_firewall_requires_preexisting_exact_lock_ledger_and_config(
         pilot_artifact_path = tmp_path / relative_path
         pilot_artifact_path.parent.mkdir(parents=True, exist_ok=True)
         pilot_artifact_path.write_bytes(artifact_bytes)
-    ledger = _pilot_ledger(
-        attempts=[pilot_attempt], selected_attempt_id="a1"
-    )
+    ledger = _pilot_ledger(attempts=[pilot_attempt], selected_attempt_id="a1")
     ledger_bytes = _json_bytes(ledger)
     ledger_path = tmp_path / "experiments/udlm/candidates/ledger.json"
     ledger_path.parent.mkdir(parents=True)
@@ -1252,6 +1391,36 @@ def test_git_firewall_requires_preexisting_exact_lock_ledger_and_config(
     ).stdout.strip()
     normalized = gate.validate_candidate_lock(candidate_lock, protocol)
 
+    synthetic_git_blob = gate._git_blob
+
+    def git_blob_with_real_rescore_source(revision, relative_path):
+        if revision == gate.EXPECTED_BASELINE_RESCORE_SOURCE_REVISION:
+            return original_subprocess_run(
+                [
+                    "git",
+                    "-C",
+                    str(original_root),
+                    "show",
+                    f"{revision}:{relative_path.as_posix()}",
+                ],
+                check=True,
+                capture_output=True,
+            ).stdout
+        return synthetic_git_blob(revision, relative_path)
+
+    monkeypatch.setattr(gate, "_git_blob", git_blob_with_real_rescore_source)
+
+    def run_with_external_rescore_ancestry(args, *run_args, **run_kwargs):
+        if (
+            isinstance(args, list)
+            and "merge-base" in args
+            and args[-2] == gate.EXPECTED_BASELINE_RESCORE_SOURCE_REVISION
+        ):
+            return subprocess.CompletedProcess(args=args, returncode=0)
+        return original_subprocess_run(args, *run_args, **run_kwargs)
+
+    monkeypatch.setattr(gate.subprocess, "run", run_with_external_rescore_ancestry)
+
     evidence = gate.validate_git_lock_firewall(
         benchmark_revision=benchmark_revision,
         candidate_lock_path=Path("experiments/udlm/candidates/lock.json"),
@@ -1260,6 +1429,12 @@ def test_git_firewall_requires_preexisting_exact_lock_ledger_and_config(
     )
 
     assert evidence["candidate_lock_exact_blob_at_benchmark_revision"] is True
+    assert (
+        evidence["baseline_rescore_attestation_exact_blob_at_benchmark_revision"]
+        is True
+    )
+    assert evidence["baseline_rescore_source_exact_blobs_verified"] is True
+    assert evidence["baseline_rescore_source_revision_is_ancestor"] is True
     assert evidence["candidate_ledger_exact_blob_at_benchmark_revision"] is True
     assert evidence["ema_sampler_source_exact_blob_at_benchmark_revision"] is True
     assert evidence["benchmark_runner_exact_blob_at_benchmark_revision"] is True
@@ -1275,6 +1450,32 @@ def test_git_firewall_requires_preexisting_exact_lock_ledger_and_config(
     }
     assert evidence["selected_attempt_id"] == "a1"
     assert evidence["selection_recomputed_from_committed_pilot_evidence"] is True
+
+    baseline_rescore_path.write_bytes(baseline_rescore_bytes + b" ")
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "add", baseline_rescore_path.as_posix()],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "commit", "-qm", "tamper rescore evidence"],
+        check=True,
+    )
+    tampered_revision = subprocess.run(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    with pytest.raises(
+        gate.GateValidationError, match="rescore-attestation blob differs"
+    ):
+        gate.validate_git_lock_firewall(
+            benchmark_revision=tampered_revision,
+            candidate_lock_path=Path("experiments/udlm/candidates/lock.json"),
+            candidate_lock_bytes=lock_bytes,
+            lock=normalized,
+        )
+
     with pytest.raises(gate.GateValidationError, match="candidate-lock blob differs"):
         gate.validate_git_lock_firewall(
             benchmark_revision=benchmark_revision,

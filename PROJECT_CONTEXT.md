@@ -1,6 +1,6 @@
 # GenMol v2 project context
 
-Snapshot: 2026-09-06 06:05 Asia/Dubai. Recheck dynamic state, especially Git
+Snapshot: 2026-09-06 07:41 Asia/Dubai. Recheck dynamic state, especially Git
 status, logs, tmux sessions, and GPU occupancy, before acting.
 
 ## Active objective and safe workspace
@@ -12,11 +12,11 @@ status, logs, tmux sessions, and GPU occupancy, before acting.
   `/home/aidar.alimbayev/Documents/genmolv2/run_sources/udlm_genmol_worktree`
   on branch `codex/udlm-genmol`, not in the dirty main checkout. Preserve all
   unrelated and uncommitted work.
-- The current clean pushed pilot-source revision is
-  `a4120fd552bcc7dd56f4cc52c75ff36e4bf97a2f`; before this documentation
-  update, `HEAD` and `origin/codex/udlm-genmol` were equal and the source
-  worktree was clean. It contains the hardened completion contract plus the
-  pilot-only distributed-stream repair and scheduler isolation. The immutable
+- The clean pushed source revision used for the current-code MDLM rescore is
+  `74482c2742ab5ad15def122c809a6b4e403e94cf`. It contains the hardened
+  completion contract, pilot-only distributed-stream repair and scheduler
+  isolation, exact EMA inference receipt, evidence schema bumps, registered
+  superiority protocol/gate, and rescore implementation. The immutable
   prior-geometry evidence remains correctly bound to its producing revision
   `6b312750bcc8861d8ff423f959e44764d121c3b1`; do not relabel that artifact as
   having been produced by the later source revision.
@@ -113,11 +113,17 @@ argv, checkpoint hash, world size, and warm-start provenance. A separate
 post-pipeline helper atomically publishes `pilot_exit_status.json`; it records
 the training and `tee` statuses separately and revalidates runtime, checkpoint,
 summary, and source bindings. Missing, malformed, mismatched, or nonzero-status
-evidence makes the launcher fail. These pilot-only guards leave ordinary
+evidence makes the launcher fail. The semantic checkpoint audit now
+deserializes the same open file descriptor whose bytes and identity were
+certified, so a byte-identical pathname replacement also fails. The summary
+and exit receipt use schema 2 and record the training seed, optimizer updates,
+world size, microbatch, accumulation, requested example exposure, hosted-stream
+partition policy, trainable base/time-adapter parameter split, and exact EMA
+shadow count/decay/update count. These pilot-only guards leave ordinary
 release/manual training defaults unchanged.
 
-At source revision `a4120fd552bcc7dd56f4cc52c75ff36e4bf97a2f`, the
-exact-worktree full test suite passed `505` tests with `11` dependency warnings,
+At source revision `74482c2742ab5ad15def122c809a6b4e403e94cf`, the
+exact-worktree full test suite passed `594` tests with `14` dependency warnings,
 and `git diff --check` was clean. The repaired pilot constructs the Trainer
 before its hosted dataloader, validates an exact single-node global rank and
 world size in every process, and uses Hugging Face node splitting so DDP
@@ -134,6 +140,38 @@ trusted virtual-environment `.pth` files, a local upstream ref that is compared
 but not implicitly fetched, the host I/O cost of the post-fit checkpoint audit,
 and the unavoidable small interval between the final GPU probe and process
 creation.
+
+## Registered superiority and baseline evidence
+
+The frozen protocol is
+`experiments/udlm/protocols/de_novo_superiority_v1.json`. The publication gate
+requires all four point estimates and all four one-sided 95% interval criteria
+for one checkpoint locked before final seeds 0, 1, and 2. Validity uses pooled
+Newcombe--Wilson method 10; uniqueness, quality, and diversity use unpaired
+Welch intervals over three seed-level estimates. A row bootstrap that
+re-deduplicates molecules is forbidden.
+
+Pilot selection is also registered before GPU work. Only a completed panel at
+seeds 1000 and 1001, 256 requested samples per seed, 128 NFE, and the
+released-compatible branch is eligible. The gate recomputes mean quality and
+diversity from each committed semantic pilot artifact and selects quality,
+then diversity, then lexical attempt ID. Completed 32-sample or 32/64-NFE
+health diagnostics and failed attempts remain disclosed but cannot affect the
+winner. Final seed results cannot appear in the ledger.
+
+The immutable current-code MDLM rescore is
+`experiments/udlm/baselines/mdlm_50000_rescore_attestation.json`, 51,661 bytes,
+SHA-256
+`6326b63c38c7052d0b47282d611618f77637496da2785779af69097fc1441323`.
+It was produced from clean pushed revision
+`74482c2742ab5ad15def122c809a6b4e403e94cf` in three fresh CPU interpreters.
+All 63,000 row-field comparisons matched, and released-compatible plus strict
+metrics, failure counts, funnels, and aggregates reproduce the frozen manifest.
+Historical raw rows were retained and never regenerated or rewritten. The
+attestation binds current schemas 7/6, the pinned SA bytes, loaded SAFE/RDKit
+module bytes, source files, and every legacy raw/summary hash. Its offline
+environment and Python TCP/name-resolution guards are recorded honestly as
+not providing OS-level or process-level network isolation.
 
 ## Matched categorical CPU smoke panel
 
@@ -202,9 +240,9 @@ UDLM-over-GenMol superiority claim.
 
 No UDLM GPU job has been launched, and no GPU inventory or utilization probe
 has yet been run for the pending pilot. No probe or job occurred while producing
-or reviewing revision `a4120fd552bcc7dd56f4cc52c75ff36e4bf97a2f` or this
-documentation update; its stream demonstration and validation are CPU-only.
-No stale snapshot should be treated as authorization or availability evidence.
+or reviewing revision `74482c2742ab5ad15def122c809a6b4e403e94cf`, the CPU-only
+MDLM rescore, or this documentation update. No stale snapshot should be treated
+as authorization or availability evidence.
 
 Before the first GPU launch, the user must select only the GPU count: one or
 two. Recommend **one GPU** for the first matched 10-step engineering gate; the
@@ -243,8 +281,15 @@ Completed prior items:
 - The pilot-only hosted-stream partition, strict rank contract, inherited
   scheduler isolation, and their CPU tests were reviewed, committed, and pushed
   in `a4120fd`.
-- The exact-worktree suite and diff check completed at that source revision:
-  `505 passed`, `11 warnings`, and a clean `git diff --check`.
+- The EMA/training-accounting evidence chain, descriptor-bound checkpoint
+  audit, schema bumps, semantic pilot ledger, registered gate, and baseline
+  rescorer were reviewed, validated, committed, and pushed in `74482c2`.
+- The exact-worktree suite at that source revision passed `594` tests with `14`
+  dependency warnings; the real CPU rescore then matched all `63,000/63,000`
+  row fields and exact aggregate metrics.
+- After adding the immutable rescore attestation and its strict protocol/gate,
+  Git-firewall, notebook, and documentation bindings, the exact-worktree full
+  suite passed `610` tests with the same `14` dependency warnings.
 
 Remaining sequence:
 

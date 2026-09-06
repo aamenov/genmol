@@ -1,0 +1,1377 @@
+{
+  "aggregate_metrics": {
+    "released_comparable": {
+      "diversity": {
+        "mean": 0.8230213192558725,
+        "sample_sd": 0.0013239926960545059,
+        "values_by_seed": [
+          {
+            "seed": 0,
+            "value": 0.8239018373671015
+          },
+          {
+            "seed": 1,
+            "value": 0.8214987143446951
+          },
+          {
+            "seed": 2,
+            "value": 0.8236634060558206
+          }
+        ]
+      },
+      "quality": {
+        "mean": 0.858,
+        "sample_sd": 0.012288205727444518,
+        "values_by_seed": [
+          {
+            "seed": 0,
+            "value": 0.849
+          },
+          {
+            "seed": 1,
+            "value": 0.872
+          },
+          {
+            "seed": 2,
+            "value": 0.853
+          }
+        ]
+      },
+      "uniqueness": {
+        "mean": 0.9986666666666667,
+        "sample_sd": 0.0005773502691896263,
+        "values_by_seed": [
+          {
+            "seed": 0,
+            "value": 0.998
+          },
+          {
+            "seed": 1,
+            "value": 0.999
+          },
+          {
+            "seed": 2,
+            "value": 0.999
+          }
+        ]
+      },
+      "validity": {
+        "mean": 1.0,
+        "sample_sd": 0.0,
+        "values_by_seed": [
+          {
+            "seed": 0,
+            "value": 1.0
+          },
+          {
+            "seed": 1,
+            "value": 1.0
+          },
+          {
+            "seed": 2,
+            "value": 1.0
+          }
+        ]
+      }
+    },
+    "strict": {
+      "diversity": {
+        "mean": 0.8224759846544535,
+        "sample_sd": 0.0016098506479083267,
+        "values_by_seed": [
+          {
+            "seed": 0,
+            "value": 0.8235759382901502
+          },
+          {
+            "seed": 1,
+            "value": 0.8206282422152162
+          },
+          {
+            "seed": 2,
+            "value": 0.8232237734579942
+          }
+        ]
+      },
+      "quality": {
+        "mean": 0.8476666666666667,
+        "sample_sd": 0.012220201853215583,
+        "values_by_seed": [
+          {
+            "seed": 0,
+            "value": 0.837
+          },
+          {
+            "seed": 1,
+            "value": 0.861
+          },
+          {
+            "seed": 2,
+            "value": 0.845
+          }
+        ]
+      },
+      "uniqueness": {
+        "mean": 0.9986511511492829,
+        "sample_sd": 0.0005814098058772169,
+        "values_by_seed": [
+          {
+            "seed": 0,
+            "value": 0.997979797979798
+          },
+          {
+            "seed": 1,
+            "value": 0.9989858012170385
+          },
+          {
+            "seed": 2,
+            "value": 0.9989878542510121
+          }
+        ]
+      },
+      "validity": {
+        "mean": 0.988,
+        "sample_sd": 0.0020000000000000018,
+        "values_by_seed": [
+          {
+            "seed": 0,
+            "value": 0.99
+          },
+          {
+            "seed": 1,
+            "value": 0.986
+          },
+          {
+            "seed": 2,
+            "value": 0.988
+          }
+        ]
+      }
+    }
+  },
+  "created_at_utc": "2026-09-06T03:29:16.371802+00:00",
+  "environment": {
+    "parent_executable": "/home/aidar.alimbayev/Documents/genmolv2/.venv/bin/python",
+    "parent_platform": "Linux-6.8.0-138-generic-x86_64-with-glibc2.35",
+    "parent_python": "3.10.21 (main, Aug 27 2026, 14:42:07) [GCC 14.3.0]",
+    "worker_policy": {
+      "CUDA_VISIBLE_DEVICES": "",
+      "HF_DATASETS_OFFLINE": "1",
+      "HF_HUB_OFFLINE": "1",
+      "NVIDIA_VISIBLE_DEVICES": "",
+      "TRANSFORMERS_OFFLINE": "1",
+      "WANDB_DISABLED": "true",
+      "WANDB_MODE": "offline"
+    }
+  },
+  "implementation": {
+    "benchmark_schema_version": 7,
+    "metric_inputs": {
+      "affected_outputs": [
+        "raw_samples_csv.strict_sa",
+        "raw_samples_csv.released_sa",
+        "metrics.strict.quality",
+        "metrics.released_comparable.quality"
+      ],
+      "sa_fragment_scores": {
+        "duplicate_fingerprint_count": 0,
+        "fingerprint_score_count": 705292,
+        "path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/udlm_genmol_worktree/oracle/fpscores.pkl",
+        "relative_path": "oracle/fpscores.pkl",
+        "serialization": "python_pickle_verified_before_deserialization",
+        "sha256": "24a4392f5c673e79c0446af3c4d8e458293b5fecaa244328e76741ead9d21dbf",
+        "size_bytes": 9048931,
+        "top_level_row_count": 3549
+      },
+      "sa_loading_policy": {
+        "artifact_mutation_after_resident_load_affects_current_run": false,
+        "network_download_allowed": false,
+        "oracle_class": "tdc.oracles.Oracle",
+        "requested_oracle": "sa",
+        "resident_scores_loaded_from_verified_bytes": true,
+        "sa_callable": "tdc.chem_utils.oracle.oracle.SA",
+        "tdc_oracle_load_invoked": false
+      },
+      "schema_version": 1,
+      "tdc_metric_implementation": {
+        "distribution": "PyTDC",
+        "implementation_files": {
+          "diversity_scoring": {
+            "path": "/home/aidar.alimbayev/Documents/genmolv2/.venv/lib/python3.10/site-packages/tdc/chem_utils/evaluator.py",
+            "sha256": "eb61d9c258be6ad1a8a2297395f6519ff89d7651013fc8a2c72831e572d574e3",
+            "size_bytes": 13620
+          },
+          "evaluator_dispatch": {
+            "path": "/home/aidar.alimbayev/Documents/genmolv2/.venv/lib/python3.10/site-packages/tdc/evaluator.py",
+            "sha256": "3531d60f2b128417429f2e510d994c1c72a2e441124ea43505224f4120819549",
+            "size_bytes": 15901
+          },
+          "oracle_dispatch": {
+            "path": "/home/aidar.alimbayev/Documents/genmolv2/.venv/lib/python3.10/site-packages/tdc/oracles.py",
+            "sha256": "03b52abdc8a1446f903238009fd9682842e04479eac8e989ed2395147938de2b",
+            "size_bytes": 25879
+          },
+          "sa_qed_scoring": {
+            "path": "/home/aidar.alimbayev/Documents/genmolv2/.venv/lib/python3.10/site-packages/tdc/chem_utils/oracle/oracle.py",
+            "sha256": "d266c89b5ea5f67135d0fa04f3348c4e67e3b8946c4ffe13ee8d6b96a5335e4f",
+            "size_bytes": 59584
+          }
+        },
+        "version": "0.4.1"
+      }
+    },
+    "metric_inputs_sha256": "cb4c5b88424123a1c04c5d52ec63d83a55cc88f253f5d402fe68a84222c7062c",
+    "raw_sample_field_count": 21,
+    "report_schema_version": 6,
+    "runtime_modules": {
+      "genmol.utils.utils_chem": {
+        "module": "genmol.utils.utils_chem",
+        "path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/udlm_genmol_worktree/src/genmol/utils/utils_chem.py",
+        "read_policy": "regular_file_no_symlink_stable_descriptor_bytes_retained_in_memory",
+        "sha256": "0c7de4c7225f80e9a8cbbdb99018e5e8555c114ce6deea7dfcd593fc5e0f3867",
+        "size_bytes": 5046
+      },
+      "rdkit": {
+        "module": "rdkit",
+        "path": "/home/aidar.alimbayev/Documents/genmolv2/.venv/lib/python3.10/site-packages/rdkit/__init__.py",
+        "read_policy": "regular_file_no_symlink_stable_descriptor_bytes_retained_in_memory",
+        "sha256": "e987eae7024995c10c605b3f101e7e5b49423280578cca2ce703487c4c5bbb82",
+        "size_bytes": 1031
+      },
+      "rdkit.Chem": {
+        "module": "rdkit.Chem",
+        "path": "/home/aidar.alimbayev/Documents/genmolv2/.venv/lib/python3.10/site-packages/rdkit/Chem/__init__.py",
+        "read_policy": "regular_file_no_symlink_stable_descriptor_bytes_retained_in_memory",
+        "sha256": "82202aec2fbed0337e3b7eb261751e1d85c1f5b704997e342c7e0b11562bc817",
+        "size_bytes": 7319
+      },
+      "rdkit.Chem.rdchem": {
+        "module": "rdkit.Chem.rdchem",
+        "path": "/home/aidar.alimbayev/Documents/genmolv2/.venv/lib/python3.10/site-packages/rdkit/Chem/rdchem.so",
+        "read_policy": "regular_file_no_symlink_stable_descriptor_bytes_retained_in_memory",
+        "sha256": "70dfccec51caf5922c9bcd3a2c1d8b7c3fb89e0472bc5f2e74bf7c74524cb998",
+        "size_bytes": 7229097
+      },
+      "rdkit.Chem.rdmolfiles": {
+        "module": "rdkit.Chem.rdmolfiles",
+        "path": "/home/aidar.alimbayev/Documents/genmolv2/.venv/lib/python3.10/site-packages/rdkit/Chem/rdmolfiles.so",
+        "read_policy": "regular_file_no_symlink_stable_descriptor_bytes_retained_in_memory",
+        "sha256": "5b957b921f14fe69e90014e99ecea85b1eb39524a3212a4693be7e783d79e0b8",
+        "size_bytes": 3233561
+      },
+      "rdkit.Chem.rdmolops": {
+        "module": "rdkit.Chem.rdmolops",
+        "path": "/home/aidar.alimbayev/Documents/genmolv2/.venv/lib/python3.10/site-packages/rdkit/Chem/rdmolops.so",
+        "read_policy": "regular_file_no_symlink_stable_descriptor_bytes_retained_in_memory",
+        "sha256": "0ad8f0cccaf0e5155d0f6f4ccc13c56cc507cbac576a6b00155cc727e771250d",
+        "size_bytes": 2236441
+      },
+      "safe": {
+        "module": "safe",
+        "path": "/home/aidar.alimbayev/Documents/genmolv2/.venv/lib/python3.10/site-packages/safe/__init__.py",
+        "read_policy": "regular_file_no_symlink_stable_descriptor_bytes_retained_in_memory",
+        "sha256": "49553723d7456b46b8c3dffcb4bca8a6c09d5c3ee3e85259c5c42789980efc55",
+        "size_bytes": 296
+      },
+      "safe.converter": {
+        "module": "safe.converter",
+        "path": "/home/aidar.alimbayev/Documents/genmolv2/.venv/lib/python3.10/site-packages/safe/converter.py",
+        "read_policy": "regular_file_no_symlink_stable_descriptor_bytes_retained_in_memory",
+        "sha256": "0a857a482114263b11a63da1a8b0364f7f092b1d0bd8488fdf0ef79c32a859d7",
+        "size_bytes": 18796
+      },
+      "scripts.exps.denovo.benchmark": {
+        "module": "scripts.exps.denovo.benchmark",
+        "path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/udlm_genmol_worktree/scripts/exps/denovo/benchmark.py",
+        "read_policy": "regular_file_no_symlink_stable_descriptor_bytes_retained_in_memory",
+        "sha256": "f771050555448028214d20ecca068294a2740f8a2bc8991cfadfea3fbe2ea116",
+        "size_bytes": 115205
+      },
+      "scripts.exps.denovo.report": {
+        "module": "scripts.exps.denovo.report",
+        "path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/udlm_genmol_worktree/scripts/exps/denovo/report.py",
+        "read_policy": "regular_file_no_symlink_stable_descriptor_bytes_retained_in_memory",
+        "sha256": "5013faa6685d8993fefe4a388598301ab9e858c43ab9750191f22bae45f4b85b",
+        "size_bytes": 169280
+      },
+      "scripts.udlm.rescore_mdlm_baseline": {
+        "module": "scripts.udlm.rescore_mdlm_baseline",
+        "path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/udlm_genmol_worktree/scripts/udlm/rescore_mdlm_baseline.py",
+        "read_policy": "regular_file_no_symlink_stable_descriptor_bytes_retained_in_memory",
+        "sha256": "de5ad8d252e4ac200d9dc104f646d0bf31cbf0e7526bc8a1ee3a2df253dcff16",
+        "size_bytes": 71410
+      }
+    },
+    "runtime_modules_sha256": "f260adbf5adbaa9b0fb7047cf9ef52c6a85dd41155e1b125f70652124699ba45"
+  },
+  "inputs": {
+    "frozen_manifest": {
+      "path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/udlm_genmol_worktree/experiments/udlm/baselines/mdlm_50000.json",
+      "read_policy": "regular_file_no_symlink_stable_descriptor_bytes_retained_in_memory",
+      "schema_version": 1,
+      "sha256": "6da46fc615dedbcca436da087a2c1e9145f5d110036e0c15bb431ded3c2e5539",
+      "size_bytes": 5865
+    },
+    "historical_runs_dir": "/home/aidar.alimbayev/Documents/genmolv2/output/benchmarks/denovo_50000",
+    "historical_source_aggregate": {
+      "historical_runner_sha256": "a77d7c84d8628403c6d7a11edebce5bf9b8405e3f8b79a326a6e06bd7f444cea",
+      "path": "/home/aidar.alimbayev/Documents/genmolv2/output/benchmarks/denovo_50000/report/aggregate.json",
+      "read_policy": "regular_file_no_symlink_stable_descriptor_bytes_retained_in_memory",
+      "schema_version": 1,
+      "sha256": "b474efc593b665489359425dbe1ed0873f8ae1d44b77478b871aff6d6b555904",
+      "size_bytes": 42570
+    },
+    "retention_and_mutation_policy": "all legacy CSV/JSON and SA inputs are hashed from stable retained bytes; schema-2 summaries are never written"
+  },
+  "manifest_comparison": {
+    "all_seed_rows_metrics_failures_hashes_and_aggregates_match": true,
+    "manifest_sha256": "6da46fc615dedbcca436da087a2c1e9145f5d110036e0c15bb431ded3c2e5539"
+  },
+  "output": {
+    "clobber_allowed": false,
+    "path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/udlm_genmol_worktree/experiments/udlm/baselines/mdlm_50000_rescore_attestation.json",
+    "publication": "temporary_fsync_then_atomic_hard_link_no_replace"
+  },
+  "protocol": {
+    "cuda_visible_devices": "",
+    "decode_function": "benchmark.decode_records",
+    "device": "cpu",
+    "diversity": "tdc.Evaluator('diversity')",
+    "legacy_summary_policy": "schema-2 input is read-only and never rewritten",
+    "network_controls": {
+      "offline_environment_variables": {
+        "CUDA_VISIBLE_DEVICES": "",
+        "HF_DATASETS_OFFLINE": "1",
+        "HF_HUB_OFFLINE": "1",
+        "NVIDIA_VISIBLE_DEVICES": "",
+        "TRANSFORMERS_OFFLINE": "1",
+        "WANDB_DISABLED": "true",
+        "WANDB_MODE": "offline"
+      },
+      "os_or_process_network_isolation": false,
+      "python_runtime_guarded_apis": [
+        "socket.create_connection",
+        "socket.getaddrinfo",
+        "socket.socket.connect",
+        "socket.socket.connect_ex"
+      ],
+      "scope_limitation": "Python-runtime guard only; this is not OS-level or process-level network isolation and does not claim to block native extensions, subprocesses, raw sockets, or any other unguarded socket, name-resolution, or datagram API"
+    },
+    "nonnumeric_and_count_comparison": "exact value and type",
+    "numeric_comparison": "absolute tolerance 1e-12; relative tolerance 0",
+    "one_fresh_interpreter_per_seed": true,
+    "parent_max_parallel_workers": 3,
+    "python_hash_seed_equals_seed": true,
+    "qed": "tdc.Oracle('qed')",
+    "row_fields_compared": [
+      "sample_index",
+      "raw_model_text",
+      "raw_safe",
+      "raw_safe_error",
+      "strict_smiles",
+      "strict_decode_error",
+      "strict_qed",
+      "strict_sa",
+      "strict_is_first_unique",
+      "strict_quality_pass",
+      "strict_quality_counted",
+      "released_repaired_smiles",
+      "released_smiles",
+      "released_decode_error",
+      "released_qed",
+      "released_sa",
+      "released_is_first_unique",
+      "released_quality_pass",
+      "released_quality_counted",
+      "released_was_recovered",
+      "released_largest_component_applied"
+    ],
+    "sa": "benchmark.pinned_tdc_sa_oracle over retained pinned SA bytes",
+    "seeds": [
+      0,
+      1,
+      2
+    ],
+    "use_bracket_safe": false
+  },
+  "purpose": "CPU-only current-code re-decode and re-score attestation for the immutable legacy MDLM baseline; no molecules were regenerated",
+  "schema_version": 1,
+  "seed_results": [
+    {
+      "current_report_validator_counts": {
+        "cross_branch": {
+          "raw_safe_conversion_failed": 0,
+          "released_largest_component_applied": 14,
+          "released_recovered_strict_failure": 10,
+          "strict_valid_but_released_failed": 0
+        },
+        "released_comparable": {
+          "quality_count": 849,
+          "unique_count": 998,
+          "valid_count": 1000
+        },
+        "strict": {
+          "quality_count": 837,
+          "unique_count": 988,
+          "valid_count": 990
+        }
+      },
+      "environment": {
+        "cuda_visible_devices": "",
+        "device": "cpu",
+        "executable": "/home/aidar.alimbayev/Documents/genmolv2/.venv/bin/python",
+        "nvidia_visible_devices": "",
+        "offline_environment": {
+          "HF_DATASETS_OFFLINE": "1",
+          "HF_HUB_OFFLINE": "1",
+          "TRANSFORMERS_OFFLINE": "1",
+          "WANDB_DISABLED": "true",
+          "WANDB_MODE": "offline"
+        },
+        "pid": 2552852,
+        "platform": "Linux-6.8.0-138-generic-x86_64-with-glibc2.35",
+        "python": "3.10.21 (main, Aug 27 2026, 14:42:07) [GCC 14.3.0]",
+        "python_hash_seed": "0",
+        "python_network_guard_during_computation": {
+          "guarded_apis": [
+            "socket.create_connection",
+            "socket.getaddrinfo",
+            "socket.socket.connect",
+            "socket.socket.connect_ex"
+          ],
+          "scope_limitation": "Python-runtime guard only; this is not OS-level or process-level network isolation and does not claim to block native extensions, subprocesses, raw sockets, or any other unguarded socket, name-resolution, or datagram API"
+        },
+        "versions": {
+          "numpy": "1.26.4",
+          "rdkit": "2023.9.6",
+          "safe": "0.1.14",
+          "tdc": "0.4.1",
+          "torch": "2.6.0+cu124"
+        }
+      },
+      "failure_counts": {
+        "raw_safe_conversion_failed": 0,
+        "released_decode_failed": 0,
+        "released_duplicates": 2,
+        "released_largest_component_applied": 14,
+        "released_recovered_strict_failure": 10,
+        "strict_decode_failed": 10,
+        "strict_duplicates": 2,
+        "strict_valid_but_released_failed": 0
+      },
+      "inputs": {
+        "raw_samples_csv": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/benchmarks/denovo_50000/seed_0/raw_samples.csv",
+          "read_policy": "regular_file_no_symlink_stable_descriptor_bytes_retained_in_memory",
+          "sha256": "fb1a255f04092fdf8763b18eccb866eef02f1d7dde422727b00ce549bc7b2b2f",
+          "size_bytes": 367916
+        },
+        "summary_json": {
+          "mutation_policy": "read_only_never_rewritten",
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/benchmarks/denovo_50000/seed_0/summary.json",
+          "read_policy": "regular_file_no_symlink_stable_descriptor_bytes_retained_in_memory",
+          "schema_version": 2,
+          "sha256": "c8b312dd905ddd0f972920c2851569a4c2468c98aa46dfa2ac3f4dcbb3567a65",
+          "size_bytes": 11685
+        }
+      },
+      "manifest_comparison": {
+        "all_counts_metrics_and_artifact_hashes_match": true
+      },
+      "metric_inputs_sha256": "cb4c5b88424123a1c04c5d52ec63d83a55cc88f253f5d402fe68a84222c7062c",
+      "metrics": {
+        "released_comparable": {
+          "definition": "Released GenMol path: SAFE fragment repair with fix=True, canonical decode, largest disconnected component, deduplicate before diversity and quality; validity and quality divide by requested samples, while uniqueness divides by released-valid samples.",
+          "diversity": 0.8239018373671015,
+          "diversity_input_count": 998,
+          "diversity_undefined_reason": null,
+          "quality": 0.849,
+          "quality_count": 849,
+          "quality_denominator": 1000,
+          "quality_thresholds": {
+            "qed_min_inclusive": 0.6,
+            "sa_max_inclusive": 4.0
+          },
+          "unique_count": 998,
+          "uniqueness": 0.998,
+          "uniqueness_denominator": 1000,
+          "valid_count": 1000,
+          "validity": 1.0,
+          "validity_denominator": 1000
+        },
+        "strict": {
+          "definition": "Direct canonical sf.decode(raw_safe, fix=False, ignore_errors=True), followed by explicit RDKit parsing, sanitization, and canonicalization, without fragment repair or largest-component selection; other metric denominators mirror the released path.",
+          "diversity": 0.8235759382901502,
+          "diversity_input_count": 988,
+          "diversity_undefined_reason": null,
+          "quality": 0.837,
+          "quality_count": 837,
+          "quality_denominator": 1000,
+          "quality_thresholds": {
+            "qed_min_inclusive": 0.6,
+            "sa_max_inclusive": 4.0
+          },
+          "unique_count": 988,
+          "uniqueness": 0.997979797979798,
+          "uniqueness_denominator": 990,
+          "valid_count": 990,
+          "validity": 0.99,
+          "validity_denominator": 1000
+        }
+      },
+      "row_comparison": {
+        "all_match": true,
+        "cell_count": 21000,
+        "field_count": 21,
+        "field_results": [
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "sample_index",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "raw_model_text",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "raw_safe",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "raw_safe_error",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "strict_smiles",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "strict_decode_error",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "finite_numeric_absolute_tolerance_1e-12_or_exact_null",
+            "field": "strict_qed",
+            "max_absolute_difference": 0.0,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "finite_numeric_absolute_tolerance_1e-12_or_exact_null",
+            "field": "strict_sa",
+            "max_absolute_difference": 0.0,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "strict_is_first_unique",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "strict_quality_pass",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "strict_quality_counted",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "released_repaired_smiles",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "released_smiles",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "released_decode_error",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "finite_numeric_absolute_tolerance_1e-12_or_exact_null",
+            "field": "released_qed",
+            "max_absolute_difference": 0.0,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "finite_numeric_absolute_tolerance_1e-12_or_exact_null",
+            "field": "released_sa",
+            "max_absolute_difference": 0.0,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "released_is_first_unique",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "released_quality_pass",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "released_quality_counted",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "released_was_recovered",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "released_largest_component_applied",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          }
+        ],
+        "numeric_absolute_tolerance": 1e-12,
+        "row_count": 1000
+      },
+      "seed": 0,
+      "source_verification": {
+        "after": {
+          "head": "74482c2742ab5ad15def122c809a6b4e403e94cf",
+          "upstream": "74482c2742ab5ad15def122c809a6b4e403e94cf"
+        },
+        "before": {
+          "head": "74482c2742ab5ad15def122c809a6b4e403e94cf",
+          "upstream": "74482c2742ab5ad15def122c809a6b4e403e94cf"
+        },
+        "clean_pushed_before_and_after_computation": true,
+        "expected_file_sha256": {
+          "benchmark_runner": "f771050555448028214d20ecca068294a2740f8a2bc8991cfadfea3fbe2ea116",
+          "report_validator": "5013faa6685d8993fefe4a388598301ab9e858c43ab9750191f22bae45f4b85b",
+          "rescore_runner": "de5ad8d252e4ac200d9dc104f646d0bf31cbf0e7526bc8a1ee3a2df253dcff16"
+        }
+      },
+      "status": "exact_match",
+      "timings_seconds": {
+        "decode_and_metrics": 22.779804401972797,
+        "decode_records": 13.389239705982618,
+        "metric_evaluation": 9.390564695990179,
+        "metric_input_load": 0.45044679701095447,
+        "worker_total": 26.103290290979203
+      }
+    },
+    {
+      "current_report_validator_counts": {
+        "cross_branch": {
+          "raw_safe_conversion_failed": 0,
+          "released_largest_component_applied": 14,
+          "released_recovered_strict_failure": 14,
+          "strict_valid_but_released_failed": 0
+        },
+        "released_comparable": {
+          "quality_count": 872,
+          "unique_count": 999,
+          "valid_count": 1000
+        },
+        "strict": {
+          "quality_count": 861,
+          "unique_count": 985,
+          "valid_count": 986
+        }
+      },
+      "environment": {
+        "cuda_visible_devices": "",
+        "device": "cpu",
+        "executable": "/home/aidar.alimbayev/Documents/genmolv2/.venv/bin/python",
+        "nvidia_visible_devices": "",
+        "offline_environment": {
+          "HF_DATASETS_OFFLINE": "1",
+          "HF_HUB_OFFLINE": "1",
+          "TRANSFORMERS_OFFLINE": "1",
+          "WANDB_DISABLED": "true",
+          "WANDB_MODE": "offline"
+        },
+        "pid": 2552853,
+        "platform": "Linux-6.8.0-138-generic-x86_64-with-glibc2.35",
+        "python": "3.10.21 (main, Aug 27 2026, 14:42:07) [GCC 14.3.0]",
+        "python_hash_seed": "1",
+        "python_network_guard_during_computation": {
+          "guarded_apis": [
+            "socket.create_connection",
+            "socket.getaddrinfo",
+            "socket.socket.connect",
+            "socket.socket.connect_ex"
+          ],
+          "scope_limitation": "Python-runtime guard only; this is not OS-level or process-level network isolation and does not claim to block native extensions, subprocesses, raw sockets, or any other unguarded socket, name-resolution, or datagram API"
+        },
+        "versions": {
+          "numpy": "1.26.4",
+          "rdkit": "2023.9.6",
+          "safe": "0.1.14",
+          "tdc": "0.4.1",
+          "torch": "2.6.0+cu124"
+        }
+      },
+      "failure_counts": {
+        "raw_safe_conversion_failed": 0,
+        "released_decode_failed": 0,
+        "released_duplicates": 1,
+        "released_largest_component_applied": 14,
+        "released_recovered_strict_failure": 14,
+        "strict_decode_failed": 14,
+        "strict_duplicates": 1,
+        "strict_valid_but_released_failed": 0
+      },
+      "inputs": {
+        "raw_samples_csv": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/benchmarks/denovo_50000/seed_1/raw_samples.csv",
+          "read_policy": "regular_file_no_symlink_stable_descriptor_bytes_retained_in_memory",
+          "sha256": "5f20bd6731e6c095189de1f7c82ecd46123115b308b1b232c167d64afd1c6dbb",
+          "size_bytes": 364201
+        },
+        "summary_json": {
+          "mutation_policy": "read_only_never_rewritten",
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/benchmarks/denovo_50000/seed_1/summary.json",
+          "read_policy": "regular_file_no_symlink_stable_descriptor_bytes_retained_in_memory",
+          "schema_version": 2,
+          "sha256": "f95f8261b37f82a711848c18b7b15ebea1235858099b2bf8ef5d53b528699575",
+          "size_bytes": 11686
+        }
+      },
+      "manifest_comparison": {
+        "all_counts_metrics_and_artifact_hashes_match": true
+      },
+      "metric_inputs_sha256": "cb4c5b88424123a1c04c5d52ec63d83a55cc88f253f5d402fe68a84222c7062c",
+      "metrics": {
+        "released_comparable": {
+          "definition": "Released GenMol path: SAFE fragment repair with fix=True, canonical decode, largest disconnected component, deduplicate before diversity and quality; validity and quality divide by requested samples, while uniqueness divides by released-valid samples.",
+          "diversity": 0.8214987143446951,
+          "diversity_input_count": 999,
+          "diversity_undefined_reason": null,
+          "quality": 0.872,
+          "quality_count": 872,
+          "quality_denominator": 1000,
+          "quality_thresholds": {
+            "qed_min_inclusive": 0.6,
+            "sa_max_inclusive": 4.0
+          },
+          "unique_count": 999,
+          "uniqueness": 0.999,
+          "uniqueness_denominator": 1000,
+          "valid_count": 1000,
+          "validity": 1.0,
+          "validity_denominator": 1000
+        },
+        "strict": {
+          "definition": "Direct canonical sf.decode(raw_safe, fix=False, ignore_errors=True), followed by explicit RDKit parsing, sanitization, and canonicalization, without fragment repair or largest-component selection; other metric denominators mirror the released path.",
+          "diversity": 0.8206282422152162,
+          "diversity_input_count": 985,
+          "diversity_undefined_reason": null,
+          "quality": 0.861,
+          "quality_count": 861,
+          "quality_denominator": 1000,
+          "quality_thresholds": {
+            "qed_min_inclusive": 0.6,
+            "sa_max_inclusive": 4.0
+          },
+          "unique_count": 985,
+          "uniqueness": 0.9989858012170385,
+          "uniqueness_denominator": 986,
+          "valid_count": 986,
+          "validity": 0.986,
+          "validity_denominator": 1000
+        }
+      },
+      "row_comparison": {
+        "all_match": true,
+        "cell_count": 21000,
+        "field_count": 21,
+        "field_results": [
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "sample_index",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "raw_model_text",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "raw_safe",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "raw_safe_error",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "strict_smiles",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "strict_decode_error",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "finite_numeric_absolute_tolerance_1e-12_or_exact_null",
+            "field": "strict_qed",
+            "max_absolute_difference": 0.0,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "finite_numeric_absolute_tolerance_1e-12_or_exact_null",
+            "field": "strict_sa",
+            "max_absolute_difference": 0.0,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "strict_is_first_unique",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "strict_quality_pass",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "strict_quality_counted",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "released_repaired_smiles",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "released_smiles",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "released_decode_error",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "finite_numeric_absolute_tolerance_1e-12_or_exact_null",
+            "field": "released_qed",
+            "max_absolute_difference": 0.0,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "finite_numeric_absolute_tolerance_1e-12_or_exact_null",
+            "field": "released_sa",
+            "max_absolute_difference": 0.0,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "released_is_first_unique",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "released_quality_pass",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "released_quality_counted",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "released_was_recovered",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "released_largest_component_applied",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          }
+        ],
+        "numeric_absolute_tolerance": 1e-12,
+        "row_count": 1000
+      },
+      "seed": 1,
+      "source_verification": {
+        "after": {
+          "head": "74482c2742ab5ad15def122c809a6b4e403e94cf",
+          "upstream": "74482c2742ab5ad15def122c809a6b4e403e94cf"
+        },
+        "before": {
+          "head": "74482c2742ab5ad15def122c809a6b4e403e94cf",
+          "upstream": "74482c2742ab5ad15def122c809a6b4e403e94cf"
+        },
+        "clean_pushed_before_and_after_computation": true,
+        "expected_file_sha256": {
+          "benchmark_runner": "f771050555448028214d20ecca068294a2740f8a2bc8991cfadfea3fbe2ea116",
+          "report_validator": "5013faa6685d8993fefe4a388598301ab9e858c43ab9750191f22bae45f4b85b",
+          "rescore_runner": "de5ad8d252e4ac200d9dc104f646d0bf31cbf0e7526bc8a1ee3a2df253dcff16"
+        }
+      },
+      "status": "exact_match",
+      "timings_seconds": {
+        "decode_and_metrics": 21.67518411495257,
+        "decode_records": 12.975682385964319,
+        "metric_evaluation": 8.699501728988253,
+        "metric_input_load": 0.4431049129925668,
+        "worker_total": 25.04197539301822
+      }
+    },
+    {
+      "current_report_validator_counts": {
+        "cross_branch": {
+          "raw_safe_conversion_failed": 0,
+          "released_largest_component_applied": 13,
+          "released_recovered_strict_failure": 12,
+          "strict_valid_but_released_failed": 0
+        },
+        "released_comparable": {
+          "quality_count": 853,
+          "unique_count": 999,
+          "valid_count": 1000
+        },
+        "strict": {
+          "quality_count": 845,
+          "unique_count": 987,
+          "valid_count": 988
+        }
+      },
+      "environment": {
+        "cuda_visible_devices": "",
+        "device": "cpu",
+        "executable": "/home/aidar.alimbayev/Documents/genmolv2/.venv/bin/python",
+        "nvidia_visible_devices": "",
+        "offline_environment": {
+          "HF_DATASETS_OFFLINE": "1",
+          "HF_HUB_OFFLINE": "1",
+          "TRANSFORMERS_OFFLINE": "1",
+          "WANDB_DISABLED": "true",
+          "WANDB_MODE": "offline"
+        },
+        "pid": 2552854,
+        "platform": "Linux-6.8.0-138-generic-x86_64-with-glibc2.35",
+        "python": "3.10.21 (main, Aug 27 2026, 14:42:07) [GCC 14.3.0]",
+        "python_hash_seed": "2",
+        "python_network_guard_during_computation": {
+          "guarded_apis": [
+            "socket.create_connection",
+            "socket.getaddrinfo",
+            "socket.socket.connect",
+            "socket.socket.connect_ex"
+          ],
+          "scope_limitation": "Python-runtime guard only; this is not OS-level or process-level network isolation and does not claim to block native extensions, subprocesses, raw sockets, or any other unguarded socket, name-resolution, or datagram API"
+        },
+        "versions": {
+          "numpy": "1.26.4",
+          "rdkit": "2023.9.6",
+          "safe": "0.1.14",
+          "tdc": "0.4.1",
+          "torch": "2.6.0+cu124"
+        }
+      },
+      "failure_counts": {
+        "raw_safe_conversion_failed": 0,
+        "released_decode_failed": 0,
+        "released_duplicates": 1,
+        "released_largest_component_applied": 13,
+        "released_recovered_strict_failure": 12,
+        "strict_decode_failed": 12,
+        "strict_duplicates": 1,
+        "strict_valid_but_released_failed": 0
+      },
+      "inputs": {
+        "raw_samples_csv": {
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/benchmarks/denovo_50000/seed_2/raw_samples.csv",
+          "read_policy": "regular_file_no_symlink_stable_descriptor_bytes_retained_in_memory",
+          "sha256": "70c962d46685855b8a1ac099e834956c32a1f0d8dda4a60146b9a8dbb1cac58a",
+          "size_bytes": 367461
+        },
+        "summary_json": {
+          "mutation_policy": "read_only_never_rewritten",
+          "path": "/home/aidar.alimbayev/Documents/genmolv2/output/benchmarks/denovo_50000/seed_2/summary.json",
+          "read_policy": "regular_file_no_symlink_stable_descriptor_bytes_retained_in_memory",
+          "schema_version": 2,
+          "sha256": "a5c1be00950744b634c23ced6d2fea2f49ffe75b0d1419b3b01b9841bd3c4983",
+          "size_bytes": 11685
+        }
+      },
+      "manifest_comparison": {
+        "all_counts_metrics_and_artifact_hashes_match": true
+      },
+      "metric_inputs_sha256": "cb4c5b88424123a1c04c5d52ec63d83a55cc88f253f5d402fe68a84222c7062c",
+      "metrics": {
+        "released_comparable": {
+          "definition": "Released GenMol path: SAFE fragment repair with fix=True, canonical decode, largest disconnected component, deduplicate before diversity and quality; validity and quality divide by requested samples, while uniqueness divides by released-valid samples.",
+          "diversity": 0.8236634060558206,
+          "diversity_input_count": 999,
+          "diversity_undefined_reason": null,
+          "quality": 0.853,
+          "quality_count": 853,
+          "quality_denominator": 1000,
+          "quality_thresholds": {
+            "qed_min_inclusive": 0.6,
+            "sa_max_inclusive": 4.0
+          },
+          "unique_count": 999,
+          "uniqueness": 0.999,
+          "uniqueness_denominator": 1000,
+          "valid_count": 1000,
+          "validity": 1.0,
+          "validity_denominator": 1000
+        },
+        "strict": {
+          "definition": "Direct canonical sf.decode(raw_safe, fix=False, ignore_errors=True), followed by explicit RDKit parsing, sanitization, and canonicalization, without fragment repair or largest-component selection; other metric denominators mirror the released path.",
+          "diversity": 0.8232237734579942,
+          "diversity_input_count": 987,
+          "diversity_undefined_reason": null,
+          "quality": 0.845,
+          "quality_count": 845,
+          "quality_denominator": 1000,
+          "quality_thresholds": {
+            "qed_min_inclusive": 0.6,
+            "sa_max_inclusive": 4.0
+          },
+          "unique_count": 987,
+          "uniqueness": 0.9989878542510121,
+          "uniqueness_denominator": 988,
+          "valid_count": 988,
+          "validity": 0.988,
+          "validity_denominator": 1000
+        }
+      },
+      "row_comparison": {
+        "all_match": true,
+        "cell_count": 21000,
+        "field_count": 21,
+        "field_results": [
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "sample_index",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "raw_model_text",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "raw_safe",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "raw_safe_error",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "strict_smiles",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "strict_decode_error",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "finite_numeric_absolute_tolerance_1e-12_or_exact_null",
+            "field": "strict_qed",
+            "max_absolute_difference": 0.0,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "finite_numeric_absolute_tolerance_1e-12_or_exact_null",
+            "field": "strict_sa",
+            "max_absolute_difference": 0.0,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "strict_is_first_unique",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "strict_quality_pass",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "strict_quality_counted",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "released_repaired_smiles",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "released_smiles",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "released_decode_error",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "finite_numeric_absolute_tolerance_1e-12_or_exact_null",
+            "field": "released_qed",
+            "max_absolute_difference": 0.0,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "finite_numeric_absolute_tolerance_1e-12_or_exact_null",
+            "field": "released_sa",
+            "max_absolute_difference": 0.0,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "released_is_first_unique",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "released_quality_pass",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "released_quality_counted",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "released_was_recovered",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          },
+          {
+            "compared_rows": 1000,
+            "comparison": "exact_value_and_type",
+            "field": "released_largest_component_applied",
+            "max_absolute_difference": null,
+            "mismatch_count": 0
+          }
+        ],
+        "numeric_absolute_tolerance": 1e-12,
+        "row_count": 1000
+      },
+      "seed": 2,
+      "source_verification": {
+        "after": {
+          "head": "74482c2742ab5ad15def122c809a6b4e403e94cf",
+          "upstream": "74482c2742ab5ad15def122c809a6b4e403e94cf"
+        },
+        "before": {
+          "head": "74482c2742ab5ad15def122c809a6b4e403e94cf",
+          "upstream": "74482c2742ab5ad15def122c809a6b4e403e94cf"
+        },
+        "clean_pushed_before_and_after_computation": true,
+        "expected_file_sha256": {
+          "benchmark_runner": "f771050555448028214d20ecca068294a2740f8a2bc8991cfadfea3fbe2ea116",
+          "report_validator": "5013faa6685d8993fefe4a388598301ab9e858c43ab9750191f22bae45f4b85b",
+          "rescore_runner": "de5ad8d252e4ac200d9dc104f646d0bf31cbf0e7526bc8a1ee3a2df253dcff16"
+        }
+      },
+      "status": "exact_match",
+      "timings_seconds": {
+        "decode_and_metrics": 21.737399969017133,
+        "decode_records": 13.001565421000123,
+        "metric_evaluation": 8.73583454801701,
+        "metric_input_load": 0.4474597020307556,
+        "worker_total": 25.045261415012646
+      }
+    }
+  ],
+  "source": {
+    "clean_pushed_checks": {
+      "after_computation": true,
+      "before_computation": true,
+      "immediately_before_publication": true
+    },
+    "files": {
+      "benchmark_runner": {
+        "path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/udlm_genmol_worktree/scripts/exps/denovo/benchmark.py",
+        "relative_path": "scripts/exps/denovo/benchmark.py",
+        "sha256": "f771050555448028214d20ecca068294a2740f8a2bc8991cfadfea3fbe2ea116",
+        "size_bytes": 115205,
+        "source_revision": "74482c2742ab5ad15def122c809a6b4e403e94cf",
+        "stable_bytes_verified": true,
+        "tracked_at_source_revision": true
+      },
+      "chemistry_utils_module": {
+        "path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/udlm_genmol_worktree/src/genmol/utils/utils_chem.py",
+        "relative_path": "src/genmol/utils/utils_chem.py",
+        "sha256": "0c7de4c7225f80e9a8cbbdb99018e5e8555c114ce6deea7dfcd593fc5e0f3867",
+        "size_bytes": 5046,
+        "source_revision": "74482c2742ab5ad15def122c809a6b4e403e94cf",
+        "stable_bytes_verified": true,
+        "tracked_at_source_revision": true
+      },
+      "report_validator": {
+        "path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/udlm_genmol_worktree/scripts/exps/denovo/report.py",
+        "relative_path": "scripts/exps/denovo/report.py",
+        "sha256": "5013faa6685d8993fefe4a388598301ab9e858c43ab9750191f22bae45f4b85b",
+        "size_bytes": 169280,
+        "source_revision": "74482c2742ab5ad15def122c809a6b4e403e94cf",
+        "stable_bytes_verified": true,
+        "tracked_at_source_revision": true
+      },
+      "rescore_runner": {
+        "path": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/udlm_genmol_worktree/scripts/udlm/rescore_mdlm_baseline.py",
+        "relative_path": "scripts/udlm/rescore_mdlm_baseline.py",
+        "sha256": "de5ad8d252e4ac200d9dc104f646d0bf31cbf0e7526bc8a1ee3a2df253dcff16",
+        "size_bytes": 71410,
+        "source_revision": "74482c2742ab5ad15def122c809a6b4e403e94cf",
+        "stable_bytes_verified": true,
+        "tracked_at_source_revision": true
+      }
+    },
+    "repository_root": "/home/aidar.alimbayev/Documents/genmolv2/run_sources/udlm_genmol_worktree",
+    "revision": "74482c2742ab5ad15def122c809a6b4e403e94cf",
+    "upstream": "74482c2742ab5ad15def122c809a6b4e403e94cf"
+  },
+  "status": "completed_exact_match",
+  "strict_vs_repaired_funnel": {
+    "released_largest_component_applied": 41,
+    "released_quality": 2574,
+    "released_recovered_strict_failure": 36,
+    "released_unique_within_seed": 2996,
+    "released_valid": 3000,
+    "requested": 3000,
+    "strict_quality": 2543,
+    "strict_unique_within_seed": 2960,
+    "strict_valid": 2964
+  },
+  "timings_seconds": {
+    "total_before_publication": 27.775417326949537,
+    "worker_wall": 27.453771645959932
+  }
+}

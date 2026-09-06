@@ -33,23 +33,30 @@ from scripts.exps.denovo import report as denovo_report  # noqa: E402
 
 
 SCHEMA_VERSION = 1
-PROTOCOL_RELATIVE_PATH = Path(
-    "experiments/udlm/protocols/de_novo_superiority_v1.json"
-)
-PROTOCOL_SHA256 = (
-    "91d3e8964b04850e4b3fdf563703d490f34b9587b2bfe9e872fd7374fed33ff0"
-)
+PROTOCOL_RELATIVE_PATH = Path("experiments/udlm/protocols/de_novo_superiority_v1.json")
+PROTOCOL_SHA256 = "7fea3b51b492adab194ac715a1b1dce7efc6105722a6913feba5055fd2f72410"
 PROTOCOL_CANONICAL_SHA256 = (
-    "d18f5c40125caef426d107823d97322953058969214adb62f6dfe9b09cdd588f"
+    "c4535b148ab9414a5927ebf2f8d34d42f2d9f6443e7d8bc3b14c320879d5e950"
 )
 BASELINE_RELATIVE_PATH = Path("experiments/udlm/baselines/mdlm_50000.json")
-BASELINE_SHA256 = (
-    "6da46fc615dedbcca436da087a2c1e9145f5d110036e0c15bb431ded3c2e5539"
+BASELINE_SHA256 = "6da46fc615dedbcca436da087a2c1e9145f5d110036e0c15bb431ded3c2e5539"
+BASELINE_RESCORE_RELATIVE_PATH = Path(
+    "experiments/udlm/baselines/mdlm_50000_rescore_attestation.json"
 )
+BASELINE_RESCORE_SHA256 = (
+    "6326b63c38c7052d0b47282d611618f77637496da2785779af69097fc1441323"
+)
+BASELINE_RESCORE_CANONICAL_SHA256 = (
+    "5aaba90f1ee23a45591eeeb297d0392f36e7ef1ed034263e254f0ecad94c6e96"
+)
+EXPECTED_BASELINE_RESCORE_SOURCE_REVISION = "74482c2742ab5ad15def122c809a6b4e403e94cf"
 EXPECTED_PROTOCOL_ID = "genmol_udlm_de_novo_superiority_v1"
 EXPECTED_SEEDS = (0, 1, 2)
 EXPECTED_SAMPLES_PER_SEED = 1_000
 EXPECTED_NFE = 128
+EXPECTED_BASELINE_BENCHMARK_SCHEMA_VERSION = 7
+EXPECTED_BASELINE_REPORT_SCHEMA_VERSION = 6
+EXPECTED_BASELINE_RAW_SAMPLE_FIELD_COUNT = 21
 EXPECTED_BASELINE_CHECKPOINT_SHA256 = (
     "8d00aa47b02f64bf39ff6b0b2e786f213587366fc2c3d29712a00f3f84108dd6"
 )
@@ -64,9 +71,7 @@ REGISTERED_SELECTION_PILOT_SEEDS = (1000, 1001)
 REGISTERED_SELECTION_SAMPLES_PER_SEED = 256
 REGISTERED_SELECTION_NFE = 128
 REGISTERED_SELECTION_METRIC_BRANCH = "released_comparable"
-NONREGISTERED_OPERATING_POINT_REASON = (
-    "engineering_or_nonregistered_operating_point"
-)
+NONREGISTERED_OPERATING_POINT_REASON = "engineering_or_nonregistered_operating_point"
 FAILED_PILOT_REASON = "pilot_failed"
 CANDIDATE_SELECTION_RULE = (
     "maximize_mean_released_quality_then_mean_released_diversity_"
@@ -170,17 +175,13 @@ def _finite(value: object, label: str) -> float:
 
 def _sha256(value: object, label: str) -> str:
     if not isinstance(value, str) or HEX_SHA256.fullmatch(value) is None:
-        raise GateValidationError(
-            f"{label} must be 64 lowercase hexadecimal digits"
-        )
+        raise GateValidationError(f"{label} must be 64 lowercase hexadecimal digits")
     return value
 
 
 def _git_revision(value: object, label: str) -> str:
     if not isinstance(value, str) or HEX_GIT_REVISION.fullmatch(value) is None:
-        raise GateValidationError(
-            f"{label} must be 40 lowercase hexadecimal digits"
-        )
+        raise GateValidationError(f"{label} must be 40 lowercase hexadecimal digits")
     return value
 
 
@@ -255,14 +256,18 @@ def _stable_regular_file_bytes(path: Path, *, label: str) -> bytes:
             before_fd.st_mtime_ns,
             before_fd.st_ctime_ns,
         )
-        if not stat.S_ISREG(before_fd.st_mode) or (
-            before_path.st_dev,
-            before_path.st_ino,
-            before_path.st_mode,
-            before_path.st_size,
-            before_path.st_mtime_ns,
-            before_path.st_ctime_ns,
-        ) != identity:
+        if (
+            not stat.S_ISREG(before_fd.st_mode)
+            or (
+                before_path.st_dev,
+                before_path.st_ino,
+                before_path.st_mode,
+                before_path.st_size,
+                before_path.st_mtime_ns,
+                before_path.st_ctime_ns,
+            )
+            != identity
+        ):
             raise GateValidationError(f"{label} changed before open: {path}")
         while True:
             chunk = os.read(descriptor, 1024 * 1024)
@@ -313,7 +318,9 @@ def load_pinned_json(
 
 def validate_protocol(protocol: Mapping[str, Any]) -> None:
     if canonical_json_sha256(protocol) != PROTOCOL_CANONICAL_SHA256:
-        raise GateValidationError("superiority protocol content is not the frozen value")
+        raise GateValidationError(
+            "superiority protocol content is not the frozen value"
+        )
     if protocol.get("schema_version") != 1:
         raise GateValidationError("protocol schema_version must equal 1")
     if protocol.get("protocol_id") != EXPECTED_PROTOCOL_ID:
@@ -325,6 +332,24 @@ def validate_protocol(protocol: Mapping[str, Any]) -> None:
         raise GateValidationError("protocol baseline path is unexpected")
     if baseline.get("manifest_sha256") != BASELINE_SHA256:
         raise GateValidationError("protocol baseline digest is unexpected")
+    if (
+        baseline.get("rescore_attestation_relative_path")
+        != BASELINE_RESCORE_RELATIVE_PATH.as_posix()
+    ):
+        raise GateValidationError(
+            "protocol baseline rescore-attestation path is unexpected"
+        )
+    if baseline.get("rescore_attestation_sha256") != BASELINE_RESCORE_SHA256:
+        raise GateValidationError(
+            "protocol baseline rescore-attestation digest is unexpected"
+        )
+    if (
+        baseline.get("rescore_source_revision")
+        != EXPECTED_BASELINE_RESCORE_SOURCE_REVISION
+    ):
+        raise GateValidationError("protocol baseline rescore revision is unexpected")
+    if baseline.get("rescore_status") != "completed_exact_match":
+        raise GateValidationError("protocol baseline rescore status is unexpected")
     if baseline.get("checkpoint_sha256") != EXPECTED_BASELINE_CHECKPOINT_SHA256:
         raise GateValidationError("protocol baseline checkpoint is unexpected")
     if baseline.get("metric_branch") != "released_comparable":
@@ -338,8 +363,7 @@ def validate_protocol(protocol: Mapping[str, Any]) -> None:
         "generation_seeds": list(EXPECTED_SEEDS),
         "requested_samples_per_seed": EXPECTED_SAMPLES_PER_SEED,
         "seed_count": len(EXPECTED_SEEDS),
-        "total_requested_samples": len(EXPECTED_SEEDS)
-        * EXPECTED_SAMPLES_PER_SEED,
+        "total_requested_samples": len(EXPECTED_SEEDS) * EXPECTED_SAMPLES_PER_SEED,
         "nfe": EXPECTED_NFE,
         "nfe_definition": "one full backbone forward evaluation per reverse step",
         "inference_weights": "ema",
@@ -368,9 +392,7 @@ def validate_protocol(protocol: Mapping[str, Any]) -> None:
     if firewall.get("selection_rule") != CANDIDATE_SELECTION_RULE:
         raise GateValidationError("protocol pilot selection rule is unexpected")
     if firewall.get("checkpoint_selection_rule") != CHECKPOINT_SELECTION_RULE:
-        raise GateValidationError(
-            "protocol checkpoint-selection rule is unexpected"
-        )
+        raise GateValidationError("protocol checkpoint-selection rule is unexpected")
     if firewall.get("eligible_pilot_generation_seeds") != list(
         REGISTERED_SELECTION_PILOT_SEEDS
     ):
@@ -382,10 +404,7 @@ def validate_protocol(protocol: Mapping[str, Any]) -> None:
         raise GateValidationError("protocol eligible pilot sample count is unexpected")
     if firewall.get("eligible_nfe") != REGISTERED_SELECTION_NFE:
         raise GateValidationError("protocol eligible pilot NFE is unexpected")
-    if (
-        firewall.get("eligible_metric_branch")
-        != REGISTERED_SELECTION_METRIC_BRANCH
-    ):
+    if firewall.get("eligible_metric_branch") != REGISTERED_SELECTION_METRIC_BRANCH:
         raise GateValidationError("protocol eligible pilot metric branch is unexpected")
 
     point = _mapping(protocol.get("point_estimate_gates"), "point gates")
@@ -432,7 +451,9 @@ def _ordered_seed_rows(value: object, *, label: str) -> list[Mapping[str, Any]]:
             raise GateValidationError(f"{label} seeds must be unique integers")
         by_seed[seed] = row
     if tuple(sorted(by_seed)) != EXPECTED_SEEDS:
-        raise GateValidationError(f"{label} seeds must be exactly {list(EXPECTED_SEEDS)}")
+        raise GateValidationError(
+            f"{label} seeds must be exactly {list(EXPECTED_SEEDS)}"
+        )
     return [by_seed[seed] for seed in EXPECTED_SEEDS]
 
 
@@ -457,9 +478,7 @@ def validate_baseline_manifest(baseline: Mapping[str, Any]) -> dict[str, Any]:
     branch = _mapping(
         baseline.get("released_comparable"), "baseline.released_comparable"
     )
-    ordered = _ordered_seed_rows(
-        branch.get("per_seed"), label="baseline per-seed rows"
-    )
+    ordered = _ordered_seed_rows(branch.get("per_seed"), label="baseline per-seed rows")
     values: dict[str, list[float]] = {metric: [] for metric in METRICS}
     pooled_valid = 0
     pooled_requested = 0
@@ -469,9 +488,15 @@ def validate_baseline_manifest(baseline: Mapping[str, Any]) -> dict[str, Any]:
         requested = _integer(row.get("requested"), "baseline requested", minimum=1)
         if requested != EXPECTED_SAMPLES_PER_SEED:
             raise GateValidationError("baseline per-seed request count is unexpected")
-        valid_count = _integer(row.get("valid_count"), "baseline valid count", minimum=0)
-        unique_count = _integer(row.get("unique_count"), "baseline unique count", minimum=0)
-        quality_count = _integer(row.get("quality_count"), "baseline quality count", minimum=0)
+        valid_count = _integer(
+            row.get("valid_count"), "baseline valid count", minimum=0
+        )
+        unique_count = _integer(
+            row.get("unique_count"), "baseline unique count", minimum=0
+        )
+        quality_count = _integer(
+            row.get("quality_count"), "baseline quality count", minimum=0
+        )
         if not 0 <= quality_count <= unique_count <= valid_count <= requested:
             raise GateValidationError("baseline count funnel is inconsistent")
         expected_values = {
@@ -500,11 +525,632 @@ def validate_baseline_manifest(baseline: Mapping[str, Any]) -> dict[str, Any]:
         _close(sample_sds.get(metric), expected_sd, f"baseline sample SD {metric}")
     return {
         "values": values,
-        "means": {metric: statistics.fmean(series) for metric, series in values.items()},
+        "means": {
+            metric: statistics.fmean(series) for metric, series in values.items()
+        },
         "sample_sds": {metric: _sample_sd(series) for metric, series in values.items()},
         "pooled_valid": pooled_valid,
         "pooled_requested": pooled_requested,
         "checkpoint": dict(checkpoint),
+    }
+
+
+_BASELINE_READ_POLICY = (
+    "regular_file_no_symlink_stable_descriptor_bytes_retained_in_memory"
+)
+_BASELINE_OFFLINE_ENVIRONMENT = {
+    "CUDA_VISIBLE_DEVICES": "",
+    "HF_DATASETS_OFFLINE": "1",
+    "HF_HUB_OFFLINE": "1",
+    "NVIDIA_VISIBLE_DEVICES": "",
+    "TRANSFORMERS_OFFLINE": "1",
+    "WANDB_DISABLED": "true",
+    "WANDB_MODE": "offline",
+}
+_BASELINE_WORKER_OFFLINE_ENVIRONMENT = {
+    name: value
+    for name, value in _BASELINE_OFFLINE_ENVIRONMENT.items()
+    if name not in {"CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES"}
+}
+_BASELINE_GUARDED_NETWORK_APIS = [
+    "socket.create_connection",
+    "socket.getaddrinfo",
+    "socket.socket.connect",
+    "socket.socket.connect_ex",
+]
+_BASELINE_NETWORK_SCOPE_LIMITATION = (
+    "Python-runtime guard only; this is not OS-level or process-level network "
+    "isolation and does not claim to block native extensions, subprocesses, raw "
+    "sockets, or any other unguarded socket, name-resolution, or datagram API"
+)
+_BASELINE_SOURCE_FILES = {
+    "benchmark_runner": (
+        "scripts/exps/denovo/benchmark.py",
+        "scripts.exps.denovo.benchmark",
+    ),
+    "chemistry_utils_module": (
+        "src/genmol/utils/utils_chem.py",
+        "genmol.utils.utils_chem",
+    ),
+    "report_validator": (
+        "scripts/exps/denovo/report.py",
+        "scripts.exps.denovo.report",
+    ),
+    "rescore_runner": (
+        "scripts/udlm/rescore_mdlm_baseline.py",
+        "scripts.udlm.rescore_mdlm_baseline",
+    ),
+}
+_BASELINE_FAILURE_FIELDS = {
+    "raw_safe_conversion_failed",
+    "released_decode_failed",
+    "released_duplicates",
+    "released_largest_component_applied",
+    "released_recovered_strict_failure",
+    "strict_decode_failed",
+    "strict_duplicates",
+    "strict_valid_but_released_failed",
+}
+
+
+def _validate_attested_metric_branch(
+    value: object,
+    *,
+    expected: Mapping[str, Any],
+    label: str,
+) -> dict[str, Any]:
+    branch = _mapping(value, label)
+    _exact_keys(
+        branch,
+        {
+            "definition",
+            "diversity",
+            "diversity_input_count",
+            "diversity_undefined_reason",
+            "quality",
+            "quality_count",
+            "quality_denominator",
+            "quality_thresholds",
+            "unique_count",
+            "uniqueness",
+            "uniqueness_denominator",
+            "valid_count",
+            "validity",
+            "validity_denominator",
+        },
+        label,
+    )
+    if not isinstance(branch.get("definition"), str) or not branch["definition"]:
+        raise GateValidationError(f"{label}.definition must be nonempty")
+    if branch.get("diversity_undefined_reason") is not None:
+        raise GateValidationError(f"{label}.diversity must be defined")
+    if branch.get("quality_thresholds") != {
+        "qed_min_inclusive": 0.6,
+        "sa_max_inclusive": 4.0,
+    }:
+        raise GateValidationError(f"{label}.quality thresholds are unexpected")
+
+    requested = _integer(expected.get("requested"), f"{label}.expected requested")
+    expected_counts = {
+        "valid_count": expected["valid_count"],
+        "unique_count": expected["unique_count"],
+        "quality_count": expected["quality_count"],
+        "validity_denominator": requested,
+        "uniqueness_denominator": expected["valid_count"],
+        "quality_denominator": requested,
+        "diversity_input_count": expected["unique_count"],
+    }
+    for name, expected_value in expected_counts.items():
+        actual = _integer(branch.get(name), f"{label}.{name}", minimum=0)
+        if actual != expected_value:
+            raise GateValidationError(
+                f"{label}.{name}={actual} disagrees with frozen manifest "
+                f"value {expected_value}"
+            )
+    for metric in METRICS:
+        _close(branch.get(metric), float(expected[metric]), f"{label}.{metric}")
+    return dict(branch)
+
+
+def _validate_attested_seed(
+    row: Mapping[str, Any],
+    *,
+    seed: int,
+    baseline_manifest: Mapping[str, Any],
+    source_files: Mapping[str, Mapping[str, Any]],
+    metric_inputs_sha256: str,
+    row_fields: Sequence[str],
+) -> dict[str, Any]:
+    label = f"baseline rescore seed {seed}"
+    if row.get("seed") != seed or row.get("status") != "exact_match":
+        raise GateValidationError(f"{label} is not an exact-match result")
+
+    inputs = _mapping(row.get("inputs"), f"{label}.inputs")
+    raw_input = _mapping(inputs.get("raw_samples_csv"), f"{label}.raw input")
+    summary_input = _mapping(inputs.get("summary_json"), f"{label}.summary input")
+    expected_released = baseline_manifest["released_comparable"]["per_seed"][seed]
+    expected_strict = baseline_manifest["strict"]["per_seed"][seed]
+    for artifact, expected_sha, artifact_label in (
+        (raw_input, expected_released["raw_samples_sha256"], "raw samples"),
+        (summary_input, expected_released["summary_sha256"], "summary"),
+    ):
+        if artifact.get("read_policy") != _BASELINE_READ_POLICY:
+            raise GateValidationError(f"{label} {artifact_label} read policy changed")
+        if artifact.get("sha256") != expected_sha:
+            raise GateValidationError(
+                f"{label} {artifact_label} digest disagrees with frozen manifest"
+            )
+        _integer(
+            artifact.get("size_bytes"), f"{label} {artifact_label} size", minimum=1
+        )
+    if (
+        summary_input.get("schema_version") != 2
+        or summary_input.get("mutation_policy") != "read_only_never_rewritten"
+    ):
+        raise GateValidationError(f"{label} legacy summary policy is unexpected")
+
+    comparison = _mapping(row.get("row_comparison"), f"{label}.row comparison")
+    _required_true(comparison.get("all_match"), f"{label}.row comparison all_match")
+    if (
+        comparison.get("row_count") != EXPECTED_SAMPLES_PER_SEED
+        or comparison.get("field_count") != EXPECTED_BASELINE_RAW_SAMPLE_FIELD_COUNT
+        or comparison.get("cell_count")
+        != EXPECTED_SAMPLES_PER_SEED * EXPECTED_BASELINE_RAW_SAMPLE_FIELD_COUNT
+        or comparison.get("numeric_absolute_tolerance") != 1e-12
+    ):
+        raise GateValidationError(f"{label} row-comparison dimensions are unexpected")
+    field_results = comparison.get("field_results")
+    if not isinstance(field_results, list) or len(field_results) != len(row_fields):
+        raise GateValidationError(f"{label} field comparisons are incomplete")
+    numeric_fields = {"strict_qed", "strict_sa", "released_qed", "released_sa"}
+    for expected_field, raw_result in zip(row_fields, field_results, strict=True):
+        result = _mapping(raw_result, f"{label}.{expected_field} comparison")
+        _exact_keys(
+            result,
+            {
+                "compared_rows",
+                "comparison",
+                "field",
+                "max_absolute_difference",
+                "mismatch_count",
+            },
+            f"{label}.{expected_field} comparison",
+        )
+        expected_comparison = (
+            "finite_numeric_absolute_tolerance_1e-12_or_exact_null"
+            if expected_field in numeric_fields
+            else "exact_value_and_type"
+        )
+        if (
+            result.get("field") != expected_field
+            or result.get("compared_rows") != EXPECTED_SAMPLES_PER_SEED
+            or result.get("comparison") != expected_comparison
+            or result.get("mismatch_count") != 0
+        ):
+            raise GateValidationError(f"{label}.{expected_field} comparison failed")
+        expected_max = 0.0 if expected_field in numeric_fields else None
+        if result.get("max_absolute_difference") != expected_max:
+            raise GateValidationError(
+                f"{label}.{expected_field} comparison tolerance result changed"
+            )
+
+    metrics = _mapping(row.get("metrics"), f"{label}.metrics")
+    _exact_keys(metrics, {"released_comparable", "strict"}, f"{label}.metrics")
+    released = _validate_attested_metric_branch(
+        metrics["released_comparable"],
+        expected=expected_released,
+        label=f"{label}.released_comparable",
+    )
+    strict = _validate_attested_metric_branch(
+        metrics["strict"], expected=expected_strict, label=f"{label}.strict"
+    )
+
+    failures = _mapping(row.get("failure_counts"), f"{label}.failure counts")
+    _exact_keys(failures, _BASELINE_FAILURE_FIELDS, f"{label}.failure counts")
+    normalized_failures = {
+        name: _integer(value, f"{label}.failure_counts.{name}", minimum=0)
+        for name, value in failures.items()
+    }
+    derived_failures = {
+        "strict_decode_failed": EXPECTED_SAMPLES_PER_SEED - strict["valid_count"],
+        "released_decode_failed": (EXPECTED_SAMPLES_PER_SEED - released["valid_count"]),
+        "strict_duplicates": strict["valid_count"] - strict["unique_count"],
+        "released_duplicates": (released["valid_count"] - released["unique_count"]),
+        "released_recovered_strict_failure": (
+            released["valid_count"] - strict["valid_count"]
+        ),
+        "raw_safe_conversion_failed": 0,
+        "strict_valid_but_released_failed": 0,
+    }
+    for name, expected_value in derived_failures.items():
+        if normalized_failures[name] != expected_value:
+            raise GateValidationError(f"{label}.{name} is inconsistent with counts")
+
+    validator_counts = _mapping(
+        row.get("current_report_validator_counts"), f"{label}.validator counts"
+    )
+    expected_validator_counts = {
+        "released_comparable": {
+            name: released[name]
+            for name in ("valid_count", "unique_count", "quality_count")
+        },
+        "strict": {
+            name: strict[name]
+            for name in ("valid_count", "unique_count", "quality_count")
+        },
+        "cross_branch": {
+            name: normalized_failures[name]
+            for name in (
+                "raw_safe_conversion_failed",
+                "released_largest_component_applied",
+                "released_recovered_strict_failure",
+                "strict_valid_but_released_failed",
+            )
+        },
+    }
+    if validator_counts != expected_validator_counts:
+        raise GateValidationError(f"{label} current-validator counts disagree")
+
+    if row.get("metric_inputs_sha256") != metric_inputs_sha256:
+        raise GateValidationError(f"{label} metric-input digest differs")
+    manifest_comparison = _mapping(
+        row.get("manifest_comparison"), f"{label}.manifest comparison"
+    )
+    _required_true(
+        manifest_comparison.get("all_counts_metrics_and_artifact_hashes_match"),
+        f"{label}.manifest comparison",
+    )
+
+    source = _mapping(row.get("source_verification"), f"{label}.source")
+    _required_true(
+        source.get("clean_pushed_before_and_after_computation"),
+        f"{label}.clean pushed source",
+    )
+    for phase in ("before", "after"):
+        identity = _mapping(source.get(phase), f"{label}.source.{phase}")
+        if identity != {
+            "head": EXPECTED_BASELINE_RESCORE_SOURCE_REVISION,
+            "upstream": EXPECTED_BASELINE_RESCORE_SOURCE_REVISION,
+        }:
+            raise GateValidationError(f"{label} {phase} source identity changed")
+    expected_source_hashes = {
+        name: source_files[name]["sha256"]
+        for name in ("benchmark_runner", "report_validator", "rescore_runner")
+    }
+    if source.get("expected_file_sha256") != expected_source_hashes:
+        raise GateValidationError(f"{label} source-file hashes disagree")
+
+    environment = _mapping(row.get("environment"), f"{label}.environment")
+    if (
+        environment.get("device") != "cpu"
+        or environment.get("cuda_visible_devices") != ""
+        or environment.get("nvidia_visible_devices") != ""
+        or environment.get("python_hash_seed") != str(seed)
+        or environment.get("offline_environment")
+        != _BASELINE_WORKER_OFFLINE_ENVIRONMENT
+    ):
+        raise GateValidationError(f"{label} worker isolation environment changed")
+    if environment.get("python_network_guard_during_computation") != {
+        "guarded_apis": _BASELINE_GUARDED_NETWORK_APIS,
+        "scope_limitation": _BASELINE_NETWORK_SCOPE_LIMITATION,
+    }:
+        raise GateValidationError(f"{label} Python network-guard claim is unexpected")
+    return {
+        "metrics": {"released_comparable": released, "strict": strict},
+        "failure_counts": normalized_failures,
+    }
+
+
+def validate_baseline_rescore_attestation(
+    attestation: Mapping[str, Any], baseline_manifest: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Validate the immutable current-code rescore against the frozen MDLM rows."""
+
+    validate_baseline_manifest(baseline_manifest)
+    if (
+        attestation.get("schema_version") != 1
+        or attestation.get("status") != "completed_exact_match"
+    ):
+        raise GateValidationError(
+            "baseline rescore attestation is not completed exact-match schema 1"
+        )
+
+    inputs = _mapping(attestation.get("inputs"), "baseline rescore inputs")
+    frozen_manifest = _mapping(
+        inputs.get("frozen_manifest"), "baseline rescore frozen manifest"
+    )
+    if (
+        frozen_manifest.get("schema_version") != 1
+        or frozen_manifest.get("sha256") != BASELINE_SHA256
+        or frozen_manifest.get("read_policy") != _BASELINE_READ_POLICY
+    ):
+        raise GateValidationError("baseline rescore frozen-manifest identity changed")
+    historical = _mapping(
+        inputs.get("historical_source_aggregate"),
+        "baseline rescore historical aggregate",
+    )
+    baseline_source = _mapping(
+        baseline_manifest.get("source_aggregate"), "baseline source aggregate"
+    )
+    if (
+        historical.get("schema_version") != baseline_source.get("schema_version")
+        or historical.get("sha256") != baseline_source.get("sha256")
+        or historical.get("historical_runner_sha256")
+        != baseline_source.get("runner_sha256")
+        or historical.get("read_policy") != _BASELINE_READ_POLICY
+    ):
+        raise GateValidationError("baseline rescore historical aggregate is unbound")
+
+    source = _mapping(attestation.get("source"), "baseline rescore source")
+    if (
+        source.get("revision") != EXPECTED_BASELINE_RESCORE_SOURCE_REVISION
+        or source.get("upstream") != EXPECTED_BASELINE_RESCORE_SOURCE_REVISION
+    ):
+        raise GateValidationError("baseline rescore source revision is unexpected")
+    clean_checks = _mapping(
+        source.get("clean_pushed_checks"), "baseline rescore clean-source checks"
+    )
+    _exact_keys(
+        clean_checks,
+        {"before_computation", "after_computation", "immediately_before_publication"},
+        "baseline rescore clean-source checks",
+    )
+    for name, value in clean_checks.items():
+        _required_true(value, f"baseline rescore clean-source check {name}")
+
+    raw_source_files = _mapping(source.get("files"), "baseline rescore source files")
+    _exact_keys(
+        raw_source_files, set(_BASELINE_SOURCE_FILES), "baseline rescore source files"
+    )
+    source_files: dict[str, Mapping[str, Any]] = {}
+    for name, (expected_path, _module_name) in _BASELINE_SOURCE_FILES.items():
+        evidence = _mapping(raw_source_files[name], f"baseline source file {name}")
+        if (
+            evidence.get("relative_path") != expected_path
+            or evidence.get("source_revision")
+            != EXPECTED_BASELINE_RESCORE_SOURCE_REVISION
+        ):
+            raise GateValidationError(f"baseline source file {name} identity changed")
+        _sha256(evidence.get("sha256"), f"baseline source file {name} digest")
+        _integer(
+            evidence.get("size_bytes"), f"baseline source file {name} size", minimum=1
+        )
+        _required_true(
+            evidence.get("stable_bytes_verified"), f"baseline source file {name} stable"
+        )
+        _required_true(
+            evidence.get("tracked_at_source_revision"),
+            f"baseline source file {name} tracked",
+        )
+        source_files[name] = evidence
+
+    implementation = _mapping(
+        attestation.get("implementation"), "baseline rescore implementation"
+    )
+    if (
+        implementation.get("benchmark_schema_version")
+        != EXPECTED_BASELINE_BENCHMARK_SCHEMA_VERSION
+        or implementation.get("report_schema_version")
+        != EXPECTED_BASELINE_REPORT_SCHEMA_VERSION
+        or implementation.get("raw_sample_field_count")
+        != EXPECTED_BASELINE_RAW_SAMPLE_FIELD_COUNT
+    ):
+        raise GateValidationError("baseline rescore implementation schemas are stale")
+    metric_inputs = _mapping(
+        implementation.get("metric_inputs"), "baseline rescore metric inputs"
+    )
+    metric_inputs_sha = _sha256(
+        implementation.get("metric_inputs_sha256"),
+        "baseline rescore metric-input digest",
+    )
+    if canonical_json_sha256(metric_inputs) != metric_inputs_sha:
+        raise GateValidationError("baseline rescore metric-input self-hash differs")
+    sa_policy = _mapping(
+        metric_inputs.get("sa_loading_policy"), "baseline rescore SA loading policy"
+    )
+    if (
+        metric_inputs.get("schema_version") != 1
+        or sa_policy.get("network_download_allowed") is not False
+        or sa_policy.get("resident_scores_loaded_from_verified_bytes") is not True
+        or sa_policy.get("tdc_oracle_load_invoked") is not False
+    ):
+        raise GateValidationError("baseline rescore metric-input policy is unsafe")
+    sa_scores = _mapping(
+        metric_inputs.get("sa_fragment_scores"), "baseline rescore SA scores"
+    )
+    _sha256(sa_scores.get("sha256"), "baseline rescore SA-score digest")
+    tdc_implementation = _mapping(
+        metric_inputs.get("tdc_metric_implementation"),
+        "baseline rescore TDC implementation",
+    )
+    if tdc_implementation.get("version") != "0.4.1":
+        raise GateValidationError("baseline rescore TDC version changed")
+
+    runtime_modules = _mapping(
+        implementation.get("runtime_modules"), "baseline rescore runtime modules"
+    )
+    runtime_modules_sha = _sha256(
+        implementation.get("runtime_modules_sha256"),
+        "baseline rescore runtime-module digest",
+    )
+    if canonical_json_sha256(runtime_modules) != runtime_modules_sha:
+        raise GateValidationError("baseline rescore runtime-module self-hash differs")
+    for source_name, (
+        _relative_path_value,
+        module_name,
+    ) in _BASELINE_SOURCE_FILES.items():
+        module = _mapping(
+            runtime_modules.get(module_name), f"baseline runtime module {module_name}"
+        )
+        if (
+            module.get("module") != module_name
+            or module.get("read_policy") != _BASELINE_READ_POLICY
+            or module.get("sha256") != source_files[source_name]["sha256"]
+        ):
+            raise GateValidationError(
+                f"baseline runtime module {module_name} is unbound from source"
+            )
+
+    rescore_protocol = _mapping(
+        attestation.get("protocol"), "baseline rescore protocol"
+    )
+    row_fields = rescore_protocol.get("row_fields_compared")
+    if (
+        rescore_protocol.get("seeds") != list(EXPECTED_SEEDS)
+        or rescore_protocol.get("one_fresh_interpreter_per_seed") is not True
+        or rescore_protocol.get("python_hash_seed_equals_seed") is not True
+        or rescore_protocol.get("device") != "cpu"
+        or rescore_protocol.get("cuda_visible_devices") != ""
+        or rescore_protocol.get("use_bracket_safe") is not False
+        or not isinstance(row_fields, list)
+        or len(row_fields) != EXPECTED_BASELINE_RAW_SAMPLE_FIELD_COUNT
+        or len(set(row_fields)) != len(row_fields)
+    ):
+        raise GateValidationError("baseline rescore execution protocol changed")
+    network = _mapping(
+        rescore_protocol.get("network_controls"), "baseline rescore network controls"
+    )
+    if network != {
+        "offline_environment_variables": _BASELINE_OFFLINE_ENVIRONMENT,
+        "os_or_process_network_isolation": False,
+        "python_runtime_guarded_apis": _BASELINE_GUARDED_NETWORK_APIS,
+        "scope_limitation": _BASELINE_NETWORK_SCOPE_LIMITATION,
+    }:
+        raise GateValidationError("baseline rescore network-control claim is dishonest")
+    environment = _mapping(
+        attestation.get("environment"), "baseline rescore parent environment"
+    )
+    if environment.get("worker_policy") != _BASELINE_OFFLINE_ENVIRONMENT:
+        raise GateValidationError("baseline rescore parent worker policy changed")
+
+    ordered_seed_rows = _ordered_seed_rows(
+        attestation.get("seed_results"), label="baseline rescore seed results"
+    )
+    normalized_seed_rows = [
+        _validate_attested_seed(
+            row,
+            seed=seed,
+            baseline_manifest=baseline_manifest,
+            source_files=source_files,
+            metric_inputs_sha256=metric_inputs_sha,
+            row_fields=row_fields,
+        )
+        for seed, row in zip(EXPECTED_SEEDS, ordered_seed_rows, strict=True)
+    ]
+
+    aggregate = _mapping(
+        attestation.get("aggregate_metrics"), "baseline rescore aggregates"
+    )
+    for branch_name in ("released_comparable", "strict"):
+        branch = _mapping(
+            aggregate.get(branch_name), f"rescore aggregate {branch_name}"
+        )
+        for metric in METRICS:
+            metric_summary = _mapping(
+                branch.get(metric), f"rescore aggregate {branch_name}.{metric}"
+            )
+            values = [
+                float(row["metrics"][branch_name][metric])
+                for row in normalized_seed_rows
+            ]
+            if metric_summary.get("values_by_seed") != [
+                {"seed": seed, "value": value}
+                for seed, value in zip(EXPECTED_SEEDS, values, strict=True)
+            ]:
+                raise GateValidationError(
+                    f"rescore aggregate {branch_name}.{metric} seed values differ"
+                )
+            _close(
+                metric_summary.get("mean"),
+                statistics.fmean(values),
+                f"rescore aggregate {branch_name}.{metric} mean",
+            )
+            _close(
+                metric_summary.get("sample_sd"),
+                statistics.stdev(values),
+                f"rescore aggregate {branch_name}.{metric} sample SD",
+            )
+            _close(
+                metric_summary.get("mean"),
+                baseline_manifest[branch_name]["mean"][metric],
+                f"rescore versus manifest {branch_name}.{metric} mean",
+            )
+            _close(
+                metric_summary.get("sample_sd"),
+                baseline_manifest[branch_name]["sample_sd"][metric],
+                f"rescore versus manifest {branch_name}.{metric} sample SD",
+            )
+
+    recomputed_funnel = {
+        "requested": len(EXPECTED_SEEDS) * EXPECTED_SAMPLES_PER_SEED,
+        "strict_valid": sum(
+            row["metrics"]["strict"]["valid_count"] for row in normalized_seed_rows
+        ),
+        "strict_unique_within_seed": sum(
+            row["metrics"]["strict"]["unique_count"] for row in normalized_seed_rows
+        ),
+        "strict_quality": sum(
+            row["metrics"]["strict"]["quality_count"] for row in normalized_seed_rows
+        ),
+        "released_valid": sum(
+            row["metrics"]["released_comparable"]["valid_count"]
+            for row in normalized_seed_rows
+        ),
+        "released_unique_within_seed": sum(
+            row["metrics"]["released_comparable"]["unique_count"]
+            for row in normalized_seed_rows
+        ),
+        "released_quality": sum(
+            row["metrics"]["released_comparable"]["quality_count"]
+            for row in normalized_seed_rows
+        ),
+        "released_recovered_strict_failure": sum(
+            row["failure_counts"]["released_recovered_strict_failure"]
+            for row in normalized_seed_rows
+        ),
+        "released_largest_component_applied": sum(
+            row["failure_counts"]["released_largest_component_applied"]
+            for row in normalized_seed_rows
+        ),
+    }
+    if attestation.get(
+        "strict_vs_repaired_funnel"
+    ) != recomputed_funnel or recomputed_funnel != baseline_manifest.get(
+        "strict_vs_repaired_funnel"
+    ):
+        raise GateValidationError("baseline rescore funnel disagrees with manifest")
+    manifest_comparison = _mapping(
+        attestation.get("manifest_comparison"),
+        "baseline rescore manifest comparison",
+    )
+    if manifest_comparison != {
+        "all_seed_rows_metrics_failures_hashes_and_aggregates_match": True,
+        "manifest_sha256": BASELINE_SHA256,
+    }:
+        raise GateValidationError("baseline rescore manifest comparison is incomplete")
+    if canonical_json_sha256(attestation) != BASELINE_RESCORE_CANONICAL_SHA256:
+        raise GateValidationError(
+            "baseline rescore attestation content is not the frozen value"
+        )
+    return {
+        "relative_path": BASELINE_RESCORE_RELATIVE_PATH.as_posix(),
+        "sha256": BASELINE_RESCORE_SHA256,
+        "source_revision": EXPECTED_BASELINE_RESCORE_SOURCE_REVISION,
+        "status": "completed_exact_match",
+        "manifest_sha256": BASELINE_SHA256,
+        "benchmark_schema_version": EXPECTED_BASELINE_BENCHMARK_SCHEMA_VERSION,
+        "report_schema_version": EXPECTED_BASELINE_REPORT_SCHEMA_VERSION,
+        "metric_inputs_sha256": metric_inputs_sha,
+        "runtime_modules_sha256": runtime_modules_sha,
+        "network_controls": {
+            "os_or_process_network_isolation": False,
+            "python_runtime_guarded_apis": list(_BASELINE_GUARDED_NETWORK_APIS),
+            "scope_limitation": _BASELINE_NETWORK_SCOPE_LIMITATION,
+        },
+        "seed_count": len(normalized_seed_rows),
+        "rows_compared_per_seed": EXPECTED_SAMPLES_PER_SEED,
+        "fields_compared_per_row": EXPECTED_BASELINE_RAW_SAMPLE_FIELD_COUNT,
+        "all_rows_and_manifest_values_exact_match": True,
     }
 
 
@@ -524,8 +1170,7 @@ def wilson_score_interval(
     radius = (
         z
         * math.sqrt(
-            proportion * (1.0 - proportion) / trials
-            + z * z / (4.0 * trials * trials)
+            proportion * (1.0 - proportion) / trials + z * z / (4.0 * trials * trials)
         )
         / denominator
     )
@@ -582,7 +1227,9 @@ def welch_lower_difference(
     candidate = [_finite(value, "candidate seed value") for value in candidate_values]
     baseline = [_finite(value, "baseline seed value") for value in baseline_values]
     if len(candidate) < 2 or len(baseline) < 2:
-        raise GateValidationError("Welch intervals require at least two values per method")
+        raise GateValidationError(
+            "Welch intervals require at least two values per method"
+        )
     confidence = _finite(confidence, "confidence")
     if not 0.5 < confidence < 1.0:
         raise GateValidationError("one-sided confidence must lie in (0.5, 1)")
@@ -598,10 +1245,9 @@ def welch_lower_difference(
         raise GateValidationError(
             "Welch interval is undefined when both sample variances are zero"
         )
-    denominator = (
-        candidate_component * candidate_component / (len(candidate) - 1)
-        + baseline_component * baseline_component / (len(baseline) - 1)
-    )
+    denominator = candidate_component * candidate_component / (
+        len(candidate) - 1
+    ) + baseline_component * baseline_component / (len(baseline) - 1)
     if denominator <= 0:
         raise GateValidationError("Welch degrees of freedom are undefined")
     degrees_of_freedom = standard_error_squared**2 / denominator
@@ -652,9 +1298,10 @@ def validate_candidate_lock(
     if candidate_lock.get("schema_version") != 1:
         raise GateValidationError("candidate lock schema_version must equal 1")
     candidate_id = candidate_lock.get("candidate_id")
-    if not isinstance(candidate_id, str) or re.fullmatch(
-        r"[a-z0-9][a-z0-9._-]{2,95}", candidate_id
-    ) is None:
+    if (
+        not isinstance(candidate_id, str)
+        or re.fullmatch(r"[a-z0-9][a-z0-9._-]{2,95}", candidate_id) is None
+    ):
         raise GateValidationError("candidate_id has invalid syntax")
     if candidate_lock.get("status") != "locked_before_final_evaluation":
         raise GateValidationError("candidate is not locked before final evaluation")
@@ -792,10 +1439,14 @@ def validate_candidate_lock(
     )
 
     startup = _mapping(training.get("startup"), "candidate startup")
-    _exact_keys(startup, {"mode", "initialization_checkpoint_sha256"}, "candidate startup")
+    _exact_keys(
+        startup, {"mode", "initialization_checkpoint_sha256"}, "candidate startup"
+    )
     startup_mode = startup.get("mode")
     if startup_mode not in CLAIM_SCOPE_BY_STARTUP:
-        raise GateValidationError("candidate startup mode must be warm_start or scratch")
+        raise GateValidationError(
+            "candidate startup mode must be warm_start or scratch"
+        )
     initialization_sha = startup.get("initialization_checkpoint_sha256")
     if startup_mode == "warm_start":
         if initialization_sha != EXPECTED_BASELINE_CHECKPOINT_SHA256:
@@ -953,7 +1604,9 @@ def validate_candidate_lock(
         _exact_keys(row, {"seed", "relative_path"}, "final run directory row")
         seed = row.get("seed")
         if type(seed) is not int or seed in final_directories:
-            raise GateValidationError("final run directory seeds must be unique integers")
+            raise GateValidationError(
+                "final run directory seeds must be unique integers"
+            )
         final_directories[seed] = _relative_directory(
             row.get("relative_path"), f"final seed {seed} output directory"
         )
@@ -1034,14 +1687,18 @@ def _artifact_reference(
     return result
 
 
-def _load_referenced_json(reference: Mapping[str, Any], *, label: str) -> Mapping[str, Any]:
+def _load_referenced_json(
+    reference: Mapping[str, Any], *, label: str
+) -> Mapping[str, Any]:
     payload = _repository_artifact_bytes(reference["relative_path"], label=label)
     observed = _sha256_bytes(payload)
     if observed != reference["sha256"]:
         raise GateValidationError(f"{label} digest disagrees with candidate lock")
     parsed = _mapping(strict_json_loads(payload, label=label), label)
     if parsed.get("schema_version") != reference["schema_version"]:
-        raise GateValidationError(f"{label} schema version disagrees with candidate lock")
+        raise GateValidationError(
+            f"{label} schema version disagrees with candidate lock"
+        )
     return parsed
 
 
@@ -1058,7 +1715,9 @@ def validate_training_evidence(lock: Mapping[str, Any]) -> dict[str, Any]:
     if summary.get("status") != "completed":
         raise GateValidationError("training summary is not completed")
     if summary.get("source_revision") != lock["source_revision"]:
-        raise GateValidationError("training summary source revision disagrees with lock")
+        raise GateValidationError(
+            "training summary source revision disagrees with lock"
+        )
     if (
         summary.get("resolved_training_config_sha256")
         != lock["resolved_training_config_sha256"]
@@ -1069,7 +1728,9 @@ def validate_training_evidence(lock: Mapping[str, Any]) -> dict[str, Any]:
     runtime_claim = _mapping(summary.get("runtime_config"), "summary runtime config")
     if runtime_claim.get("sha256") != lock["runtime"]["sha256"]:
         raise GateValidationError("summary runtime-config digest disagrees with lock")
-    observed = _mapping(summary.get("observed_training_state"), "observed training state")
+    observed = _mapping(
+        summary.get("observed_training_state"), "observed training state"
+    )
     if observed.get("global_step") != lock["optimizer_updates"]:
         raise GateValidationError("training summary step count disagrees with lock")
     if observed.get("world_size") != lock["world_size"]:
@@ -1078,7 +1739,9 @@ def validate_training_evidence(lock: Mapping[str, Any]) -> dict[str, Any]:
     for key in ("sha256", "size_bytes"):
         if final_checkpoint.get(key) != lock["checkpoint"][key]:
             raise GateValidationError(f"summary checkpoint {key} disagrees with lock")
-    semantic = _mapping(final_checkpoint.get("semantic_audit"), "checkpoint semantic audit")
+    semantic = _mapping(
+        final_checkpoint.get("semantic_audit"), "checkpoint semantic audit"
+    )
     if semantic.get("global_step") != lock["checkpoint"]["global_step"]:
         raise GateValidationError("semantic checkpoint step disagrees with lock")
     for path, label in (
@@ -1126,31 +1789,34 @@ def validate_training_evidence(lock: Mapping[str, Any]) -> dict[str, Any]:
         if warm_report.get("weights") != "ema":
             raise GateValidationError("warm-start initialization must use MDLM EMA")
     elif warm_report is not None:
-        raise GateValidationError("scratch summary unexpectedly contains warm-start evidence")
+        raise GateValidationError(
+            "scratch summary unexpectedly contains warm-start evidence"
+        )
 
-    if receipt.get("status") != "completed" or receipt.get("overall_status") != "completed":
+    if (
+        receipt.get("status") != "completed"
+        or receipt.get("overall_status") != "completed"
+    ):
         raise GateValidationError("training exit receipt is not completed")
     if receipt.get("process_exit_status") != 0:
         raise GateValidationError("training exit receipt records nonzero status")
     expected = _mapping(receipt.get("expected_contract"), "receipt expected contract")
     expected_values = {
         "source_revision": lock["source_revision"],
-        "resolved_training_config_sha256": lock[
-            "resolved_training_config_sha256"
-        ],
+        "resolved_training_config_sha256": lock["resolved_training_config_sha256"],
         "training_argv_sha256": lock["training_argv_sha256"],
         "max_steps": lock["optimizer_updates"],
         "world_size": lock["world_size"],
-        "initialization_checkpoint_sha256": lock[
-            "initialization_checkpoint_sha256"
-        ],
+        "initialization_checkpoint_sha256": lock["initialization_checkpoint_sha256"],
     }
     for key, value in expected_values.items():
         if expected.get(key) != value:
             raise GateValidationError(f"exit receipt {key} disagrees with lock")
     source = _mapping(receipt.get("source_at_receipt"), "receipt source evidence")
     _required_true(source.get("verified"), "clean pushed source at receipt")
-    receipt_summary = _mapping(receipt.get("training_summary"), "receipt summary evidence")
+    receipt_summary = _mapping(
+        receipt.get("training_summary"), "receipt summary evidence"
+    )
     _required_true(
         receipt_summary.get("valid_and_launch_bound"),
         "launch-bound training summary",
@@ -1173,7 +1839,9 @@ def validate_training_evidence(lock: Mapping[str, Any]) -> dict[str, Any]:
     for key in ("sha256", "size_bytes"):
         if checkpoint_artifact.get(key) != lock["checkpoint"][key]:
             raise GateValidationError(f"receipt checkpoint {key} disagrees with lock")
-    receipt_runtime = _mapping(receipt.get("runtime_config"), "receipt runtime evidence")
+    receipt_runtime = _mapping(
+        receipt.get("runtime_config"), "receipt runtime evidence"
+    )
     _required_true(
         receipt_runtime.get("matches_training_summary_snapshot"),
         "receipt runtime snapshot match",
@@ -1188,7 +1856,9 @@ def validate_training_evidence(lock: Mapping[str, Any]) -> dict[str, Any]:
     if runtime_artifact.get("sha256") != lock["runtime"]["sha256"]:
         raise GateValidationError("receipt runtime-config digest disagrees with lock")
     if runtime.get("status") != "preflight_completed":
-        raise GateValidationError("runtime training config is not a completed preflight")
+        raise GateValidationError(
+            "runtime training config is not a completed preflight"
+        )
     if runtime.get("source_revision") != lock["source_revision"]:
         raise GateValidationError("runtime source revision disagrees with lock")
     if (
@@ -1199,7 +1869,10 @@ def validate_training_evidence(lock: Mapping[str, Any]) -> dict[str, Any]:
     resolved_config = _mapping(
         runtime.get("resolved_training_config"), "runtime resolved training config"
     )
-    if canonical_json_sha256(resolved_config) != lock["resolved_training_config_sha256"]:
+    if (
+        canonical_json_sha256(resolved_config)
+        != lock["resolved_training_config_sha256"]
+    ):
         raise GateValidationError("runtime resolved training config content is unbound")
     if runtime.get("training_argv_sha256") != lock["training_argv_sha256"]:
         raise GateValidationError("runtime training argv digest disagrees with lock")
@@ -1261,9 +1934,13 @@ def validate_training_evidence(lock: Mapping[str, Any]) -> dict[str, Any]:
         minimum=1,
     )
     if global_examples != micro_batch * world_size * accumulation:
-        raise GateValidationError("summary training-accounting batch arithmetic disagrees")
+        raise GateValidationError(
+            "summary training-accounting batch arithmetic disagrees"
+        )
     if requested_exposures != global_examples * optimizer_updates:
-        raise GateValidationError("summary training-accounting exposure arithmetic disagrees")
+        raise GateValidationError(
+            "summary training-accounting exposure arithmetic disagrees"
+        )
     if training_seed != lock["training_seed"]:
         raise GateValidationError("training-accounting seed disagrees with lock")
     if optimizer_updates != lock["optimizer_updates"]:
@@ -1272,14 +1949,20 @@ def validate_training_evidence(lock: Mapping[str, Any]) -> dict[str, Any]:
         raise GateValidationError("training-accounting world size disagrees with lock")
     locked_exposure = lock["data_exposure"]
     if global_examples != locked_exposure["global_examples_per_optimizer_step"]:
-        raise GateValidationError("training-accounting global examples disagree with lock")
+        raise GateValidationError(
+            "training-accounting global examples disagree with lock"
+        )
     if requested_exposures != locked_exposure["total_requested_examples"]:
-        raise GateValidationError("training-accounting requested exposure disagrees with lock")
+        raise GateValidationError(
+            "training-accounting requested exposure disagrees with lock"
+        )
     if (
         accounting.get("hosted_stream_rank_partition_policy")
         != locked_exposure["stream_partition_policy"]
     ):
-        raise GateValidationError("training-accounting stream policy disagrees with lock")
+        raise GateValidationError(
+            "training-accounting stream policy disagrees with lock"
+        )
 
     parameter_counts = _mapping(
         accounting.get("trainable_parameter_counts"),
@@ -1313,7 +1996,9 @@ def validate_training_evidence(lock: Mapping[str, Any]) -> dict[str, Any]:
         or conditioner_count != locked_parameters["time_conditioner_trainable"]
         or total_count != locked_parameters["total_trainable"]
     ):
-        raise GateValidationError("training-accounting parameter counts disagree with lock")
+        raise GateValidationError(
+            "training-accounting parameter counts disagree with lock"
+        )
 
     validated_bindings = _mapping(
         receipt_summary.get("validated_bindings"),
@@ -1370,9 +2055,7 @@ def validate_training_evidence(lock: Mapping[str, Any]) -> dict[str, Any]:
         "training_summary_sha256": lock["summary"]["sha256"],
         "exit_receipt_sha256": lock["receipt"]["sha256"],
         "runtime_config_sha256": lock["runtime"]["sha256"],
-        "resolved_training_config_sha256": lock[
-            "resolved_training_config_sha256"
-        ],
+        "resolved_training_config_sha256": lock["resolved_training_config_sha256"],
         "training_argv_sha256": lock["training_argv_sha256"],
         "checkpoint_sha256": lock["checkpoint"]["sha256"],
         "checkpoint_global_step": lock["checkpoint"]["global_step"],
@@ -1411,12 +2094,16 @@ def validate_candidate_ledger(
     ):
         raise GateValidationError("candidate ledger identity is invalid")
     if ledger.get("status") != "closed_before_final_evaluation":
-        raise GateValidationError("candidate ledger is not closed before final evaluation")
+        raise GateValidationError(
+            "candidate ledger is not closed before final evaluation"
+        )
     if ledger.get("final_seed_results_included") is not False:
         raise GateValidationError("candidate ledger must exclude final-seed results")
     attempts = ledger.get("attempts")
     if not isinstance(attempts, list) or not attempts:
-        raise GateValidationError("candidate ledger must disclose at least one pilot attempt")
+        raise GateValidationError(
+            "candidate ledger must disclose at least one pilot attempt"
+        )
     attempt_ids: set[str] = set()
     artifact_paths: set[Path] = set()
     eligible_attempts: list[dict[str, Any]] = []
@@ -1450,10 +2137,13 @@ def validate_candidate_ledger(
             )
         attempt_ids.add(attempt_id)
         attempt_candidate_id = attempt.get("candidate_id")
-        if not isinstance(attempt_candidate_id, str) or re.fullmatch(
-            r"[a-z0-9][a-z0-9._-]{2,95}", attempt_candidate_id
-        ) is None:
-            raise GateValidationError("candidate ledger candidate_id has invalid syntax")
+        if (
+            not isinstance(attempt_candidate_id, str)
+            or re.fullmatch(r"[a-z0-9][a-z0-9._-]{2,95}", attempt_candidate_id) is None
+        ):
+            raise GateValidationError(
+                "candidate ledger candidate_id has invalid syntax"
+            )
         status = attempt.get("status")
         eligible = attempt.get("eligible_for_selection")
         if status == "completed":
@@ -1489,9 +2179,11 @@ def validate_candidate_ledger(
                 if not 0.0 <= declared_diversity <= 1.0:
                     raise GateValidationError("pilot mean diversity must be in [0, 1]")
             else:
-                if attempt.get("selection_score") is not None or attempt.get(
-                    "ineligibility_reason"
-                ) != NONREGISTERED_OPERATING_POINT_REASON:
+                if (
+                    attempt.get("selection_score") is not None
+                    or attempt.get("ineligibility_reason")
+                    != NONREGISTERED_OPERATING_POINT_REASON
+                ):
                     raise GateValidationError(
                         "nonregistered completed pilots must have a null score and "
                         "the fixed ineligibility reason"
@@ -1518,13 +2210,19 @@ def validate_candidate_ledger(
             )
         seeds = attempt.get("pilot_seeds")
         if not isinstance(seeds, list) or not seeds:
-            raise GateValidationError("each candidate attempt must disclose pilot seeds")
+            raise GateValidationError(
+                "each candidate attempt must disclose pilot seeds"
+            )
         if any(type(seed) is not int or seed < 1000 for seed in seeds):
-            raise GateValidationError("pilot seeds must be integers greater than or equal to 1000")
+            raise GateValidationError(
+                "pilot seeds must be integers greater than or equal to 1000"
+            )
         if seeds != sorted(set(seeds)):
             raise GateValidationError("pilot seeds must be unique and sorted")
         if set(seeds).intersection(EXPECTED_SEEDS):
-            raise GateValidationError("candidate ledger contains a forbidden final seed")
+            raise GateValidationError(
+                "candidate ledger contains a forbidden final seed"
+            )
         refs = attempt.get("artifact_refs")
         if not isinstance(refs, list) or len(refs) != len(seeds):
             raise GateValidationError(
@@ -1609,8 +2307,7 @@ def validate_candidate_ledger(
             if status == "completed":
                 _exact_keys(
                     evidence,
-                    common_evidence_fields
-                    | {"checkpoint_sha256", "evaluation"},
+                    common_evidence_fields | {"checkpoint_sha256", "evaluation"},
                     f"pilot evidence {relative_path.as_posix()}",
                 )
             else:
@@ -1724,11 +2421,9 @@ def validate_candidate_ledger(
                     "all seed evidence for one attempt must use one checkpoint"
                 )
             derived_eligible = tuple(seeds) == REGISTERED_SELECTION_PILOT_SEEDS and all(
-                point["requested_samples"]
-                == REGISTERED_SELECTION_SAMPLES_PER_SEED
+                point["requested_samples"] == REGISTERED_SELECTION_SAMPLES_PER_SEED
                 and point["nfe"] == REGISTERED_SELECTION_NFE
-                and point["metric_branch"]
-                == REGISTERED_SELECTION_METRIC_BRANCH
+                and point["metric_branch"] == REGISTERED_SELECTION_METRIC_BRANCH
                 for point in observed_operating_points
             )
             if eligible is not derived_eligible:
@@ -1781,7 +2476,9 @@ def validate_candidate_ledger(
         "ledger selection without final seeds",
     )
     if selection.get("rule") != CANDIDATE_SELECTION_RULE:
-        raise GateValidationError("candidate ledger selection rule is not the frozen enum")
+        raise GateValidationError(
+            "candidate ledger selection rule is not the frozen enum"
+        )
     if selection.get("checkpoint_selection_rule") != CHECKPOINT_SELECTION_RULE:
         raise GateValidationError(
             "candidate ledger checkpoint-selection rule is not the frozen enum"
@@ -1855,10 +2552,47 @@ def validate_git_lock_firewall(
         raise GateValidationError("benchmark revision candidate-lock blob differs")
     protocol_blob = _git_blob(benchmark_revision, PROTOCOL_RELATIVE_PATH)
     if _sha256_bytes(protocol_blob) != PROTOCOL_SHA256:
-        raise GateValidationError("benchmark revision superiority protocol blob differs")
+        raise GateValidationError(
+            "benchmark revision superiority protocol blob differs"
+        )
     baseline_blob = _git_blob(benchmark_revision, BASELINE_RELATIVE_PATH)
     if _sha256_bytes(baseline_blob) != BASELINE_SHA256:
         raise GateValidationError("benchmark revision baseline manifest blob differs")
+    baseline_rescore_blob = _git_blob(
+        benchmark_revision, BASELINE_RESCORE_RELATIVE_PATH
+    )
+    if _sha256_bytes(baseline_rescore_blob) != BASELINE_RESCORE_SHA256:
+        raise GateValidationError(
+            "benchmark revision baseline rescore-attestation blob differs"
+        )
+    baseline_document = _mapping(
+        strict_json_loads(baseline_blob, label="baseline manifest Git blob"),
+        "baseline manifest Git blob",
+    )
+    baseline_rescore_document = _mapping(
+        strict_json_loads(
+            baseline_rescore_blob, label="baseline rescore-attestation Git blob"
+        ),
+        "baseline rescore-attestation Git blob",
+    )
+    baseline_rescore_evidence = validate_baseline_rescore_attestation(
+        baseline_rescore_document, baseline_document
+    )
+    attested_source_files = _mapping(
+        _mapping(
+            baseline_rescore_document.get("source"),
+            "baseline rescore Git source",
+        ).get("files"),
+        "baseline rescore Git source files",
+    )
+    for name, (relative_path, _module_name) in _BASELINE_SOURCE_FILES.items():
+        source_blob = _git_blob(
+            EXPECTED_BASELINE_RESCORE_SOURCE_REVISION, Path(relative_path)
+        )
+        if _sha256_bytes(source_blob) != attested_source_files[name]["sha256"]:
+            raise GateValidationError(
+                f"baseline rescore source-revision blob differs for {relative_path}"
+            )
     ledger_ref = lock["ledger"]
     ledger_blob = _git_blob(benchmark_revision, ledger_ref["relative_path"])
     if _sha256_bytes(ledger_blob) != ledger_ref["sha256"]:
@@ -1885,9 +2619,7 @@ def validate_git_lock_firewall(
         raise GateValidationError(
             "candidate-lock and ledger checkpoint-selection rules disagree"
         )
-    config_blob = _git_blob(
-        benchmark_revision, lock["evaluation_config_relative_path"]
-    )
+    config_blob = _git_blob(benchmark_revision, lock["evaluation_config_relative_path"])
     if _sha256_bytes(config_blob) != lock["evaluation_config_sha256"]:
         raise GateValidationError("benchmark revision evaluation-config blob differs")
     sampler_blob = _git_blob(benchmark_revision, Path("src/genmol/sampler.py"))
@@ -1898,14 +2630,10 @@ def validate_git_lock_firewall(
     )
     if _sha256_bytes(runner_blob) != lock["benchmark_runner_sha256"]:
         raise GateValidationError("benchmark revision runner source blob differs")
-    gate_blob = _git_blob(
-        benchmark_revision, Path("scripts/udlm/superiority_gate.py")
-    )
+    gate_blob = _git_blob(benchmark_revision, Path("scripts/udlm/superiority_gate.py"))
     if _sha256_bytes(gate_blob) != lock["gate_source_sha256"]:
         raise GateValidationError("benchmark revision superiority-gate blob differs")
-    report_blob = _git_blob(
-        benchmark_revision, Path("scripts/exps/denovo/report.py")
-    )
+    report_blob = _git_blob(benchmark_revision, Path("scripts/exps/denovo/report.py"))
     if _sha256_bytes(report_blob) != lock["report_source_sha256"]:
         raise GateValidationError("benchmark revision de-novo-report blob differs")
     try:
@@ -1926,6 +2654,24 @@ def validate_git_lock_firewall(
         raise GateValidationError(
             "training source revision is not an ancestor of benchmark revision"
         ) from error
+    try:
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(REPOSITORY_ROOT),
+                "merge-base",
+                "--is-ancestor",
+                EXPECTED_BASELINE_RESCORE_SOURCE_REVISION,
+                benchmark_revision,
+            ],
+            check=True,
+            capture_output=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise GateValidationError(
+            "baseline rescore source revision is not an ancestor of benchmark revision"
+        ) from error
     return {
         "benchmark_revision": benchmark_revision,
         "candidate_lock_relative_path": candidate_lock_path.as_posix(),
@@ -1933,6 +2679,15 @@ def validate_git_lock_firewall(
         "candidate_lock_exact_blob_at_benchmark_revision": True,
         "protocol_exact_blob_at_benchmark_revision": True,
         "baseline_exact_blob_at_benchmark_revision": True,
+        "baseline_rescore_attestation_relative_path": (
+            BASELINE_RESCORE_RELATIVE_PATH.as_posix()
+        ),
+        "baseline_rescore_attestation_sha256": BASELINE_RESCORE_SHA256,
+        "baseline_rescore_attestation_exact_blob_at_benchmark_revision": True,
+        "baseline_rescore_source_revision": (EXPECTED_BASELINE_RESCORE_SOURCE_REVISION),
+        "baseline_rescore_source_exact_blobs_verified": True,
+        "baseline_rescore_source_revision_is_ancestor": True,
+        "baseline_rescore_evidence": baseline_rescore_evidence,
         "candidate_ledger_relative_path": ledger_ref["relative_path"].as_posix(),
         "candidate_ledger_sha256": ledger_ref["sha256"],
         "candidate_ledger_exact_blob_at_benchmark_revision": True,
@@ -1943,9 +2698,7 @@ def validate_git_lock_firewall(
         "committed_pilot_artifact_count": ledger_evidence[
             "committed_pilot_artifact_count"
         ],
-        "eligible_pilot_attempt_count": ledger_evidence[
-            "eligible_attempt_count"
-        ],
+        "eligible_pilot_attempt_count": ledger_evidence["eligible_attempt_count"],
         "ineligible_completed_pilot_attempt_count": ledger_evidence[
             "ineligible_completed_attempt_count"
         ],
@@ -1979,21 +2732,30 @@ def _candidate_series(
     }
     if dict(required) != expected_required:
         raise GateValidationError("candidate report final seed/sample protocol differs")
-    checkpoint = _mapping(candidate_report.get("checkpoint"), "candidate report checkpoint")
+    checkpoint = _mapping(
+        candidate_report.get("checkpoint"), "candidate report checkpoint"
+    )
     if checkpoint.get("diffusion_type") != "udlm":
         raise GateValidationError("candidate report checkpoint is not UDLM")
     for key in ("sha256", "size_bytes", "global_step"):
         if checkpoint.get(key) != lock["checkpoint"][key]:
-            raise GateValidationError(f"candidate report checkpoint {key} differs from lock")
+            raise GateValidationError(
+                f"candidate report checkpoint {key} differs from lock"
+            )
     config = _mapping(candidate_report.get("config"), "candidate report config")
     if config.get("sha256") != lock["evaluation_config_sha256"]:
-        raise GateValidationError("candidate evaluation config digest differs from lock")
+        raise GateValidationError(
+            "candidate evaluation config digest differs from lock"
+        )
     if config.get("sampling_sha256") != lock["sampling_sha256"]:
         raise GateValidationError("candidate sampling digest differs from lock")
     if config.get("sampling") != lock["sampling_config"]:
         raise GateValidationError("candidate sampling settings differ from lock")
     tracking = _mapping(config.get("git_tracking"), "candidate config tracking")
-    if tracking.get("relative_path") != lock["evaluation_config_relative_path"].as_posix():
+    if (
+        tracking.get("relative_path")
+        != lock["evaluation_config_relative_path"].as_posix()
+    ):
         raise GateValidationError("candidate evaluation config path differs from lock")
 
     generation = _mapping(
@@ -2001,7 +2763,10 @@ def _candidate_series(
     )
     if generation.get("diffusion_type") != "udlm":
         raise GateValidationError("candidate generation protocol is not UDLM")
-    if generation.get("nfe") != EXPECTED_NFE or generation.get("num_steps") != EXPECTED_NFE:
+    if (
+        generation.get("nfe") != EXPECTED_NFE
+        or generation.get("num_steps") != EXPECTED_NFE
+    ):
         raise GateValidationError("candidate final evaluation must use exactly 128 NFE")
     expected_nfe = [{"seed": seed, "nfe": EXPECTED_NFE} for seed in EXPECTED_SEEDS]
     if generation.get("nfe_by_seed") != expected_nfe:
@@ -2041,21 +2806,35 @@ def _candidate_series(
             raise GateValidationError(
                 f"candidate seed {expected_seed} inference-weight receipt disagrees"
             )
-        metrics = _mapping(run.get("metrics"), f"candidate seed {expected_seed} metrics")
+        metrics = _mapping(
+            run.get("metrics"), f"candidate seed {expected_seed} metrics"
+        )
         if set(metrics) != {"released_comparable", "strict"}:
-            raise GateValidationError("candidate must report repaired and strict branches")
+            raise GateValidationError(
+                "candidate must report repaired and strict branches"
+            )
         branch = _mapping(metrics["released_comparable"], "candidate released metrics")
         requested = _integer(
-            branch.get("validity_denominator"), "candidate validity denominator", minimum=1
+            branch.get("validity_denominator"),
+            "candidate validity denominator",
+            minimum=1,
         )
         quality_denominator = _integer(
-            branch.get("quality_denominator"), "candidate quality denominator", minimum=1
+            branch.get("quality_denominator"),
+            "candidate quality denominator",
+            minimum=1,
         )
         if requested != EXPECTED_SAMPLES_PER_SEED or quality_denominator != requested:
             raise GateValidationError("candidate metric denominator is not 1000")
-        valid_count = _integer(branch.get("valid_count"), "candidate valid count", minimum=0)
-        unique_count = _integer(branch.get("unique_count"), "candidate unique count", minimum=0)
-        quality_count = _integer(branch.get("quality_count"), "candidate quality count", minimum=0)
+        valid_count = _integer(
+            branch.get("valid_count"), "candidate valid count", minimum=0
+        )
+        unique_count = _integer(
+            branch.get("unique_count"), "candidate unique count", minimum=0
+        )
+        quality_count = _integer(
+            branch.get("quality_count"), "candidate quality count", minimum=0
+        )
         if not 0 <= quality_count <= unique_count <= valid_count <= requested:
             raise GateValidationError("candidate count funnel is inconsistent")
         if branch.get("uniqueness_denominator") != valid_count:
@@ -2066,7 +2845,9 @@ def _candidate_series(
             "quality": quality_count / requested,
         }
         for metric, expected in expected_values.items():
-            _close(branch.get(metric), expected, f"candidate seed {expected_seed} {metric}")
+            _close(
+                branch.get(metric), expected, f"candidate seed {expected_seed} {metric}"
+            )
         diversity = _finite(branch.get("diversity"), "candidate diversity")
         if not 0 <= diversity <= 1:
             raise GateValidationError("candidate diversity must lie in [0, 1]")
@@ -2087,8 +2868,12 @@ def _candidate_series(
             raise GateValidationError(
                 f"candidate seed {expected_seed} used an unlocked output directory"
             )
-        raw_hashes.append(_sha256(run.get("raw_samples_sha256"), "candidate raw digest"))
-        summary_hashes.append(_sha256(run.get("summary_sha256"), "candidate summary digest"))
+        raw_hashes.append(
+            _sha256(run.get("raw_samples_sha256"), "candidate raw digest")
+        )
+        summary_hashes.append(
+            _sha256(run.get("summary_sha256"), "candidate summary digest")
+        )
     if len(revisions) != 1:
         raise GateValidationError("candidate final seeds used different revisions")
     if any(timestamp < lock["locked_at"] for timestamp in started_at):
@@ -2096,8 +2881,12 @@ def _candidate_series(
     if len(set(raw_hashes)) != 3 or len(set(summary_hashes)) != 3:
         raise GateValidationError("candidate final evidence hashes are not distinct")
 
-    aggregate = _mapping(candidate_report.get("aggregate_metrics"), "candidate aggregate")
-    released = _mapping(aggregate.get("released_comparable"), "candidate released aggregate")
+    aggregate = _mapping(
+        candidate_report.get("aggregate_metrics"), "candidate aggregate"
+    )
+    released = _mapping(
+        aggregate.get("released_comparable"), "candidate released aggregate"
+    )
     strict = _mapping(aggregate.get("strict"), "candidate strict aggregate")
     if set(released) != set(METRICS) or set(strict) != set(METRICS):
         raise GateValidationError("candidate aggregate metric branches are incomplete")
@@ -2112,7 +2901,9 @@ def _candidate_series(
             for seed, value in zip(EXPECTED_SEEDS, values[metric], strict=True)
         ]
         if row.get("values_by_seed") != expected_values:
-            raise GateValidationError(f"candidate aggregate seed values differ for {metric}")
+            raise GateValidationError(
+                f"candidate aggregate seed values differ for {metric}"
+            )
     consistency = _mapping(
         candidate_report.get("environment_consistency"),
         "candidate environment consistency",
@@ -2132,7 +2923,9 @@ def _candidate_series(
         implementation.get("sampler_source"), "candidate sampler source"
     )
     if sampler_source.get("sha256") != lock["sampler_source_sha256"]:
-        raise GateValidationError("candidate sampler source differs from candidate lock")
+        raise GateValidationError(
+            "candidate sampler source differs from candidate lock"
+        )
     if canonical_json_sha256(implementation) != lock["implementation_inputs_sha256"]:
         raise GateValidationError("candidate implementation inputs differ from lock")
     metric_inputs = _mapping(
@@ -2144,10 +2937,14 @@ def _candidate_series(
         candidate_report.get("runner_sha256"), "candidate runner digest"
     )
     if runner_sha != lock["benchmark_runner_sha256"]:
-        raise GateValidationError("candidate benchmark runner differs from candidate lock")
+        raise GateValidationError(
+            "candidate benchmark runner differs from candidate lock"
+        )
     return {
         "values": values,
-        "means": {metric: statistics.fmean(series) for metric, series in values.items()},
+        "means": {
+            metric: statistics.fmean(series) for metric, series in values.items()
+        },
         "sample_sds": {metric: _sample_sd(series) for metric, series in values.items()},
         "pooled_valid": pooled_valid,
         "pooled_requested": pooled_requested,
@@ -2164,6 +2961,7 @@ def _candidate_series(
 def evaluate_candidate_report(
     candidate_report: Mapping[str, Any],
     baseline_manifest: Mapping[str, Any],
+    baseline_rescore_attestation: Mapping[str, Any],
     protocol: Mapping[str, Any],
     candidate_lock: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -2171,6 +2969,9 @@ def evaluate_candidate_report(
 
     validate_protocol(protocol)
     baseline = validate_baseline_manifest(baseline_manifest)
+    baseline_rescore = validate_baseline_rescore_attestation(
+        baseline_rescore_attestation, baseline_manifest
+    )
     lock = validate_candidate_lock(candidate_lock, protocol)
     candidate = _candidate_series(candidate_report, lock)
 
@@ -2182,7 +2983,9 @@ def evaluate_candidate_report(
         raise GateValidationError("uniqueness point threshold differs from baseline")
     if point_protocol["quality"]["threshold"] != baseline_means["quality"]:
         raise GateValidationError("quality point threshold differs from baseline")
-    diversity_threshold = baseline_means["diversity"] + point_protocol["diversity"]["margin"]
+    diversity_threshold = (
+        baseline_means["diversity"] + point_protocol["diversity"]["margin"]
+    )
     _close(
         point_protocol["diversity"]["threshold"],
         diversity_threshold,
@@ -2255,6 +3058,7 @@ def evaluate_candidate_report(
             "sha256": BASELINE_SHA256,
             "checkpoint_sha256": EXPECTED_BASELINE_CHECKPOINT_SHA256,
             "runner_sha256": baseline_manifest["source_aggregate"]["runner_sha256"],
+            "rescore_attestation": baseline_rescore,
         },
         "candidate": {
             "candidate_id": lock["candidate_id"],
@@ -2269,11 +3073,15 @@ def evaluate_candidate_report(
             "metric_inputs_sha256": lock["metric_inputs_sha256"],
             "raw_samples_sha256_by_seed": [
                 {"seed": seed, "sha256": digest}
-                for seed, digest in zip(EXPECTED_SEEDS, candidate["raw_hashes"], strict=True)
+                for seed, digest in zip(
+                    EXPECTED_SEEDS, candidate["raw_hashes"], strict=True
+                )
             ],
             "summary_sha256_by_seed": [
                 {"seed": seed, "sha256": digest}
-                for seed, digest in zip(EXPECTED_SEEDS, candidate["summary_hashes"], strict=True)
+                for seed, digest in zip(
+                    EXPECTED_SEEDS, candidate["summary_hashes"], strict=True
+                )
             ],
         },
         "metrics": metrics,
@@ -2403,6 +3211,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     baseline, _baseline_bytes = load_pinned_json(
         BASELINE_RELATIVE_PATH, BASELINE_SHA256, label="MDLM baseline manifest"
     )
+    baseline_rescore, _baseline_rescore_bytes = load_pinned_json(
+        BASELINE_RESCORE_RELATIVE_PATH,
+        BASELINE_RESCORE_SHA256,
+        label="MDLM baseline rescore attestation",
+    )
     lock_relative = _relative_path(
         args.candidate_lock.as_posix(), "candidate lock path", suffix=".json"
     )
@@ -2425,7 +3238,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         lock=lock,
     )
     decision = evaluate_candidate_report(
-        candidate_report, baseline, protocol, lock_json
+        candidate_report, baseline, baseline_rescore, protocol, lock_json
     )
     decision["generated_at_utc"] = datetime.now(timezone.utc).isoformat()
     decision["candidate_lock"] = firewall
