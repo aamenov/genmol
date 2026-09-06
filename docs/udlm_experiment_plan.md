@@ -146,6 +146,46 @@ order:
 GenMol MCG is disabled for UDLM until posterior-space guidance is implemented.
 Combining clean logits would not equal the UDLM paper's D-CFG rule.
 
+### Pilot-only empirical-floor selection
+
+The historical/manual categorical configuration and its immutable CPU artifacts
+use uniform mixture weight `0.01`. A later CPU-only audit, recorded at
+`experiments/udlm/prior_geometry/floor_selection_train_rows_10001_30000.json`
+(73,953 bytes, SHA-256
+`02908dafaf589ca9a49e560aa1eab470a18d6bfe616b781164784c489f54a9f1`),
+replayed the pinned stream from clean pushed source
+`6424b323084358ea050ba22d7e13ef8d45962496`. It exactly reproduced the frozen
+first-10,000-row count vector before evaluating two disjoint later training
+blocks against that fixed prior estimate.
+
+For first-prefix counts $c_j$, total $C=\sum_jc_j$, and $K=1880$, the audit
+uses $\pi_{w,j}=(1-w)c_j/C+w/K$. For held-out block counts $d_{b,j}$ and
+$D_b=\sum_jd_{b,j}$, it minimizes
+$L_b(w)=-D_b^{-1}\sum_jd_{b,j}\log\pi_{w,j}$. Rows 10,001--20,000 contain
+512,587 content tokens, including 78 tokens from 41 first-prefix-unseen types;
+their continuous optimum is `0.00016593802382907556`. Rows 20,001--30,000
+contain 513,326 content tokens, including 91 tokens from 62 such types; their
+optimum is `0.00019334112119092408`. The rounded `0.0002` candidate lowers
+unigram NLL relative to `0.01` by `0.00860566722454914` and
+`0.008485138280406979` nats/token, respectively.
+
+The reviewed pilot launcher therefore uses `0.0002` for E while placing the
+same otherwise-ignored field in R and S configurations to preserve their
+matched-config contract. This is a disclosed retrospective training-data
+engineering choice: the rule was formalized after both blocks were inspected.
+It is not preregistered confirmation, sequence-model evidence, molecular
+quality evidence, or evidence that UDLM beats GenMol. The final seeds and
+generation metrics were not used. Only the later matched E-versus-S comparison
+can estimate the empirical-prior effect.
+
+The pinned official UDLM QM9 recipe uses 25,000 optimizer steps, global batch
+2,048, peak learning rate $3\times10^{-4}$, 1,000 warmup steps, and cosine
+decay to $3\times10^{-6}$. The screen's L0 is this project's inherited
+GenMol-style constant schedule with 2,500-step warmup, not the released UDLM
+schedule. L1 keeps the official peak/floor and cosine idea but scales the
+warmup to 50 and horizon to 1,000 for a 100-update diagnostic. It is therefore
+a schedule bundle hypothesis rather than an exact official-recipe replay.
+
 ## Progressive gates
 
 1. CPU equation, gradient, legacy-checkpoint, and sampler tests.

@@ -1177,9 +1177,16 @@ no winner for missing or unmatched evidence.
 $x_\theta(z_t,t)$, so it needs the noise time (implemented here through total
 noise $\sigma(t)$). The UDLM paper and official code motivate strong per-block
 time conditioning; they do not establish that the following BERT adapter or
-learning-rate path improves molecules. The small screens separately ask whether
-the existing empirical-prior arm E is starved by GenMol's long warmup and
-whether per-layer time modulation is more expressive than one additive vector.
+learning-rate path improves molecules. At the pinned official revision, the
+QM9 recipe uses 25,000 optimizer steps, global batch 2,048, peak learning rate
+$3\times10^{-4}$, 1,000 warmup steps, and cosine decay to $3\times10^{-6}$.
+L0 instead preserves this project's inherited GenMol-style constant schedule
+with 2,500-step warmup; it is not the released UDLM QM9 schedule. L1 scales the
+warmup and horizon for a 100-update screen, so it is also a pilot hypothesis,
+not an exact replay of the official recipe. The small screens separately ask
+whether the existing empirical-prior arm E is starved by the inherited long
+warmup and whether per-layer time modulation is more expressive than one
+additive vector.
 
 **L0/L1 mathematics and confound boundary.** Let optimizer-update index
 $k\in\{0,\ldots,99\}$, peak learning rate $\eta=3\times10^{-4}$, L0 warmup
@@ -2278,9 +2285,15 @@ The code exposes this term separately: omitting it does not change gradients,
 but it must not be silently called zero in a reported full NELBO.
 
 For frequency counts $c_j$ from $N=10{,}000$ fixed training examples, write
-$f_j=c_j/\sum_{k\in\mathcal A}c_k$. We use
+$f_j=c_j/\sum_{k\in\mathcal A}c_k$. The historical/manual configuration and
+the immutable CPU smoke artifacts use
 
 $$\pi_j=(1-\lambda)f_j+\lambda/A,\qquad \lambda=0.01.$$
+
+Stage 20.7b later audits a smaller $\lambda=0.0002$ on disjoint, ordered
+training blocks and applies it only to reviewed pilot launches. That
+retrospective engineering choice does not rewrite the historical artifacts or
+constitute molecular-quality evidence.
 
 The uniform component gives every active category positive mass, including
 categories unseen in the prefix and, in the primary full-support comparison,
@@ -3429,6 +3442,11 @@ def _update_completion_gate(notebook: dict) -> None:
 - Two pinned seed-1 CPU toy artifacts at implementation base
   `{UDLM_BASE_COMMIT}` are linked, hashed, and schema-validated. They are bounded
   integration evidence, not evidence that UDLM beats GenMol.
+- A clean-source CPU audit of ordered training rows 10,001--30,000 recommends
+  empirical floor 0.0002 for reviewed pilots. The rule was formalized after
+  inspecting those blocks, so it is retrospective training-only engineering,
+  not confirmatory or molecular-quality evidence; historical/manual artifacts
+  remain at 0.01.
 - Candidate training must bind launch-manifest schema 1, runtime schema 2, and
   summary/receipt schema 4, including the exact selected UUIDs, final-idle
   telemetry, and repository-global single-job lease. The lease machine-enforces

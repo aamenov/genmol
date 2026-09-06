@@ -78,6 +78,23 @@ EXPECTED_FREQUENCY_SHA256 = (
 EXPECTED_FREQUENCY_ORDERED_TEXT_SHA256 = (
     "53aee8e5592fc96159788e86519abbbcc9f1ab7c6348a1cb59a939bd57051d8f"
 )
+EXPECTED_PRIOR_FLOOR_AUDIT_PATH = (
+    "experiments/udlm/prior_geometry/" "floor_selection_train_rows_10001_30000.json"
+)
+EXPECTED_PRIOR_FLOOR_AUDIT_SHA256 = (
+    "02908dafaf589ca9a49e560aa1eab470a18d6bfe616b781164784c489f54a9f1"
+)
+EXPECTED_PRIOR_FLOOR_AUDIT_CANONICAL_SHA256 = (
+    "2435a36af83e88a1bb1d602e840bb6ae1e2a97963a48abf68606a37e6320694d"
+)
+EXPECTED_PRIOR_FLOOR_AUDIT_SIZE_BYTES = 73_953
+EXPECTED_PRIOR_FLOOR_AUDIT_SOURCE_PATH = "scripts/udlm/audit_empirical_prior_floor.py"
+EXPECTED_PRIOR_FLOOR_AUDIT_SOURCE_SHA256 = (
+    "305db0bdb9195ef0bf0ff8da6c1fc31c42e562c513bd9bccaed34bcb2023ccc8"
+)
+EXPECTED_PRIOR_FLOOR_AUDIT_SOURCE_SIZE_BYTES = 26_989
+EXPECTED_PRIOR_FLOOR_AUDIT_SOURCE_REVISION = "6424b323084358ea050ba22d7e13ef8d45962496"
+EXPECTED_EMPIRICAL_UNIFORM_MIX = Decimal("0.0002")
 EXPECTED_PANEL_ROWS = 256
 EXPECTED_PANEL_CONTENT_TOKENS = 13_627
 EXPECTED_TIME_BINS = (Decimal("0.1"), Decimal("0.5"), Decimal("0.9"))
@@ -440,6 +457,86 @@ def _load_bound_blob(
     return retained
 
 
+def _validate_prior_floor_audit(
+    source_by_path: Mapping[str, Mapping[str, Any]], *, loader: BlobLoader
+) -> None:
+    """Require the immutable training-only audit that selected the pilot floor."""
+
+    source_ref = source_by_path.get(EXPECTED_PRIOR_FLOOR_AUDIT_SOURCE_PATH)
+    artifact_ref = source_by_path.get(EXPECTED_PRIOR_FLOOR_AUDIT_PATH)
+    if source_ref is None or artifact_ref is None:
+        raise ScreenValidationError(
+            "registry source map omits the empirical-prior floor audit"
+        )
+    if (
+        source_ref["sha256"] != EXPECTED_PRIOR_FLOOR_AUDIT_SOURCE_SHA256
+        or source_ref["size_bytes"] != EXPECTED_PRIOR_FLOOR_AUDIT_SOURCE_SIZE_BYTES
+    ):
+        raise ScreenValidationError("prior-floor audit source identity is invalid")
+    if (
+        artifact_ref["sha256"] != EXPECTED_PRIOR_FLOOR_AUDIT_SHA256
+        or artifact_ref["size_bytes"] != EXPECTED_PRIOR_FLOOR_AUDIT_SIZE_BYTES
+    ):
+        raise ScreenValidationError("prior-floor audit artifact identity is invalid")
+    payload = _load_bound_blob(
+        artifact_ref, loader=loader, label="registry prior-floor audit artifact"
+    )
+    if payload is None:
+        raise ScreenValidationError(
+            "prior-floor audit artifact bytes were not retained"
+        )
+    audit = _mapping(
+        strict_json_loads(payload, label="registry prior-floor audit artifact"),
+        "registry prior-floor audit artifact",
+    )
+    if canonical_json_sha256(audit) != EXPECTED_PRIOR_FLOOR_AUDIT_CANONICAL_SHA256:
+        raise ScreenValidationError("prior-floor audit canonical identity is invalid")
+    git = _mapping(audit.get("git"), "prior-floor audit git provenance")
+    recommendation = _mapping(
+        audit.get("recommendation"), "prior-floor audit recommendation"
+    )
+    data_use = _mapping(audit.get("data_use"), "prior-floor audit data use")
+    inputs = _mapping(audit.get("inputs"), "prior-floor audit inputs")
+    source_files = _mapping(
+        inputs.get("source_files"), "prior-floor audit source files"
+    )
+    recorded_source = _mapping(
+        source_files.get(EXPECTED_PRIOR_FLOOR_AUDIT_SOURCE_PATH),
+        "prior-floor audit recorded source",
+    )
+    if (
+        audit.get("schema_version") != 1
+        or git.get("commit") != EXPECTED_PRIOR_FLOOR_AUDIT_SOURCE_REVISION
+        or git.get("upstream") != EXPECTED_PRIOR_FLOOR_AUDIT_SOURCE_REVISION
+        or git.get("dirty") is not False
+        or recorded_source.get("sha256") != EXPECTED_PRIOR_FLOOR_AUDIT_SOURCE_SHA256
+        or recorded_source.get("git_blob_verified") is not True
+        or recommendation.get("status")
+        != "training_only_retrospective_engineering_recommendation"
+        or _decimal(
+            recommendation.get("recommended_uniform_mixture_weight"),
+            "prior-floor audit recommended mixture weight",
+        )
+        != EXPECTED_EMPIRICAL_UNIFORM_MIX
+        or _decimal(
+            recommendation.get("candidate_uniform_mixture_weight"),
+            "prior-floor audit candidate mixture weight",
+        )
+        != EXPECTED_EMPIRICAL_UNIFORM_MIX
+        or recommendation.get(
+            "candidate_nll_strictly_better_than_current_on_both_blocks"
+        )
+        is not True
+        or recommendation.get("both_block_optima_within_0_0001_to_0_0003") is not True
+        or data_use.get("split") != "training"
+        or data_use.get("final_generation_seeds_or_metrics_used") is not False
+        or data_use.get("formal_preregistration_before_data_access") is not False
+    ):
+        raise ScreenValidationError(
+            "prior-floor audit provenance or training-only recommendation is invalid"
+        )
+
+
 def _load_json_ref(
     ref: Mapping[str, Any],
     *,
@@ -712,6 +809,11 @@ def _validate_resolved_config_semantics(
         config.get("seed") != EXPECTED_TRAINING_SEED
         or training.get("diffusion") != "udlm"
         or udlm.get("prior_variant") != "empirical_frequency"
+        or _decimal(
+            udlm.get("empirical_uniform_mix"),
+            f"{label} empirical uniform mixture weight",
+        )
+        != EXPECTED_EMPIRICAL_UNIFORM_MIX
         or trainer.get("accelerator") != "cuda"
         or trainer.get("num_nodes") != 1
         or trainer.get("devices") != gpu_count
@@ -1201,6 +1303,8 @@ def validate_registry(
     required_source_paths = {
         "scripts/train.py",
         "scripts/udlm/audit_conditioning_initialization.py",
+        EXPECTED_PRIOR_FLOOR_AUDIT_SOURCE_PATH,
+        EXPECTED_PRIOR_FLOOR_AUDIT_PATH,
         "scripts/udlm/collect_optimization_screen_evidence.py",
         "scripts/udlm/evaluate_denoising_panel.py",
         "scripts/udlm/launch_optimization_screen.py",
@@ -1215,6 +1319,8 @@ def validate_registry(
         raise ScreenValidationError(
             "registry source map omits required implementation blobs"
         )
+    source_by_path = {ref["relative_path"]: ref for ref in normalized_source_blobs}
+    _validate_prior_floor_audit(source_by_path, loader=loader)
 
     common = _mapping(registry.get("common_training"), "registry common training")
     _exact_keys(
@@ -1421,7 +1527,6 @@ def validate_registry(
         git_blob_loader=git_blob_loader,
         label="registry panel evaluator source",
     )
-    source_by_path = {ref["relative_path"]: ref for ref in normalized_source_blobs}
     if source_by_path.get(evaluator_ref["relative_path"]) != evaluator_ref:
         raise ScreenValidationError(
             "panel evaluator is not identical to its source binding"

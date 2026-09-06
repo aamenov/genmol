@@ -55,6 +55,24 @@ def test_specs_are_exactly_six_gpu_specific_unique_configs(gpu_count, accumulati
     )
 
 
+def test_launcher_and_registry_share_the_pinned_prior_floor_provenance():
+    assert str(launcher.pilot.PILOT_EMPIRICAL_UNIFORM_MIX) == str(
+        verifier.EXPECTED_EMPIRICAL_UNIFORM_MIX
+    )
+    assert (
+        launcher.pilot.PILOT_EMPIRICAL_UNIFORM_MIX_AUDIT_PATH
+        == verifier.EXPECTED_PRIOR_FLOOR_AUDIT_PATH
+    )
+    assert (
+        launcher.pilot.PILOT_EMPIRICAL_UNIFORM_MIX_AUDIT_SHA256
+        == verifier.EXPECTED_PRIOR_FLOOR_AUDIT_SHA256
+    )
+    assert (
+        launcher.pilot.PILOT_EMPIRICAL_UNIFORM_MIX_AUDIT_SOURCE_REVISION
+        == verifier.EXPECTED_PRIOR_FLOOR_AUDIT_SOURCE_REVISION
+    )
+
+
 @pytest.mark.parametrize("gpu_count,accumulation", [(1, 8), (2, 4)])
 def test_actual_hydra_composition_and_launcher_replay_for_all_six(
     monkeypatch, gpu_count, accumulation
@@ -83,6 +101,10 @@ def test_actual_hydra_composition_and_launcher_replay_for_all_six(
         assert config["loader"]["global_batch_size"] == 16
         assert config["loader"]["batch_size"] == 2
         assert config["training"]["init_from_mdlm_ema"] is True
+        assert (
+            config["training"]["udlm"]["empirical_uniform_mix"]
+            == launcher.pilot.PILOT_EMPIRICAL_UNIFORM_MIX
+        )
         assert (
             config["training"]["init_from_mdlm_checkpoint_sha256"]
             == prepare.CHECKPOINT_SHA256
@@ -241,6 +263,10 @@ def test_registry_document_encodes_strict_batch_and_stage_contracts(
         ref["relative_path"] == "scripts/udlm/prepare_optimization_screen_registry.py"
         for ref in document["source"]["blobs"]
     )
+    assert {
+        verifier.EXPECTED_PRIOR_FLOOR_AUDIT_SOURCE_PATH,
+        verifier.EXPECTED_PRIOR_FLOOR_AUDIT_PATH,
+    }.issubset({ref["relative_path"] for ref in document["source"]["blobs"]})
 
 
 def test_generated_registry_document_passes_authoritative_strict_validator():

@@ -8,6 +8,13 @@ import pytest
 from scripts.udlm import audit_empirical_prior_floor as audit
 
 
+FROZEN_AUDIT_PATH = (
+    audit.REPOSITORY_ROOT
+    / "experiments/udlm/prior_geometry/floor_selection_train_rows_10001_30000.json"
+)
+FROZEN_AUDIT_SHA256 = "02908dafaf589ca9a49e560aa1eab470a18d6bfe616b781164784c489f54a9f1"
+
+
 def _grid():
     return (
         0.0001,
@@ -100,6 +107,29 @@ def test_real_base_frequency_artifact_has_the_frozen_identity():
     assert value["example_count"] == 10_000
     assert value["content_token_count"] == 517_090
     assert value["observed_token_types"] == 184
+
+
+def test_frozen_training_only_audit_records_exact_replay_and_recommendation():
+    payload = audit._stable_file_bytes(FROZEN_AUDIT_PATH)
+    assert audit._sha256(payload) == FROZEN_AUDIT_SHA256
+    value = audit.strict_json_loads(payload, label="frozen prior-floor audit")
+
+    assert value["git"]["commit"] == "6424b323084358ea050ba22d7e13ef8d45962496"
+    assert value["data_use"]["formal_preregistration_before_data_access"] is False
+    assert value["data_use"]["final_generation_seeds_or_metrics_used"] is False
+    base = audit.strict_json_loads(
+        audit._stable_file_bytes(audit.BASE_FREQUENCY_PATH),
+        label="base frequency artifact",
+    )
+    assert (
+        value["stream_checkpoints"]["10000"]["counts_by_token_id"]
+        == base["counts_by_token_id"]
+    )
+    assert value["recommendation"]["recommended_uniform_mixture_weight"] == 0.0002
+    assert all(
+        delta < 0.0
+        for delta in value["recommendation"]["candidate_minus_current_nll_by_block"]
+    )
 
 
 def test_build_audit_rejects_stream_prefix_drift_and_preserves_scope():

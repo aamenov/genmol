@@ -96,3 +96,39 @@ def test_update_is_byte_idempotent(tmp_path: Path) -> None:
     updater.update_notebook(first, second)
 
     assert second.read_bytes() == first.read_bytes()
+
+
+def test_prior_floor_teaching_binds_retrospective_artifact_without_rewriting_history():
+    notebook = _notebook()
+    cells = _cells_by_id(notebook)
+    markdown = "".join(cells["stage-20-udlm-prior-geometry"]["source"])
+    code = "".join(cells["stage-20-udlm-prior-geometry-code"]["source"])
+
+    for fragment in (
+        "retrospective replication, not a preregistered confirmation",
+        "historical/manual categorical configuration",
+        "reviewed pilot launches only",
+        "Does the lower unigram NLL mean",
+    ):
+        assert fragment in markdown
+    for fragment in (
+        "floor_selection_train_rows_10001_30000.json",
+        "02908dafaf589ca9a49e560aa1eab470a18d6bfe616b781164784c489f54a9f1",
+        "6424b323084358ea050ba22d7e13ef8d45962496",
+        '"historical_manual_weight": 0.01',
+        '"reviewed_pilot_weight": 0.0002',
+    ):
+        assert fragment in code
+    compile(code, "stage-20-udlm-prior-geometry-code", "exec")
+
+
+def test_generated_schedule_teaching_distinguishes_official_recipe(tmp_path: Path):
+    destination = tmp_path / "updated.ipynb"
+    updater.update_notebook(SOURCE_NOTEBOOK, destination)
+    cells = _cells_by_id(json.loads(destination.read_text()))
+    markdown = "".join(cells["stage-20-udlm-evidence"]["source"])
+
+    assert "QM9 recipe uses 25,000 optimizer steps" in markdown
+    assert "not the released UDLM QM9 schedule" in markdown
+    assert "pilot hypothesis" in markdown
+    assert "not an exact replay of the official recipe" in markdown

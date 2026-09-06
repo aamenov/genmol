@@ -193,6 +193,7 @@ def _resolved_config(
             "reseed_after_model_initialization": updates == 500,
             "udlm": {
                 "prior_variant": "empirical_frequency",
+                "empirical_uniform_mix": 0.0002,
                 "conditioning_variant": (
                     "film_adaln" if arm_id == "E-A1" else "additive"
                 ),
@@ -225,10 +226,17 @@ def _resolved_config(
 
 
 def _source_ref(harness: Harness, path: str) -> dict[str, Any]:
+    if path in {
+        screen.EXPECTED_PRIOR_FLOOR_AUDIT_SOURCE_PATH,
+        screen.EXPECTED_PRIOR_FLOOR_AUDIT_PATH,
+    }:
+        payload = (screen.REPOSITORY_ROOT / path).read_bytes()
+    else:
+        payload = f"source:{path}\n".encode()
     return harness.add_blob(
         "repository",
         path,
-        f"source:{path}\n".encode(),
+        payload,
         revisions=(
             REGISTRY_REVISION,
             PUBLICATION_REVISION,
@@ -245,6 +253,8 @@ def build_harness(*, gpu_count: int = 1) -> Harness:
         "configs/udlm_categorical.yaml",
         "scripts/train.py",
         "scripts/udlm/audit_conditioning_initialization.py",
+        screen.EXPECTED_PRIOR_FLOOR_AUDIT_SOURCE_PATH,
+        screen.EXPECTED_PRIOR_FLOOR_AUDIT_PATH,
         "scripts/udlm/collect_optimization_screen_evidence.py",
         "scripts/udlm/evaluate_denoising_panel.py",
         "scripts/udlm/launch_optimization_screen.py",
@@ -1500,6 +1510,89 @@ def test_registry_semantic_and_git_root_tampering_is_rejected() -> None:
     bad["common_training"]["gpu_count"] = 3
     payload = _bytes(bad)
     with pytest.raises(screen.ScreenValidationError):
+        screen.load_validated_registry(
+            payload,
+            relative_path=REGISTRY_PATH,
+            expected_raw_sha256=_sha(payload),
+            expected_canonical_sha256=screen.canonical_json_sha256(bad),
+            loader=harness.loader,
+            git_blob_loader=harness.git_loader,
+            git_ancestor_checker=harness.ancestor,
+            git_pushed_checker=harness.pushed,
+            git_diff_checker=harness.allowed_diff,
+        )
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        screen.EXPECTED_PRIOR_FLOOR_AUDIT_SOURCE_PATH,
+        screen.EXPECTED_PRIOR_FLOOR_AUDIT_PATH,
+    ],
+)
+def test_registry_rejects_self_consistent_prior_floor_audit_tampering(
+    relative_path: str,
+) -> None:
+    harness = build_harness()
+    assert harness.registry_document is not None
+    bad = copy.deepcopy(harness.registry_document)
+    ref = next(
+        entry
+        for entry in bad["source"]["blobs"]
+        if entry["relative_path"] == relative_path
+    )
+    tampered = harness.blobs[("repository", relative_path)] + b"\n"
+    harness.blobs[("repository", relative_path)] = tampered
+    for revision in (
+        REGISTRY_REVISION,
+        PUBLICATION_REVISION,
+        AUTHORIZATION_REVISION,
+    ):
+        harness.git_blobs[(revision, relative_path)] = tampered
+    ref["sha256"] = _sha(tampered)
+    ref["size_bytes"] = len(tampered)
+    payload = _bytes(bad)
+
+    with pytest.raises(screen.ScreenValidationError, match="audit .*identity"):
+        screen.load_validated_registry(
+            payload,
+            relative_path=REGISTRY_PATH,
+            expected_raw_sha256=_sha(payload),
+            expected_canonical_sha256=screen.canonical_json_sha256(bad),
+            loader=harness.loader,
+            git_blob_loader=harness.git_loader,
+            git_ancestor_checker=harness.ancestor,
+            git_pushed_checker=harness.pushed,
+            git_diff_checker=harness.allowed_diff,
+        )
+
+
+def test_registry_rejects_self_consistent_empirical_floor_config_drift() -> None:
+    harness = build_harness()
+    assert harness.registry_document is not None
+    bad = copy.deepcopy(harness.registry_document)
+    config_ref = bad["stages"][0]["arms"][0]["resolved_configs"][0]["config"]
+    config_path = config_ref["relative_path"]
+    config = json.loads(harness.blobs[("repository", config_path)])
+    config["training"]["udlm"]["empirical_uniform_mix"] = 0.01
+    config_payload = _bytes(config)
+    harness.blobs[("repository", config_path)] = config_payload
+    for revision in (
+        REGISTRY_REVISION,
+        PUBLICATION_REVISION,
+        AUTHORIZATION_REVISION,
+    ):
+        harness.git_blobs[(revision, config_path)] = config_payload
+    config_ref.update(
+        {
+            "sha256": _sha(config_payload),
+            "size_bytes": len(config_payload),
+            "canonical_sha256": screen.canonical_json_sha256(config),
+        }
+    )
+    payload = _bytes(bad)
+
+    with pytest.raises(screen.ScreenValidationError, match="common training semantics"):
         screen.load_validated_registry(
             payload,
             relative_path=REGISTRY_PATH,

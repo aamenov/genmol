@@ -43,24 +43,45 @@ TRAINING_JOB_LOCK_PURPOSES = frozenset(
     }
 )
 MAX_TRAINING_SEED = 2**32 - 1
+# Pilot-only hyperparameter selected by the immutable CPU training-block audit.
+# The 0.01 defaults in base.yaml and udlm_categorical.yaml intentionally remain
+# unchanged for historical/manual replay.  Applying this override to every
+# matched R/S/E launch keeps the non-treatment config common; release_uniform
+# and schedule_uniform do not consume the empirical-prior mixture weight.
+PILOT_EMPIRICAL_UNIFORM_MIX = 0.0002
+PILOT_EMPIRICAL_UNIFORM_MIX_OVERRIDE = (
+    f"training.udlm.empirical_uniform_mix={PILOT_EMPIRICAL_UNIFORM_MIX}"
+)
+PILOT_EMPIRICAL_UNIFORM_MIX_AUDIT_PATH = (
+    "experiments/udlm/prior_geometry/" "floor_selection_train_rows_10001_30000.json"
+)
+PILOT_EMPIRICAL_UNIFORM_MIX_AUDIT_SHA256 = (
+    "02908dafaf589ca9a49e560aa1eab470a18d6bfe616b781164784c489f54a9f1"
+)
+PILOT_EMPIRICAL_UNIFORM_MIX_AUDIT_SOURCE_REVISION = (
+    "6424b323084358ea050ba22d7e13ef8d45962496"
+)
 TRAINING_VARIANTS = {
     "udlm": {
         "config_name": "udlm",
         "prior_variant": "release_uniform",
         "comparison_role": "faithful_release_control",
-        "fixed_overrides": (),
+        "fixed_overrides": (PILOT_EMPIRICAL_UNIFORM_MIX_OVERRIDE,),
     },
     "schedule_uniform": {
         "config_name": "udlm",
         "prior_variant": "schedule_uniform",
         "comparison_role": "schedule_repair_uniform_control",
-        "fixed_overrides": ("training.udlm.prior_variant=schedule_uniform",),
+        "fixed_overrides": (
+            "training.udlm.prior_variant=schedule_uniform",
+            PILOT_EMPIRICAL_UNIFORM_MIX_OVERRIDE,
+        ),
     },
     "udlm_categorical": {
         "config_name": "udlm_categorical",
         "prior_variant": "empirical_frequency",
         "comparison_role": "empirical_prior_treatment",
-        "fixed_overrides": (),
+        "fixed_overrides": (PILOT_EMPIRICAL_UNIFORM_MIX_OVERRIDE,),
     },
 }
 MATCHED_PANEL_VARIANT_ORDER = tuple(TRAINING_VARIANTS)
@@ -683,6 +704,14 @@ def build_matched_panel_spec(
             "num_workers": num_workers,
             "seed": seed,
             "exclude_special_tokens": exclude_special_tokens,
+            "empirical_uniform_mix": PILOT_EMPIRICAL_UNIFORM_MIX,
+            "empirical_uniform_mix_consumed_only_by": "empirical_frequency",
+            "empirical_uniform_mix_audit": {
+                "relative_path": PILOT_EMPIRICAL_UNIFORM_MIX_AUDIT_PATH,
+                "sha256": PILOT_EMPIRICAL_UNIFORM_MIX_AUDIT_SHA256,
+                "source_revision": (PILOT_EMPIRICAL_UNIFORM_MIX_AUDIT_SOURCE_REVISION),
+                "scope": "retrospective_training_only_engineering_selection",
+            },
             "common_resolved_config_sha256": common_resolved_config_sha256,
         },
         "common_gpu_safety_policy": {

@@ -3,8 +3,19 @@ import threading
 from pathlib import Path
 
 import pytest
+from omegaconf import OmegaConf
 
 from scripts.udlm import launch_train_pilot as launcher
+
+
+def test_pilot_floor_is_an_override_and_manual_defaults_remain_historical():
+    for relative_path in ("configs/base.yaml", "configs/udlm_categorical.yaml"):
+        config = OmegaConf.load(launcher.REPOSITORY_ROOT / relative_path)
+        assert config.training.udlm.empirical_uniform_mix == 0.01
+
+    assert launcher.PILOT_EMPIRICAL_UNIFORM_MIX == 0.0002
+    assert len(launcher.PILOT_EMPIRICAL_UNIFORM_MIX_AUDIT_SHA256) == 64
+    assert len(launcher.PILOT_EMPIRICAL_UNIFORM_MIX_AUDIT_SOURCE_REVISION) == 40
 
 
 def _gpu(
@@ -254,6 +265,7 @@ def test_training_command_records_bounded_pilot_controls(monkeypatch, tmp_path):
     assert "training.init_from_mdlm_checkpoint=/project/50000.ckpt" in joined
     assert f"training.init_from_mdlm_checkpoint_sha256={'a' * 64}" in joined
     assert "training.udlm.exclude_special_tokens=true" in joined
+    assert launcher.PILOT_EMPIRICAL_UNIFORM_MIX_OVERRIDE in command
     with pytest.raises(ValueError, match="must be 1 or 2"):
         launcher.build_training_command(
             gpu_count=True,
@@ -330,6 +342,10 @@ def test_resolved_hydra_config_is_bound_before_launch(monkeypatch, tmp_path):
     assert config["trainer"]["detect_anomaly"] is True
     assert config["training"]["pilot_fail_on_nonfinite_loss"] is True
     assert config["training"]["udlm"]["prior_variant"] == "schedule_uniform"
+    assert (
+        config["training"]["udlm"]["empirical_uniform_mix"]
+        == launcher.PILOT_EMPIRICAL_UNIFORM_MIX
+    )
     assert "hydra" not in config
 
 
@@ -536,6 +552,7 @@ def test_training_command_allows_only_reviewed_prior_variants(
         )
     else:
         assert fixed_prior_override in command
+    assert command.count(launcher.PILOT_EMPIRICAL_UNIFORM_MIX_OVERRIDE) == 1
     assert "trainer.max_steps=3" in command
 
     with pytest.raises(ValueError, match="training-variant"):
@@ -624,6 +641,19 @@ def test_matched_panel_digest_masks_only_registered_treatment_and_run_path(
             "registered_variant_order": list(launcher.MATCHED_PANEL_VARIANT_ORDER),
             "advance_policy": "operator_validates_successful_predecessor_receipt",
             "predecessor_receipt_bound_in_each_manifest": False,
+        }
+        assert spec["common_training_contract"]["empirical_uniform_mix"] == 0.0002
+        assert (
+            spec["common_training_contract"]["empirical_uniform_mix_consumed_only_by"]
+            == "empirical_frequency"
+        )
+        assert spec["common_training_contract"]["empirical_uniform_mix_audit"] == {
+            "relative_path": launcher.PILOT_EMPIRICAL_UNIFORM_MIX_AUDIT_PATH,
+            "sha256": launcher.PILOT_EMPIRICAL_UNIFORM_MIX_AUDIT_SHA256,
+            "source_revision": (
+                launcher.PILOT_EMPIRICAL_UNIFORM_MIX_AUDIT_SOURCE_REVISION
+            ),
+            "scope": "retrospective_training_only_engineering_selection",
         }
         panel_digests.append(panel_digest)
 
