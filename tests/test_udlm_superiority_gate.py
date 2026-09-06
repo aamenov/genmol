@@ -71,6 +71,107 @@ def _tensor_finiteness() -> dict:
     }
 
 
+def _auxiliary_checkpoint_records(
+    *,
+    expected_steps: int,
+    resolved_training_config: dict,
+    parameter_state_count: int = 202,
+) -> dict:
+    callback_key = (
+        "ModelCheckpoint{'monitor': None, 'mode': 'min', "
+        f"'every_n_train_steps': {expected_steps}, 'every_n_epochs': 0, "
+        "'train_time_interval': None}"
+    )
+    scheduler_config = resolved_training_config["optim"]["scheduler"]
+    schedule_check_count = (
+        max(
+            expected_steps,
+            scheduler_config["warmup_updates"] + 1,
+            (scheduler_config["horizon_updates"] or 0) + 1,
+        )
+        + 1
+    )
+    accumulation = resolved_training_config["trainer"]["accumulate_grad_batches"]
+    return {
+        "checkpoint_python_floats": {
+            "all_finite": True,
+            "floating_scalar_count": 6,
+        },
+        "optimizer_live_state_match": {
+            "exact_serialized_live_match": True,
+            "optimizer_count": 1,
+            "optimizer_class": "AdamW",
+            "parameter_group_count": 1,
+            "parameter_state_count": parameter_state_count,
+            "exact_resolved_config_match": True,
+        },
+        "scheduler_live_state_match": {
+            "exact_serialized_live_match": True,
+            "scheduler_count": 1,
+            "scheduler_class": "LambdaLR",
+            "interval": "step",
+            "name": "lr",
+            "last_epoch": expected_steps,
+            "step_count": expected_steps + 1,
+            "exact_model_spec_match": True,
+            "exact_callable_schedule_match": True,
+            "callable_schedule_index_checks": schedule_check_count,
+        },
+        "sampler_live_state_match": {
+            "exact_hosted_stream_contract_match": True,
+            "random_state_is_none": True,
+            "live_state_dict_available": False,
+            "sampler_class_module": "torch.utils.data.dataloader",
+            "sampler_class_name": "_InfiniteConstantSampler",
+        },
+        "trainer_live_configuration_match": {
+            "exact_detect_anomaly_match": True,
+            "detect_anomaly": True,
+            "exact_gradient_clip_val_match": True,
+            "gradient_clip_val": float(
+                resolved_training_config["trainer"]["gradient_clip_val"]
+            ),
+            "exact_gradient_clip_algorithm_match": True,
+            "gradient_clip_algorithm": (
+                "norm"
+                if resolved_training_config["trainer"].get("gradient_clip_algorithm")
+                is None
+                else resolved_training_config["trainer"]["gradient_clip_algorithm"]
+            ),
+            "exact_precision_match": True,
+            "configured_precision": str(
+                resolved_training_config["trainer"]["precision"]
+            ),
+            "live_precision": "bf16-mixed",
+        },
+        "model_checkpoint_live_state_match": {
+            "exact_serialized_live_match": True,
+            "model_checkpoint_callback_count": 1,
+            "state_key": callback_key,
+            "configuration_matches_pilot_contract": True,
+        },
+        "checkpoint_hyperparameters_match": {
+            "hparams_name": "kwargs",
+            "exact_hyperparameter_keys": True,
+            "exact_checkpoint_preflight_config_match": True,
+            "exact_live_model_preflight_config_match": True,
+            "exact_live_hparams_preflight_config_match": True,
+            "exact_checkpoint_live_model_unresolved_config_match": True,
+            "exact_checkpoint_live_hparams_unresolved_config_match": True,
+            "resolved_config_sha256": gate.canonical_json_sha256(
+                resolved_training_config
+            ),
+        },
+        "checkpoint_loop_state_match": {
+            "exact_serialized_progress_match": True,
+            "epoch": 0,
+            "optimizer_steps": expected_steps,
+            "accumulate_grad_batches": accumulation,
+            "microbatches": expected_steps * accumulation,
+        },
+    }
+
+
 def _python_environment(repository_root: Path, *, seed: int = 7) -> dict:
     return {
         "PYTHONDONTWRITEBYTECODE": "1",
@@ -83,7 +184,9 @@ def _python_environment(repository_root: Path, *, seed: int = 7) -> dict:
     }
 
 
-def _candidate_lock(*, startup_mode: str = "warm_start") -> dict:
+def _candidate_lock(
+    *, startup_mode: str = "warm_start", conditioning_variant: str = "additive"
+) -> dict:
     sampling = {"diffusion_type": "udlm", "num_steps": gate.EXPECTED_NFE}
     implementation_inputs = {"sampler_source": {"sha256": "d" * 64}}
     metric_inputs = {"schema_version": 1}
@@ -92,6 +195,14 @@ def _candidate_lock(*, startup_mode: str = "warm_start") -> dict:
         if startup_mode == "warm_start"
         else None
     )
+    parameter_counts = {
+        "base_model_trainable": 86_000_000,
+        "time_conditioner_trainable": 787_968,
+        "total_trainable": 86_787_968,
+    }
+    if conditioning_variant == "film_adaln":
+        parameter_counts["film_modulation_trainable"] = 262_656
+        parameter_counts["total_trainable"] = 87_050_624
     return {
         "schema_version": gate.CANDIDATE_LOCK_SCHEMA_VERSION,
         "candidate_id": "schedule-uniform-synthetic",
@@ -172,11 +283,7 @@ def _candidate_lock(*, startup_mode: str = "warm_start") -> dict:
                     "huggingface_split_dataset_by_node_disjoint_rank_streams"
                 ),
             },
-            "parameter_counts": {
-                "base_model_trainable": 86_000_000,
-                "time_conditioner_trainable": 787_968,
-                "total_trainable": 86_787_968,
-            },
+            "parameter_counts": parameter_counts,
         },
         "inference": {
             "evaluation_config_relative_path": (
@@ -247,6 +354,7 @@ def _write_r_predecessor_chain(
     mutate_manifest=None,
     mutate_summary=None,
     mutate_receipt=None,
+    conditioning_variant="additive",
 ) -> dict:
     predecessor_dir = tmp_path / "output/udlm/r-predecessor"
     predecessor_dir.mkdir(parents=True)
@@ -278,6 +386,7 @@ def _write_r_predecessor_chain(
             "ema": 0.9999,
             "udlm": {
                 "prior_variant": "release_uniform",
+                "conditioning_variant": conditioning_variant,
                 "exclude_special_tokens": True,
                 "empirical_uniform_mix": gate.PILOT_EMPIRICAL_UNIFORM_MIX,
             },
@@ -287,11 +396,27 @@ def _write_r_predecessor_chain(
             "global_batch_size": 2046,
             "num_workers": 1,
         },
+        "optim": {
+            "weight_decay": 0,
+            "lr": 3e-4,
+            "beta1": 0.9,
+            "beta2": 0.999,
+            "eps": 1e-8,
+            "scheduler": {
+                "name": "constant_with_linear_warmup",
+                "warmup_updates": 2500,
+                "horizon_updates": None,
+                "decay_floor_lr": None,
+            },
+        },
         "trainer": {
             "devices": 1,
             "num_nodes": 1,
             "max_steps": 500,
             "accumulate_grad_batches": 1,
+            "detect_anomaly": True,
+            "gradient_clip_val": 1.0,
+            "precision": "bf16",
         },
         "callback": {"dirpath": str(checkpoint_path.parent)},
     }
@@ -472,6 +597,14 @@ def _write_r_predecessor_chain(
     }
     runtime_path.write_bytes(_json_bytes(runtime))
     runtime_snapshot = _stable_snapshot(runtime_path)
+    trainable_parameter_counts = {
+        "base_backbone": 86_000_000,
+        "time_conditioner": 787_968,
+        "total": 86_787_968,
+    }
+    if conditioning_variant == "film_adaln":
+        trainable_parameter_counts["film_modulation"] = 262_656
+        trainable_parameter_counts["total"] = 87_050_624
     accounting = {
         "training_seed": 7,
         "optimizer_updates": 500,
@@ -483,11 +616,7 @@ def _write_r_predecessor_chain(
         "hosted_stream_rank_partition_policy": (
             "huggingface_split_dataset_by_node_disjoint_rank_streams"
         ),
-        "trainable_parameter_counts": {
-            "base_backbone": 86_000_000,
-            "time_conditioner": 787_968,
-            "total": 86_787_968,
-        },
+        "trainable_parameter_counts": trainable_parameter_counts,
     }
     predecessor_summary = {
         "schema_version": gate.TRAINING_SUMMARY_SCHEMA_VERSION,
@@ -522,7 +651,14 @@ def _write_r_predecessor_chain(
                 "ema": _tensor_finiteness()["ema"],
                 "ema_metadata": _inference_weights()["ema"],
                 "optimizer": _tensor_finiteness()["raw_model"],
-                "all_checkpoint_tensors": _tensor_finiteness()["raw_model"],
+                "non_sentinel_checkpoint_tensors": _tensor_finiteness()["raw_model"],
+                "framework_nonfinite_sentinels": (
+                    gate._expected_framework_nonfinite_sentinels(expected_steps=500)
+                ),
+                **_auxiliary_checkpoint_records(
+                    expected_steps=500,
+                    resolved_training_config=resolved_config,
+                ),
                 "udlm_process_identity_verified": True,
                 "live_ema_match": {
                     "exact_tensor_values": True,
@@ -547,6 +683,14 @@ def _write_r_predecessor_chain(
                 "byte_identity_verified_before_and_after_load": True,
                 "weights": "ema",
                 "parameter_tensors": 202,
+                **(
+                    {
+                        "conditioning_variant": "film_adaln",
+                        "conditioning_parameter_tensors": 28,
+                    }
+                    if conditioning_variant == "film_adaln"
+                    else {}
+                ),
             },
         },
     }
@@ -713,8 +857,15 @@ def _write_valid_training_evidence(
     mutate_predecessor_manifest=None,
     mutate_predecessor_summary=None,
     mutate_predecessor_receipt=None,
+    conditioning_variant=None,
 ) -> dict:
     training = candidate_lock["training"]
+    if conditioning_variant is None:
+        conditioning_variant = (
+            "film_adaln"
+            if "film_modulation_trainable" in training["parameter_counts"]
+            else "additive"
+        )
     manifest_path = tmp_path / training["launch_manifest"]["relative_path"]
     runtime_path = tmp_path / training["runtime_config"]["relative_path"]
     summary_path = tmp_path / training["training_summary"]["relative_path"]
@@ -735,6 +886,7 @@ def _write_valid_training_evidence(
             "ema": 0.9999,
             "udlm": {
                 "prior_variant": "schedule_uniform",
+                "conditioning_variant": conditioning_variant,
                 "exclude_special_tokens": True,
                 "empirical_uniform_mix": gate.PILOT_EMPIRICAL_UNIFORM_MIX,
             },
@@ -744,11 +896,27 @@ def _write_valid_training_evidence(
             "global_batch_size": 2046,
             "num_workers": 1,
         },
+        "optim": {
+            "weight_decay": 0,
+            "lr": 3e-4,
+            "beta1": 0.9,
+            "beta2": 0.999,
+            "eps": 1e-8,
+            "scheduler": {
+                "name": "constant_with_linear_warmup",
+                "warmup_updates": 2500,
+                "horizon_updates": None,
+                "decay_floor_lr": None,
+            },
+        },
         "trainer": {
             "devices": 1,
             "num_nodes": 1,
             "max_steps": 500,
             "accumulate_grad_batches": 1,
+            "detect_anomaly": True,
+            "gradient_clip_val": 1.0,
+            "precision": "bf16",
         },
         "callback": {"dirpath": str(manifest_path.parent / "checkpoints")},
     }
@@ -879,6 +1047,7 @@ def _write_valid_training_evidence(
         mutate_manifest=mutate_predecessor_manifest,
         mutate_summary=mutate_predecessor_summary,
         mutate_receipt=mutate_predecessor_receipt,
+        conditioning_variant=conditioning_variant,
     )
     manifest = {
         "launch_manifest_schema_version": gate.LAUNCH_MANIFEST_SCHEMA_VERSION,
@@ -1008,6 +1177,16 @@ def _write_valid_training_evidence(
     runtime_snapshot = _stable_snapshot(runtime_path)
     training["runtime_config"]["sha256"] = runtime_snapshot["sha256"]
 
+    locked_parameter_counts = training["parameter_counts"]
+    trainable_parameter_counts = {
+        "base_backbone": locked_parameter_counts["base_model_trainable"],
+        "time_conditioner": locked_parameter_counts["time_conditioner_trainable"],
+        "total": locked_parameter_counts["total_trainable"],
+    }
+    if "film_modulation_trainable" in locked_parameter_counts:
+        trainable_parameter_counts["film_modulation"] = locked_parameter_counts[
+            "film_modulation_trainable"
+        ]
     training_accounting = {
         "training_seed": 7,
         "optimizer_updates": 500,
@@ -1019,11 +1198,7 @@ def _write_valid_training_evidence(
         "hosted_stream_rank_partition_policy": (
             "huggingface_split_dataset_by_node_disjoint_rank_streams"
         ),
-        "trainable_parameter_counts": {
-            "base_backbone": 86_000_000,
-            "time_conditioner": 787_968,
-            "total": 86_787_968,
-        },
+        "trainable_parameter_counts": trainable_parameter_counts,
     }
     summary = {
         "schema_version": gate.TRAINING_SUMMARY_SCHEMA_VERSION,
@@ -1056,7 +1231,14 @@ def _write_valid_training_evidence(
                 "ema": _tensor_finiteness()["ema"],
                 "ema_metadata": _inference_weights()["ema"],
                 "optimizer": _tensor_finiteness()["raw_model"],
-                "all_checkpoint_tensors": _tensor_finiteness()["raw_model"],
+                "non_sentinel_checkpoint_tensors": _tensor_finiteness()["raw_model"],
+                "framework_nonfinite_sentinels": (
+                    gate._expected_framework_nonfinite_sentinels(expected_steps=500)
+                ),
+                **_auxiliary_checkpoint_records(
+                    expected_steps=500,
+                    resolved_training_config=resolved_config,
+                ),
                 "udlm_process_identity_verified": True,
                 "live_ema_match": {
                     "exact_tensor_values": True,
@@ -1080,6 +1262,14 @@ def _write_valid_training_evidence(
                 "byte_identity_verified_before_and_after_load": True,
                 "weights": "ema",
                 "parameter_tensors": 202,
+                **(
+                    {
+                        "conditioning_variant": "film_adaln",
+                        "conditioning_parameter_tensors": 28,
+                    }
+                    if conditioning_variant == "film_adaln"
+                    else {}
+                ),
             },
         },
         "conditioning_gradient_audit": None,
@@ -1423,6 +1613,9 @@ def _write_terminal_e_training_evidence(
             },
         }
     )
+    summary["final_checkpoint"]["semantic_audit"]["checkpoint_hyperparameters_match"][
+        "resolved_config_sha256"
+    ] = resolved_config_sha256
     summary_path.write_bytes(_json_bytes(summary))
     summary_snapshot = _stable_snapshot(summary_path)
 
@@ -2674,6 +2867,43 @@ def test_lock_rejects_final_seed_leak_and_non_ema_weights(protocol):
         gate.validate_candidate_lock(candidate_lock, protocol)
 
 
+def test_candidate_lock_accepts_exact_film_parameter_schema(protocol):
+    candidate_lock = _candidate_lock(conditioning_variant="film_adaln")
+
+    normalized = gate.validate_candidate_lock(candidate_lock, protocol)
+
+    assert normalized["parameter_counts"] == {
+        "base_model_trainable": 86_000_000,
+        "time_conditioner_trainable": 787_968,
+        "film_modulation_trainable": 262_656,
+        "total_trainable": 87_050_624,
+    }
+
+
+@pytest.mark.parametrize(
+    ("mutation", "error_fragment"),
+    [
+        ("extra", "exactly the additive 3-key or film_adaln 4-key schema"),
+        ("zero_film", "must be at least 1"),
+        ("bad_total", "do not add up"),
+    ],
+)
+def test_candidate_lock_rejects_invalid_parameter_schema(
+    protocol, mutation, error_fragment
+):
+    candidate_lock = _candidate_lock(conditioning_variant="film_adaln")
+    counts = candidate_lock["training"]["parameter_counts"]
+    if mutation == "extra":
+        counts["unexpected"] = 1
+    elif mutation == "zero_film":
+        counts["film_modulation_trainable"] = 0
+    else:
+        counts["total_trainable"] -= 1
+
+    with pytest.raises(gate.GateValidationError, match=error_fragment):
+        gate.validate_candidate_lock(candidate_lock, protocol)
+
+
 def test_scratch_lock_has_narrow_single_trajectory_scope(protocol):
     candidate_lock = _candidate_lock(startup_mode="scratch")
 
@@ -3628,6 +3858,106 @@ def test_training_summary_and_exit_receipt_are_joined_to_lock(
         gate.validate_training_evidence(normalized)
 
 
+def test_training_evidence_accepts_film_parameter_schema_across_predecessor_chain(
+    tmp_path, monkeypatch, protocol
+):
+    monkeypatch.setattr(gate, "REPOSITORY_ROOT", tmp_path)
+    candidate_lock = _candidate_lock(conditioning_variant="film_adaln")
+    documents = _write_valid_training_evidence(tmp_path, candidate_lock)
+
+    normalized = gate.validate_candidate_lock(candidate_lock, protocol)
+    evidence = gate.validate_training_evidence(normalized)
+
+    assert evidence["successful_exit_receipt"] is True
+    assert evidence["training_accounting"]["trainable_parameter_counts"] == {
+        "base_backbone": 86_000_000,
+        "time_conditioner": 787_968,
+        "film_modulation": 262_656,
+        "total": 87_050_624,
+    }
+    assert (
+        documents["manifest"]["resolved_training_config"]["training"]["udlm"][
+            "conditioning_variant"
+        ]
+        == "film_adaln"
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "error_fragment"),
+    [
+        ("wrong_variant", "warm-start conditioning variant disagrees"),
+        ("wrong_count", "conditioning parameter tensor count disagrees"),
+        ("missing_count", "warm-start report fields"),
+        ("extra", "warm-start report fields"),
+    ],
+)
+def test_training_evidence_rejects_invalid_film_warm_start_topology(
+    tmp_path, monkeypatch, protocol, mutation, error_fragment
+):
+    monkeypatch.setattr(gate, "REPOSITORY_ROOT", tmp_path)
+    candidate_lock = _candidate_lock(conditioning_variant="film_adaln")
+
+    def mutate_summary(summary):
+        report = summary["startup"]["verified_mdlm_warm_start_report"]
+        if mutation == "wrong_variant":
+            report["conditioning_variant"] = "additive"
+        elif mutation == "wrong_count":
+            report["conditioning_parameter_tensors"] = 27
+        elif mutation == "missing_count":
+            report.pop("conditioning_parameter_tensors")
+        else:
+            report["unexpected"] = True
+
+    _write_valid_training_evidence(
+        tmp_path,
+        candidate_lock,
+        mutate_summary=mutate_summary,
+    )
+    normalized = gate.validate_candidate_lock(candidate_lock, protocol)
+
+    with pytest.raises(gate.GateValidationError, match=error_fragment):
+        gate.validate_training_evidence(normalized)
+
+
+@pytest.mark.parametrize(
+    ("lock_variant", "runtime_variant"),
+    [("additive", "film_adaln"), ("film_adaln", "additive")],
+)
+def test_training_evidence_rejects_cross_topology_parameter_schema(
+    tmp_path, monkeypatch, protocol, lock_variant, runtime_variant
+):
+    monkeypatch.setattr(gate, "REPOSITORY_ROOT", tmp_path)
+    candidate_lock = _candidate_lock(conditioning_variant=lock_variant)
+    _write_valid_training_evidence(
+        tmp_path,
+        candidate_lock,
+        conditioning_variant=runtime_variant,
+    )
+    normalized = gate.validate_candidate_lock(candidate_lock, protocol)
+
+    with pytest.raises(
+        gate.GateValidationError,
+        match=("warm-start report fields|" "summary trainable parameter counts fields"),
+    ):
+        gate.validate_training_evidence(normalized)
+
+
+def test_training_evidence_rejects_extra_locked_parameter_key(
+    tmp_path, monkeypatch, protocol
+):
+    monkeypatch.setattr(gate, "REPOSITORY_ROOT", tmp_path)
+    candidate_lock = _candidate_lock()
+    _write_valid_training_evidence(tmp_path, candidate_lock)
+    normalized = gate.validate_candidate_lock(candidate_lock, protocol)
+    normalized["parameter_counts"]["unexpected"] = 1
+
+    with pytest.raises(
+        gate.GateValidationError, match="locked trainable parameter counts fields"
+    ):
+        gate.validate_training_evidence(normalized)
+
+
 def _set_manifest_gpu_state_fields(manifest, **updates):
     for field in (
         "gpu_inventory_at_selection",
@@ -3997,6 +4327,27 @@ def test_gate_stream_verifies_the_live_training_checkpoint(
                 "verified_mdlm_warm_start_report"
             ].__setitem__("byte_identity_verified_before_and_after_load", False),
             "warm-start byte identity must be true",
+        ),
+        (
+            "summary_warm_start_conditioning_variant",
+            lambda document: document["startup"][
+                "verified_mdlm_warm_start_report"
+            ].__setitem__("conditioning_variant", "film_adaln"),
+            "warm-start report fields",
+        ),
+        (
+            "summary_warm_start_conditioning_tensor_count",
+            lambda document: document["startup"][
+                "verified_mdlm_warm_start_report"
+            ].__setitem__("conditioning_parameter_tensors", 28),
+            "warm-start report fields",
+        ),
+        (
+            "summary_warm_start_extra_field",
+            lambda document: document["startup"][
+                "verified_mdlm_warm_start_report"
+            ].__setitem__("unexpected", True),
+            "warm-start report fields",
         ),
         (
             "summary_live_serialized_finiteness",

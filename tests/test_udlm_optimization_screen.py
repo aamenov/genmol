@@ -235,6 +235,8 @@ def _resolved_config(
         "seed": 17,
         "training": {
             "diffusion": "udlm",
+            "ema": 0.9999,
+            "pilot_fail_on_nonfinite_loss": True,
             "init_from_mdlm_checkpoint": f"/project/{checkpoint_path}",
             "init_from_mdlm_checkpoint_sha256": checkpoint_sha256,
             "init_from_mdlm_ema": True,
@@ -255,6 +257,10 @@ def _resolved_config(
             "devices": gpu_count,
             "accumulate_grad_batches": 8 // gpu_count,
             "max_steps": updates,
+            "detect_anomaly": True,
+            "gradient_clip_val": 1.0,
+            "gradient_clip_algorithm": None,
+            "precision": "bf16",
         },
         "optim": {
             "lr": 0.0003,
@@ -966,6 +972,172 @@ def _make_evaluator_report(
     }
 
 
+def _checkpoint_semantic_audit(
+    *,
+    expected_steps: int,
+    resolved_config: Mapping[str, Any],
+    resolved_config_sha256: str,
+) -> dict[str, Any]:
+    callback_key = (
+        "ModelCheckpoint{'monitor': None, 'mode': 'min', "
+        f"'every_n_train_steps': {expected_steps}, 'every_n_epochs': 0, "
+        "'train_time_interval': None}"
+    )
+    scheduler = resolved_config["optim"]["scheduler"]
+    schedule_checks = (
+        max(
+            expected_steps,
+            scheduler["warmup_updates"] + 1,
+            (scheduler["horizon_updates"] or 0) + 1,
+        )
+        + 1
+    )
+    accumulation = resolved_config["trainer"]["accumulate_grad_batches"]
+    sentinel = {
+        "all_expected_and_only_expected_verified": True,
+        "nonfinite_tensor_count": 1,
+        "nonfinite_element_count": 1,
+        "records": [
+            {
+                "tensor_path_components": [
+                    "checkpoint",
+                    "callbacks",
+                    callback_key,
+                    "kth_value",
+                ],
+                "framework": "lightning",
+                "framework_version": "2.5.1",
+                "callback": "ModelCheckpoint",
+                "field": "kth_value",
+                "dtype": "float32",
+                "shape": [],
+                "value": "+inf",
+                "meaning": "unranked_min_mode_checkpoint_sentinel",
+                "excluded_from_non_sentinel_finiteness": True,
+            }
+        ],
+    }
+    finite_model = {
+        "all_finite": True,
+        "floating_tensor_count": 202,
+        "floating_element_count": 1_000_000,
+    }
+    return {
+        "deserialized": True,
+        "global_step": expected_steps,
+        "raw_model": copy.deepcopy(finite_model),
+        "ema": copy.deepcopy(finite_model),
+        "ema_metadata": {
+            "shadow_parameter_count": 202,
+            "decay": 0.9999,
+            "num_updates": expected_steps,
+        },
+        "optimizer": {
+            "all_finite": True,
+            "floating_tensor_count": 606,
+            "floating_element_count": 2_000_000,
+        },
+        "non_sentinel_checkpoint_tensors": {
+            "all_finite": True,
+            "floating_tensor_count": 1_010,
+            "floating_element_count": 4_000_000,
+        },
+        "checkpoint_python_floats": {
+            "all_finite": True,
+            "floating_scalar_count": 6,
+        },
+        "framework_nonfinite_sentinels": sentinel,
+        "checkpoint_hyperparameters_match": {
+            "hparams_name": "kwargs",
+            "exact_hyperparameter_keys": True,
+            "exact_checkpoint_preflight_config_match": True,
+            "exact_live_model_preflight_config_match": True,
+            "exact_live_hparams_preflight_config_match": True,
+            "exact_checkpoint_live_model_unresolved_config_match": True,
+            "exact_checkpoint_live_hparams_unresolved_config_match": True,
+            "resolved_config_sha256": resolved_config_sha256,
+        },
+        "checkpoint_loop_state_match": {
+            "exact_serialized_progress_match": True,
+            "epoch": 0,
+            "optimizer_steps": expected_steps,
+            "accumulate_grad_batches": accumulation,
+            "microbatches": expected_steps * accumulation,
+        },
+        "optimizer_live_state_match": {
+            "exact_serialized_live_match": True,
+            "optimizer_count": 1,
+            "optimizer_class": "AdamW",
+            "parameter_group_count": 1,
+            "parameter_state_count": 202,
+            "exact_resolved_config_match": True,
+        },
+        "scheduler_live_state_match": {
+            "exact_serialized_live_match": True,
+            "scheduler_count": 1,
+            "scheduler_class": "LambdaLR",
+            "interval": "step",
+            "name": "lr",
+            "last_epoch": expected_steps,
+            "step_count": expected_steps + 1,
+            "exact_model_spec_match": True,
+            "exact_callable_schedule_match": True,
+            "callable_schedule_index_checks": schedule_checks,
+        },
+        "sampler_live_state_match": {
+            "exact_hosted_stream_contract_match": True,
+            "random_state_is_none": True,
+            "live_state_dict_available": False,
+            "sampler_class_module": "torch.utils.data.dataloader",
+            "sampler_class_name": "_InfiniteConstantSampler",
+        },
+        "trainer_live_configuration_match": {
+            "exact_detect_anomaly_match": True,
+            "detect_anomaly": True,
+            "exact_gradient_clip_val_match": True,
+            "gradient_clip_val": 1.0,
+            "exact_gradient_clip_algorithm_match": True,
+            "gradient_clip_algorithm": "norm",
+            "exact_precision_match": True,
+            "configured_precision": "bf16",
+            "live_precision": "bf16-mixed",
+        },
+        "model_checkpoint_live_state_match": {
+            "exact_serialized_live_match": True,
+            "model_checkpoint_callback_count": 1,
+            "state_key": callback_key,
+            "configuration_matches_pilot_contract": True,
+        },
+        "udlm_process_identity_verified": True,
+        "live_model_match": {
+            "exact_key_set": True,
+            "exact_tensor_values": True,
+            "tensor_count": 202,
+        },
+        "live_ema_match": {
+            "exact_tensor_values": True,
+            "tensor_count": 202,
+        },
+    }
+
+
+def _stable_snapshot(
+    *, path: str, sha256: str, size_bytes: int, inode: int
+) -> dict[str, Any]:
+    return {
+        "path": path,
+        "device": 2_050,
+        "inode": inode,
+        "mode": 0o100644,
+        "link_count": 1,
+        "size_bytes": size_bytes,
+        "mtime_ns": 1_788_710_941_000_000_000 + inode,
+        "ctime_ns": 1_788_710_941_000_000_000 + inode,
+        "sha256": sha256,
+        "stable_regular_file_verified": True,
+    }
+
+
 def _make_attempt(
     harness: Harness,
     *,
@@ -986,6 +1158,11 @@ def _make_attempt(
     arm = screen._arm(stage, arm_id)
     config_entry = screen._registered_config(arm, scheduler_arm_id=scheduler_arm_id)
     output_directory = config_entry["output_directory"]
+    config_payload = harness.blobs[
+        (config_entry["config"]["root"], config_entry["config"]["relative_path"])
+    ]
+    assert isinstance(config_payload, bytes)
+    resolved_config = json.loads(config_payload)
     checkpoint_payload = f"checkpoint:{stage_id}:{arm_id}".encode()
     checkpoint_base = harness.add_blob(
         "repository",
@@ -1051,6 +1228,58 @@ def _make_attempt(
     }
     if gpu_timestamp_updates is not None:
         gpu_timestamps.update(copy.deepcopy(dict(gpu_timestamp_updates)))
+    expected_steps = screen.EXPECTED_UPDATES[stage_id]
+    launch_path = f"/repo/{output_directory}/launch_manifest.json"
+    runtime_path = f"/repo/{output_directory}/runtime_config.json"
+    summary_path = f"/repo/{output_directory}/training_summary.json"
+    receipt_path = f"/repo/{output_directory}/pilot_exit_status.json"
+    checkpoint_path = f"/repo/{checkpoint['relative_path']}"
+    lock_path = "/repo/output/udlm/.single_training_job.lock"
+    training_argv = [
+        "/repo/.venv/bin/python",
+        "-u",
+        "/repo/scripts/train.py",
+        "--config-name",
+        "udlm_categorical",
+        f"fixture_arm={arm_id}",
+    ]
+    training_argv_sha256 = screen.canonical_json_sha256(training_argv[2:])
+    lock_record = {
+        "schema_version": 1,
+        "status": "held",
+        "owner_token": _sha(f"lock-owner:{stage_id}:{arm_id}".encode()),
+        "acquired_at_utc": "2026-09-06T00:00:00+00:00",
+        "launcher_pid_at_acquisition": 4321,
+        "owner_process_exit_does_not_make_lock_stale": True,
+        "source_revision": source_revision,
+        "run_name": arm["attempt_id"],
+        "training_variant": "udlm_categorical",
+        "purpose": "enforce_one_registered_optimization_screen_job_at_a_time",
+        "stale_lock_policy": "fail_closed_and_require_manual_review",
+        "release_policy": (
+            "exact_owner_lock_only_after_receipt_or_before_tmux_handoff_failure"
+        ),
+    }
+    lock_payload = _bytes(lock_record)
+    lock_sha256 = _sha(lock_payload)
+    launch_completion_contract = {
+        "status_at_launch": "pending",
+        "valid_training_summary_and_successful_exit_receipt_both_required": True,
+        "complete_only_if_valid_training_summary_exists": True,
+        "complete_only_if_successful_exit_receipt_exists": True,
+        "absent_exit_receipt_means": "incomplete",
+        "missing_summary_after_tmux_exit_means": "incomplete",
+        "successful_exit_receipt_requires": {
+            "training_exit_status": 0,
+            "tee_exit_status": 0,
+            "valid_launch_bound_training_summary": True,
+            "exact_launch_manifest_still_matches": True,
+            "clean_pushed_source_at_receipt": True,
+        },
+        "training_job_lock_release": (
+            "after_exit_receipt_publication_for_completed_or_failed_pipeline"
+        ),
+    }
     manifest = {
         **gpu_timestamps,
         "launch_manifest_schema_version": 2,
@@ -1064,10 +1293,32 @@ def _make_attempt(
             arm=arm,
             scheduler_dependency=scheduler_dependency,
         ),
+        "run_name": arm["attempt_id"],
+        "training_variant": "udlm_categorical",
+        "hydra_config_name": "udlm_categorical",
         "seed": 17,
-        "max_steps": screen.EXPECTED_UPDATES[stage_id],
+        "max_steps": expected_steps,
         "udlm_prior_variant": "empirical_frequency",
+        "resolved_training_config": copy.deepcopy(resolved_config),
         "resolved_training_config_sha256": config_entry["config"]["canonical_sha256"],
+        "training_argv": training_argv,
+        "training_argv_sha256": training_argv_sha256,
+        "launch_manifest_path": launch_path,
+        "runtime_config_path": runtime_path,
+        "training_summary_path": summary_path,
+        "pilot_exit_status_path": receipt_path,
+        "expected_final_checkpoint_path": checkpoint_path,
+        "training_summary_schema_version": 5,
+        "pilot_exit_status_schema_version": 5,
+        "single_training_job_lock": {
+            "path": lock_path,
+            "sha256": lock_sha256,
+            "record": lock_record,
+            "acquired_before_any_gpu_probe": True,
+            "release_owner": "pilot_exit_receipt_writer_after_publication",
+            "stale_lock_policy": "fail_closed_and_require_manual_review",
+        },
+        "completion_contract": launch_completion_contract,
         "user_requested_gpu_count": 1,
         "gpu_selection_method": "dynamic_idle_discovery",
         "gpu_inventory_scope": "all_nvidia_gpus",
@@ -1082,27 +1333,80 @@ def _make_attempt(
     manifest_ref = _artifact_json(
         harness, output_directory, "launch_manifest", manifest, 2
     )
+    manifest_snapshot = _stable_snapshot(
+        path=launch_path,
+        sha256=manifest_ref["sha256"],
+        size_bytes=manifest_ref["size_bytes"],
+        inode=12,
+    )
+    summary_completion_contract = {
+        "summary_schema_version": 5,
+        "summary_path": summary_path,
+        "final_checkpoint_path": checkpoint_path,
+        "expected_max_steps": expected_steps,
+        "expected_world_size": 1,
+        "fail_on_nonfinite_loss": True,
+        "backward_anomaly_detection": True,
+    }
     runtime = {
         "schema_version": 2,
         "status": "preflight_completed",
         "source_revision": source_revision,
+        "source": {"head": source_revision, "upstream": source_revision},
+        "training_argv": training_argv[2:],
+        "observed_training_argv": training_argv[2:],
+        "training_argv_sha256": training_argv_sha256,
+        "resolved_training_config": copy.deepcopy(resolved_config),
         "resolved_training_config_sha256": config_entry["config"]["canonical_sha256"],
         "launch_manifest": {
-            "sha256": manifest_ref["sha256"],
+            **manifest_snapshot,
             "selected_gpu_uuids": ["GPU-test-idle-1"],
+        },
+        "completion_contract": summary_completion_contract,
+        "python_environment": {
+            "PYTHONNOUSERSITE": "1",
+            "PYTHONOPTIMIZE": "0",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONUTF8": "1",
+            "PYTHONIOENCODING": "utf-8",
+            "PYTHONHASHSEED": "17",
+            "PYTHONPATH": "/repo/src:/repo",
         },
     }
     runtime_ref = _artifact_json(
         harness, output_directory, "runtime_config", runtime, 2
     )
+    runtime_snapshot = _stable_snapshot(
+        path=runtime_path,
+        sha256=runtime_ref["sha256"],
+        size_bytes=runtime_ref["size_bytes"],
+        inode=13,
+    )
+    initialization_checkpoint = harness.registry.data["common_training"][
+        "initialization"
+    ]["checkpoint"]
+    warm_start_report = {
+        "source_path": resolved_config["training"]["init_from_mdlm_checkpoint"],
+        "source_resolved_path": resolved_config["training"][
+            "init_from_mdlm_checkpoint"
+        ],
+        "source_sha256": initialization_checkpoint["sha256"],
+        "source_size_bytes": initialization_checkpoint["size_bytes"],
+        "expected_source_sha256": initialization_checkpoint["sha256"],
+        "byte_identity_verified_before_and_after_load": True,
+        "weights": "ema",
+        "parameter_tensors": 198,
+    }
+    if arm_id == "E-A1":
+        warm_start_report.update(
+            {
+                "conditioning_variant": "film_adaln",
+                "conditioning_parameter_tensors": 28,
+            }
+        )
     startup = {
         "mode": "warm_start",
-        "verified_mdlm_warm_start_report": {
-            "source_sha256": harness.registry.data["common_training"]["initialization"][
-                "checkpoint"
-            ]["sha256"],
-            "weights": "ema",
-        },
+        "verified_mdlm_warm_start_report": warm_start_report,
     }
     if stage_id == "conditioning":
         startup["training_rng_policy"] = {
@@ -1111,67 +1415,230 @@ def _make_attempt(
             "purpose": "isolate_training_randomness_from_architecture_constructor_draws",
             "applied_before_dataloader_and_trainer_construction": True,
         }
+    parameter_counts = {
+        "base_backbone": 109_482_240,
+        "time_conditioner": 787_968,
+    }
+    if arm_id == "E-A1":
+        parameter_counts["film_modulation"] = 14_174_208
+    parameter_counts["total"] = sum(parameter_counts.values())
+    training_accounting = {
+        "training_seed": 17,
+        "optimizer_updates": expected_steps,
+        "world_size": 1,
+        "micro_batch_size_per_rank": 4,
+        "accumulate_grad_batches": 8,
+        "effective_global_examples_per_optimizer_step": 32,
+        "total_requested_example_exposures": 32 * expected_steps,
+        "hosted_stream_rank_partition_policy": (
+            "huggingface_split_dataset_by_node_disjoint_rank_streams"
+        ),
+        "trainable_parameter_counts": parameter_counts,
+    }
+    training_health = {
+        "scope": (
+            "global-rank-zero callback counters; identical fail-fast checks "
+            "execute independently on every rank"
+        ),
+        "all_losses_finite": True,
+        "all_observed_gradients_finite": True,
+        "every_optimizer_step_had_a_nonzero_gradient": True,
+        "loss_checks": expected_steps * 8,
+        "optimizer_step_checks": expected_steps,
+        "gradient_tensor_observations": expected_steps * 200,
+        "gradient_element_observations": expected_steps * 1_000_000,
+    }
+    semantic_audit = _checkpoint_semantic_audit(
+        expected_steps=expected_steps,
+        resolved_config=resolved_config,
+        resolved_config_sha256=config_entry["config"]["canonical_sha256"],
+    )
+    checkpoint_snapshot = _stable_snapshot(
+        path=checkpoint_path,
+        sha256=checkpoint["sha256"],
+        size_bytes=checkpoint["size_bytes"],
+        inode=11,
+    )
     summary = {
-        "schema_version": 4,
+        "schema_version": screen.EXPECTED_ARTIFACT_SCHEMA_VERSIONS["training_summary"],
         "status": "completed",
+        "completed_at_utc": "2026-09-06T00:00:04+00:00",
         "source_revision": source_revision,
+        "source": {"head": source_revision, "upstream": source_revision},
         "resolved_training_config_sha256": config_entry["config"]["canonical_sha256"],
-        "launch_manifest": {"sha256": manifest_ref["sha256"]},
+        "training_argv_sha256": training_argv_sha256,
+        "launch_manifest": {
+            **manifest_snapshot,
+            "selected_gpu_uuids": ["GPU-test-idle-1"],
+        },
+        "runtime_config": {
+            **runtime_snapshot,
+            "schema_version": 2,
+            "record_sha256": screen.canonical_json_sha256(runtime),
+        },
+        "completion_contract": summary_completion_contract,
         "observed_training_state": {
-            "global_step": screen.EXPECTED_UPDATES[stage_id],
+            "global_rank": 0,
+            "global_step": expected_steps,
             "world_size": 1,
         },
+        "training_accounting": training_accounting,
+        "training_health": training_health,
         "startup": startup,
         "conditioning_gradient_audit": gradient_audit,
         "screen_initialization_state_audit": state_audit,
         "final_checkpoint": {
-            "sha256": checkpoint["sha256"],
-            "size_bytes": checkpoint["size_bytes"],
+            **checkpoint_snapshot,
+            "semantic_audit": semantic_audit,
+        },
+        "tensor_finiteness": {
+            "raw_model": copy.deepcopy(semantic_audit["raw_model"]),
+            "ema": copy.deepcopy(semantic_audit["ema"]),
         },
     }
     summary_ref = _artifact_json(
-        harness, output_directory, "training_summary", summary, 4
+        harness,
+        output_directory,
+        "training_summary",
+        summary,
+        screen.EXPECTED_ARTIFACT_SCHEMA_VERSIONS["training_summary"],
     )
+    summary_snapshot = _stable_snapshot(
+        path=summary_path,
+        sha256=summary_ref["sha256"],
+        size_bytes=summary_ref["size_bytes"],
+        inode=14,
+    )
+    pipeline_component = {
+        "possible_termination_signal": None,
+        "shell_exit_status": 0,
+        "shell_status_is_signal_compatible": False,
+        "signal_provenance": None,
+        "succeeded": True,
+    }
     receipt = {
         "schema_version": 5,
         "status": "completed",
         "overall_status": "completed",
+        "recorded_at_utc": "2026-09-06T00:00:05+00:00",
         "process_exit_status": 0,
         "predecessor_receipt_binding": None,
         "completion_requirements": {
+            "training_exit_zero": True,
+            "tee_exit_zero": True,
+            "training_summary_valid_and_launch_bound": True,
+            "launch_manifest_matches_summary_runtime_and_launch": True,
             "predecessor_receipt_binding_unchanged_and_valid": True,
+            "training_job_lock_valid_before_receipt_publication": True,
+            "runtime_config_matches_summary_and_launch": True,
+            "final_checkpoint_matches_training_summary": True,
+            "clean_pushed_source_still_matches_launch": True,
             "all_must_hold": True,
         },
         "expected_contract": {
+            "training_summary_schema_version": 5,
             "source_revision": source_revision,
             "resolved_training_config_sha256": config_entry["config"][
                 "canonical_sha256"
             ],
+            "training_argv_sha256": training_argv_sha256,
+            "launch_manifest_path": launch_path,
             "launch_manifest_sha256": manifest_ref["sha256"],
             "selected_gpu_uuids": ["GPU-test-idle-1"],
-            "max_steps": screen.EXPECTED_UPDATES[stage_id],
+            "training_job_lock_path": lock_path,
+            "training_job_lock_sha256": lock_sha256,
+            "max_steps": expected_steps,
             "world_size": 1,
+            "training_summary_path": summary_path,
+            "final_checkpoint_path": checkpoint_path,
             "initialization_checkpoint_sha256": initialization[
                 "source_checkpoint_sha256"
             ],
         },
-        "source_at_receipt": {"verified": True},
-        "launch_manifest": {"valid_and_launch_bound": True},
+        "pipeline": {
+            "training": copy.deepcopy(pipeline_component),
+            "tee": copy.deepcopy(pipeline_component),
+            "pipefail_shell_exit_status": 0,
+        },
+        "source_at_receipt": {
+            "verified": True,
+            "expected_revision": source_revision,
+            "head": source_revision,
+            "upstream": source_revision,
+            "output_directory_excluded_from_cleanliness_check": True,
+        },
+        "launch_manifest": {
+            "path": launch_path,
+            "present": True,
+            "matches_expected_raw_sha256": True,
+            "selected_gpu_uuids_match_expected": True,
+            "matches_training_summary_snapshot": True,
+            "matches_runtime_config_snapshot": True,
+            "valid_and_launch_bound": True,
+            "expected_selected_gpu_uuids": ["GPU-test-idle-1"],
+            "observed_selected_gpu_uuids": ["GPU-test-idle-1"],
+            "artifact": manifest_snapshot,
+            "validation_error": None,
+        },
+        "training_job_lock": {
+            "path": lock_path,
+            "present": True,
+            "expected_sha256": lock_sha256,
+            "matches_expected_raw_sha256": True,
+            "matches_launch_manifest_binding": True,
+            "valid_and_launch_bound_before_receipt_publication": True,
+            "artifact": _stable_snapshot(
+                path=lock_path,
+                sha256=lock_sha256,
+                size_bytes=len(lock_payload),
+                inode=10,
+            ),
+            "record": lock_record,
+            "release_policy": (
+                "publish_receipt_then_unlink_only_same_stat_identity_and_sha256"
+            ),
+            "release_result_not_claimed_inside_pre_release_receipt": True,
+            "validation_error": None,
+        },
         "runtime_config": {
+            "path": runtime_path,
+            "present": True,
             "matches_training_summary_snapshot": True,
             "semantic_validation_passed": True,
+            "artifact": runtime_snapshot,
         },
         "training_summary": {
+            "path": summary_path,
+            "present": True,
             "valid_and_launch_bound": True,
-            "artifact": {"sha256": summary_ref["sha256"]},
+            "artifact": summary_snapshot,
             "validated_bindings": {
+                "schema_version": 5,
+                "source_revision": source_revision,
+                "resolved_training_config_sha256": config_entry["config"][
+                    "canonical_sha256"
+                ],
+                "training_argv_sha256": training_argv_sha256,
+                "launch_manifest_path": launch_path,
+                "launch_manifest_sha256": manifest_ref["sha256"],
+                "selected_gpu_uuids": ["GPU-test-idle-1"],
+                "observed_global_step": expected_steps,
+                "observed_world_size": 1,
+                "training_accounting": training_accounting,
+                "ema_metadata": semantic_audit["ema_metadata"],
+                "final_checkpoint_path": checkpoint_path,
+                "final_checkpoint_sha256": checkpoint["sha256"],
+                "startup_mode": "warm_start",
                 "conditioning_gradient_audit": gradient_audit,
                 "screen_initialization_state_audit": state_audit,
             },
+            "validation_error": None,
         },
         "final_checkpoint": {
+            "path": checkpoint_path,
+            "present": True,
             "matches_training_summary_snapshot": True,
-            "artifact": {"sha256": checkpoint["sha256"]},
+            "artifact": checkpoint_snapshot,
         },
     }
     receipt_ref = _artifact_json(
@@ -1511,12 +1978,332 @@ def _evaluator_context(
     return evaluator, config_entry, attempt["checkpoint"], attempt["arm_id"]
 
 
+def _training_artifact_context() -> dict[str, Any]:
+    harness = build_harness()
+    assert harness.registry is not None
+    evidence = screen.strict_json_loads(
+        _bytes(_scheduler_evidence(harness)), label="test screen evidence"
+    )
+    assert isinstance(evidence, dict)
+    attempt = evidence["attempts"][0]
+    refs = attempt["artifacts"]
+    documents = {
+        name: screen._load_json_ref(
+            ref,
+            loader=harness.loader,
+            label=f"test {name}",
+            schema_field=(
+                "launch_manifest_schema_version"
+                if name == "launch_manifest"
+                else "schema_version"
+            ),
+        )
+        for name, ref in refs.items()
+    }
+    stage = screen._stage(harness.registry, "scheduler")
+    arm = screen._arm(stage, attempt["arm_id"])
+    config_entry = screen._registered_config(arm, scheduler_arm_id=None)
+    resolved_config = screen._load_config_ref(
+        config_entry["config"], loader=harness.loader, label="test resolved config"
+    )
+    selected_uuids = screen._validate_launch_manifest(
+        documents["launch_manifest"],
+        registry=harness.registry,
+        stage_id="scheduler",
+        arm=arm,
+        config_entry=config_entry,
+        source_revision=PUBLICATION_REVISION,
+        scheduler_dependency=None,
+    )
+    lock_binding = screen._validate_manifest_training_bindings(
+        documents["launch_manifest"],
+        refs=refs,
+        checkpoint=attempt["checkpoint"],
+        arm=arm,
+        resolved_config=resolved_config,
+        resolved_config_sha256=config_entry["config"]["canonical_sha256"],
+        source_revision=PUBLICATION_REVISION,
+    )
+    runtime_validation = screen._validate_runtime_record(
+        documents["runtime_config"],
+        registry=harness.registry,
+        manifest=documents["launch_manifest"],
+        manifest_ref=refs["launch_manifest"],
+        selected_uuids=selected_uuids,
+        resolved_config=resolved_config,
+        resolved_config_sha256=config_entry["config"]["canonical_sha256"],
+        expected_steps=100,
+        source_revision=PUBLICATION_REVISION,
+    )
+    summary_validation = screen._validate_training_summary(
+        documents["training_summary"],
+        registry=harness.registry,
+        stage_id="scheduler",
+        arm=arm,
+        config_entry=config_entry,
+        manifest=documents["launch_manifest"],
+        manifest_ref=refs["launch_manifest"],
+        runtime=documents["runtime_config"],
+        runtime_ref=refs["runtime_config"],
+        runtime_validation=runtime_validation,
+        checkpoint=attempt["checkpoint"],
+        gradient_audit=attempt["conditioning_gradient_audit"],
+        initialization=attempt["initialization"],
+        resolved_config=resolved_config,
+        source_revision=PUBLICATION_REVISION,
+    )
+    return {
+        "harness": harness,
+        "attempt": attempt,
+        "refs": refs,
+        "documents": documents,
+        "arm": arm,
+        "config_entry": config_entry,
+        "resolved_config": resolved_config,
+        "selected_uuids": selected_uuids,
+        "lock_binding": lock_binding,
+        "runtime_validation": runtime_validation,
+        "summary_validation": summary_validation,
+    }
+
+
+def _replace_nested(
+    value: dict[str, Any], path: tuple[str, ...], replacement: Any
+) -> None:
+    parent = value
+    for key in path[:-1]:
+        parent = parent[key]
+    parent[path[-1]] = replacement
+
+
 def test_registry_and_scheduler_happy_path_select_candidate() -> None:
     harness = build_harness()
     decision = _evaluate(harness, _scheduler_evidence(harness), "scheduler")
     assert decision["status"] == "completed"
     assert decision["selected_arm_id"] == "E-L1"
     assert decision["complete_threshold_fallback_used"] is False
+
+
+@pytest.mark.parametrize(
+    ("path", "replacement"),
+    [
+        (("resolved_training_config", "seed"), 18),
+        (("training_argv_sha256",), "0" * 64),
+        (("runtime_config_path",), "/wrong/runtime_config.json"),
+        (("single_training_job_lock", "record", "unexpected"), True),
+        (
+            (
+                "completion_contract",
+                "successful_exit_receipt_requires",
+                "clean_pushed_source_at_receipt",
+            ),
+            False,
+        ),
+    ],
+)
+def test_manifest_training_binding_rejects_config_path_lock_or_contract_tamper(
+    path: tuple[str, ...], replacement: object
+) -> None:
+    context = _training_artifact_context()
+    manifest = copy.deepcopy(context["documents"]["launch_manifest"])
+    _replace_nested(manifest, path, replacement)
+
+    with pytest.raises(screen.ScreenValidationError):
+        screen._validate_manifest_training_bindings(
+            manifest,
+            refs=context["refs"],
+            checkpoint=context["attempt"]["checkpoint"],
+            arm=context["arm"],
+            resolved_config=context["resolved_config"],
+            resolved_config_sha256=context["config_entry"]["config"][
+                "canonical_sha256"
+            ],
+            source_revision=PUBLICATION_REVISION,
+        )
+
+
+@pytest.mark.parametrize(
+    ("path", "replacement"),
+    [
+        (("unexpected",), True),
+        (("source", "unexpected"), True),
+        (("launch_manifest", "inode"), True),
+        (("completion_contract", "expected_max_steps"), 99),
+        (("python_environment", "PYTHONHASHSEED"), "18"),
+        (("resolved_training_config", "seed"), 18),
+    ],
+)
+def test_runtime_record_rejects_sparse_shape_or_cross_binding_tamper(
+    path: tuple[str, ...], replacement: object
+) -> None:
+    context = _training_artifact_context()
+    runtime = copy.deepcopy(context["documents"]["runtime_config"])
+    _replace_nested(runtime, path, replacement)
+
+    with pytest.raises(screen.ScreenValidationError):
+        screen._validate_runtime_record(
+            runtime,
+            registry=context["harness"].registry,
+            manifest=context["documents"]["launch_manifest"],
+            manifest_ref=context["refs"]["launch_manifest"],
+            selected_uuids=context["selected_uuids"],
+            resolved_config=context["resolved_config"],
+            resolved_config_sha256=context["config_entry"]["config"][
+                "canonical_sha256"
+            ],
+            expected_steps=100,
+            source_revision=PUBLICATION_REVISION,
+        )
+
+
+@pytest.mark.parametrize(
+    ("path", "replacement"),
+    [
+        (("unexpected",), True),
+        (("source", "unexpected"), True),
+        (("launch_manifest", "mode"), True),
+        (("runtime_config", "record_sha256"), "0" * 64),
+        (("completion_contract", "expected_world_size"), 2),
+        (("observed_training_state", "global_rank"), True),
+        (("training_accounting", "total_requested_example_exposures"), 3_199),
+        (("training_health", "optimizer_step_checks"), 99),
+        (("tensor_finiteness", "raw_model", "all_finite"), False),
+        (
+            ("tensor_finiteness", "raw_model", "floating_element_count"),
+            999_999,
+        ),
+        (
+            ("startup", "verified_mdlm_warm_start_report", "source_size_bytes"),
+            1,
+        ),
+        (("final_checkpoint", "size_bytes"), 1),
+        (("final_checkpoint", "semantic_audit", "ema_metadata", "decay"), 0.9),
+        (
+            ("final_checkpoint", "semantic_audit", "live_model_match", "tensor_count"),
+            1,
+        ),
+        (
+            (
+                "final_checkpoint",
+                "semantic_audit",
+                "non_sentinel_checkpoint_tensors",
+                "floating_tensor_count",
+            ),
+            1,
+        ),
+    ],
+)
+def test_training_summary_rejects_sparse_shape_health_or_finiteness_tamper(
+    path: tuple[str, ...], replacement: object
+) -> None:
+    context = _training_artifact_context()
+    summary = copy.deepcopy(context["documents"]["training_summary"])
+    _replace_nested(summary, path, replacement)
+
+    with pytest.raises(screen.ScreenValidationError):
+        screen._validate_training_summary(
+            summary,
+            registry=context["harness"].registry,
+            stage_id="scheduler",
+            arm=context["arm"],
+            config_entry=context["config_entry"],
+            manifest=context["documents"]["launch_manifest"],
+            manifest_ref=context["refs"]["launch_manifest"],
+            runtime=context["documents"]["runtime_config"],
+            runtime_ref=context["refs"]["runtime_config"],
+            runtime_validation=context["runtime_validation"],
+            checkpoint=context["attempt"]["checkpoint"],
+            gradient_audit=context["attempt"]["conditioning_gradient_audit"],
+            initialization=context["attempt"]["initialization"],
+            resolved_config=context["resolved_config"],
+            source_revision=PUBLICATION_REVISION,
+        )
+
+
+@pytest.mark.parametrize(
+    ("path", "replacement"),
+    [
+        (("unexpected",), True),
+        (("expected_contract", "training_summary_path"), "/wrong/summary.json"),
+        (("pipeline", "training", "succeeded"), 1),
+        (("source_at_receipt", "head"), "0" * 40),
+        (("launch_manifest", "artifact", "inode"), True),
+        (("training_job_lock", "record", "source_revision"), "0" * 40),
+        (("training_summary", "validated_bindings", "schema_version"), 4),
+        (("runtime_config", "semantic_validation_passed"), 1),
+        (("final_checkpoint", "present"), False),
+        (("completion_requirements", "all_must_hold"), 1),
+        (("recorded_at_utc",), "2026-09-06T00:00:03+00:00"),
+    ],
+)
+def test_exit_receipt_rejects_sparse_shape_pipeline_or_evidence_tamper(
+    path: tuple[str, ...], replacement: object
+) -> None:
+    context = _training_artifact_context()
+    receipt = copy.deepcopy(context["documents"]["exit_receipt"])
+    _replace_nested(receipt, path, replacement)
+
+    with pytest.raises(screen.ScreenValidationError):
+        screen._validate_exit_receipt(
+            receipt,
+            registry=context["harness"].registry,
+            stage_id="scheduler",
+            config_entry=context["config_entry"],
+            manifest=context["documents"]["launch_manifest"],
+            manifest_ref=context["refs"]["launch_manifest"],
+            runtime_ref=context["refs"]["runtime_config"],
+            summary_ref=context["refs"]["training_summary"],
+            summary_validation=context["summary_validation"],
+            lock_binding=context["lock_binding"],
+            checkpoint=context["attempt"]["checkpoint"],
+            selected_uuids=context["selected_uuids"],
+            gradient_audit=context["attempt"]["conditioning_gradient_audit"],
+            initialization=context["attempt"]["initialization"],
+            source_revision=PUBLICATION_REVISION,
+        )
+
+
+@pytest.mark.parametrize(
+    ("record", "field", "value"),
+    [
+        ("optimizer_live_state_match", "exact_serialized_live_match", 1),
+        (
+            "checkpoint_hyperparameters_match",
+            "exact_checkpoint_live_model_unresolved_config_match",
+            1,
+        ),
+        ("trainer_live_configuration_match", "detect_anomaly", 1),
+        ("checkpoint_loop_state_match", "epoch", True),
+        ("sampler_live_state_match", "sampler_class_name", "SequentialSampler"),
+    ],
+)
+def test_checkpoint_semantic_audit_rejects_typed_or_structural_tamper(
+    record: str, field: str, value: object
+) -> None:
+    config = _resolved_config(
+        arm_id="E-L0",
+        scheduler_arm_id="E-L0",
+        updates=100,
+        output_directory="output/fixture",
+        checkpoint_path="checkpoint.ckpt",
+        checkpoint_sha256="a" * 64,
+        gpu_count=1,
+    )
+    digest = screen.canonical_json_sha256(config)
+    audit = _checkpoint_semantic_audit(
+        expected_steps=100,
+        resolved_config=config,
+        resolved_config_sha256=digest,
+    )
+    audit[record][field] = value
+
+    with pytest.raises(screen.ScreenValidationError):
+        screen._validate_checkpoint_semantic_audit(
+            audit,
+            expected_steps=100,
+            resolved_config=config,
+            resolved_config_sha256=digest,
+        )
 
 
 def test_screen_gpu_policy_accepts_recorded_process_below_ten_percent() -> None:
@@ -2315,7 +3102,8 @@ def test_verifier_has_only_standard_library_imports_and_no_gpu_probe() -> None:
         "typing",
     }
     assert "nvidia-smi" not in source_text
-    assert "torch" not in source_text
+    assert "import torch" not in source_text
+    assert "torch.load" not in source_text
     assert "CUDA" not in source_text
     result = subprocess.run(
         [sys.executable, "-S", str(source_path), "--help"],

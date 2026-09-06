@@ -69,7 +69,7 @@ def _successful_receipt(root: Path, checkpoint: dict[str, Any]) -> dict[str, Any
         "recorded_at_utc": "2026-09-06T09:00:00+00:00",
         "process_exit_status": 0,
         "expected_contract": {
-            "training_summary_schema_version": 4,
+            "training_summary_schema_version": 5,
             "source_revision": REVISION,
             "resolved_training_config_sha256": SHA_A,
             "training_argv_sha256": SHA_B,

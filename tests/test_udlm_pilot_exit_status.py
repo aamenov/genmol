@@ -29,11 +29,27 @@ RESOLVED_TRAINING_CONFIG = {
     "seed": 7,
     "training": {"ema": 0.9999},
     "loader": {"global_batch_size": 8, "batch_size": 2},
+    "optim": {
+        "weight_decay": 0,
+        "lr": 3e-4,
+        "beta1": 0.9,
+        "beta2": 0.999,
+        "eps": 1e-8,
+        "scheduler": {
+            "name": "constant_with_linear_warmup",
+            "warmup_updates": 2500,
+            "horizon_updates": None,
+            "decay_floor_lr": None,
+        },
+    },
     "trainer": {
         "devices": 1,
         "num_nodes": 1,
         "max_steps": 10,
         "accumulate_grad_batches": 4,
+        "detect_anomaly": True,
+        "gradient_clip_val": 1.0,
+        "precision": "bf16",
     },
 }
 TRAINING_ARGV = ["/repo/scripts/train.py", "seed=7"]
@@ -125,6 +141,106 @@ def _finite_record(*, tensors=2, elements=4):
         "all_finite": True,
         "floating_tensor_count": tensors,
         "floating_element_count": elements,
+    }
+
+
+def _auxiliary_checkpoint_records(
+    *,
+    resolved_training_config,
+    expected_steps=10,
+    parameter_state_count=2,
+):
+    callback_key = (
+        "ModelCheckpoint{'monitor': None, 'mode': 'min', "
+        f"'every_n_train_steps': {expected_steps}, 'every_n_epochs': 0, "
+        "'train_time_interval': None}"
+    )
+    scheduler_config = resolved_training_config["optim"]["scheduler"]
+    schedule_check_count = (
+        max(
+            expected_steps,
+            scheduler_config["warmup_updates"] + 1,
+            (scheduler_config["horizon_updates"] or 0) + 1,
+        )
+        + 1
+    )
+    accumulation = resolved_training_config["trainer"]["accumulate_grad_batches"]
+    configured_clip_algorithm = resolved_training_config["trainer"].get(
+        "gradient_clip_algorithm"
+    )
+    effective_clip_algorithm = (
+        "norm" if configured_clip_algorithm is None else configured_clip_algorithm
+    )
+    return {
+        "checkpoint_python_floats": {
+            "all_finite": True,
+            "floating_scalar_count": 6,
+        },
+        "optimizer_live_state_match": {
+            "exact_serialized_live_match": True,
+            "optimizer_count": 1,
+            "optimizer_class": "AdamW",
+            "parameter_group_count": 1,
+            "parameter_state_count": parameter_state_count,
+            "exact_resolved_config_match": True,
+        },
+        "scheduler_live_state_match": {
+            "exact_serialized_live_match": True,
+            "scheduler_count": 1,
+            "scheduler_class": "LambdaLR",
+            "interval": "step",
+            "name": "lr",
+            "last_epoch": expected_steps,
+            "step_count": expected_steps + 1,
+            "exact_model_spec_match": True,
+            "exact_callable_schedule_match": True,
+            "callable_schedule_index_checks": schedule_check_count,
+        },
+        "sampler_live_state_match": {
+            "exact_hosted_stream_contract_match": True,
+            "random_state_is_none": True,
+            "live_state_dict_available": False,
+            "sampler_class_module": "torch.utils.data.dataloader",
+            "sampler_class_name": "_InfiniteConstantSampler",
+        },
+        "trainer_live_configuration_match": {
+            "exact_detect_anomaly_match": True,
+            "detect_anomaly": True,
+            "exact_gradient_clip_val_match": True,
+            "gradient_clip_val": float(
+                resolved_training_config["trainer"]["gradient_clip_val"]
+            ),
+            "exact_gradient_clip_algorithm_match": True,
+            "gradient_clip_algorithm": effective_clip_algorithm,
+            "exact_precision_match": True,
+            "configured_precision": str(
+                resolved_training_config["trainer"]["precision"]
+            ),
+            "live_precision": "bf16-mixed",
+        },
+        "model_checkpoint_live_state_match": {
+            "exact_serialized_live_match": True,
+            "model_checkpoint_callback_count": 1,
+            "state_key": callback_key,
+            "configuration_matches_pilot_contract": True,
+        },
+        "checkpoint_hyperparameters_match": {
+            "hparams_name": "kwargs",
+            "exact_hyperparameter_keys": True,
+            "exact_checkpoint_preflight_config_match": True,
+            "exact_live_model_preflight_config_match": True,
+            "exact_live_hparams_preflight_config_match": True,
+            "exact_checkpoint_live_model_unresolved_config_match": True,
+            "exact_checkpoint_live_hparams_unresolved_config_match": True,
+            "resolved_config_sha256": _canonical_sha256(resolved_training_config),
+        },
+        "checkpoint_loop_state_match": {
+            "exact_serialized_progress_match": True,
+            "epoch": 0,
+            "optimizer_steps": expected_steps,
+            "accumulate_grad_batches": accumulation,
+            "microbatches": expected_steps * accumulation,
+        },
     }
 
 
@@ -270,11 +386,15 @@ def _predecessor_panel():
             },
         },
         "loader": {"batch_size": 2, "global_batch_size": 8, "num_workers": 1},
+        "optim": copy.deepcopy(RESOLVED_TRAINING_CONFIG["optim"]),
         "trainer": {
             "devices": 1,
             "num_nodes": 1,
             "max_steps": 10,
             "accumulate_grad_batches": 4,
+            "detect_anomaly": True,
+            "gradient_clip_val": 1.0,
+            "precision": "bf16",
         },
         "callback": {"dirpath": "/masked/by/matched-panel-hash"},
     }
@@ -414,11 +534,15 @@ def _write_producer_predecessor(
             },
         },
         "loader": {"batch_size": 2, "global_batch_size": 8, "num_workers": 1},
+        "optim": copy.deepcopy(RESOLVED_TRAINING_CONFIG["optim"]),
         "trainer": {
             "devices": 1,
             "num_nodes": 1,
             "max_steps": 10,
             "accumulate_grad_batches": 4,
+            "detect_anomaly": True,
+            "gradient_clip_val": 1.0,
+            "precision": "bf16",
         },
         "callback": {"dirpath": str(checkpoint_path.parent)},
     }
@@ -545,7 +669,9 @@ def _write_producer_predecessor(
         "resolved_training_config_sha256": resolved_config_sha256,
         "runtime_config_path": str(runtime_path),
         "training_summary_path": str(summary_path),
-        "training_summary_schema_version": 4,
+        "training_summary_schema_version": (
+            receipt_writer.TRAINING_SUMMARY_SCHEMA_VERSION
+        ),
         "pilot_exit_status_path": str(receipt_path),
         "pilot_exit_status_schema_version": 5,
         "expected_final_checkpoint_path": str(checkpoint_path),
@@ -619,7 +745,7 @@ def _write_producer_predecessor(
     }
     ema_metadata = {"shadow_parameter_count": 2, "decay": 0.9999, "num_updates": 10}
     summary = {
-        "schema_version": 4,
+        "schema_version": receipt_writer.TRAINING_SUMMARY_SCHEMA_VERSION,
         "status": "completed",
         "completed_at_utc": completed_at,
         "source_revision": source_revision,
@@ -660,7 +786,17 @@ def _write_producer_predecessor(
                 "ema": _finite_record(),
                 "ema_metadata": ema_metadata,
                 "optimizer": _finite_record(),
-                "all_checkpoint_tensors": _finite_record(tensors=6, elements=12),
+                "non_sentinel_checkpoint_tensors": _finite_record(
+                    tensors=6, elements=12
+                ),
+                "framework_nonfinite_sentinels": (
+                    receipt_writer._expected_framework_nonfinite_sentinels(
+                        expected_steps=10
+                    )
+                ),
+                **_auxiliary_checkpoint_records(
+                    resolved_training_config=resolved_config
+                ),
                 "udlm_process_identity_verified": True,
                 "live_model_match": {
                     "exact_key_set": True,
@@ -692,7 +828,7 @@ def _write_producer_predecessor(
     )
     summary_snapshot = _snapshot(summary_path)
     validated_bindings = {
-        "schema_version": 4,
+        "schema_version": receipt_writer.TRAINING_SUMMARY_SCHEMA_VERSION,
         "source_revision": source_revision,
         "resolved_training_config_sha256": resolved_config_sha256,
         "training_argv_sha256": argv_sha256,
@@ -716,7 +852,9 @@ def _write_producer_predecessor(
         "recorded_at_utc": recorded_at,
         "process_exit_status": 0,
         "expected_contract": {
-            "training_summary_schema_version": 4,
+            "training_summary_schema_version": (
+                receipt_writer.TRAINING_SUMMARY_SCHEMA_VERSION
+            ),
             "source_revision": source_revision,
             "resolved_training_config_sha256": resolved_config_sha256,
             "training_argv_sha256": argv_sha256,
@@ -1350,7 +1488,17 @@ def _valid_summary(paths, revision):
                     "num_updates": 10,
                 },
                 "optimizer": _finite_record(),
-                "all_checkpoint_tensors": _finite_record(tensors=6, elements=12),
+                "non_sentinel_checkpoint_tensors": _finite_record(
+                    tensors=6, elements=12
+                ),
+                "framework_nonfinite_sentinels": (
+                    receipt_writer._expected_framework_nonfinite_sentinels(
+                        expected_steps=10
+                    )
+                ),
+                **_auxiliary_checkpoint_records(
+                    resolved_training_config=RESOLVED_TRAINING_CONFIG
+                ),
                 "udlm_process_identity_verified": True,
                 "live_model_match": {
                     "exact_key_set": True,
@@ -1388,6 +1536,34 @@ def _write_summary(paths, revision):
     paths["summary"].write_text(
         json.dumps(_valid_summary(paths, revision), sort_keys=True) + "\n",
         encoding="utf-8",
+    )
+
+
+def _validate_summary_direct(
+    paths,
+    revision,
+    summary,
+    *,
+    resolved_training_config=RESOLVED_TRAINING_CONFIG,
+):
+    return receipt_writer.validate_training_summary(
+        summary,
+        summary_path=paths["summary"],
+        expected_schema_version=receipt_writer.TRAINING_SUMMARY_SCHEMA_VERSION,
+        expected_source_revision=revision,
+        expected_config_sha256=_canonical_sha256(resolved_training_config),
+        expected_argv_sha256=EXPECTED_ARGV_SHA256,
+        expected_launch_manifest_path=paths["manifest"],
+        expected_launch_manifest_sha256=hashlib.sha256(
+            paths["manifest"].read_bytes()
+        ).hexdigest(),
+        expected_selected_gpu_uuids=EXPECTED_SELECTED_GPU_UUIDS,
+        expected_max_steps=10,
+        expected_world_size=1,
+        expected_final_checkpoint_path=paths["checkpoint"],
+        expected_initialization_checkpoint_sha256=EXPECTED_WARM_START_SHA256,
+        resolved_training_config=resolved_training_config,
+        launch_manifest=json.loads(paths["manifest"].read_text(encoding="utf-8")),
     )
 
 
@@ -1430,6 +1606,161 @@ def _execute_shell(repository, shell_command):
         capture_output=True,
         text=True,
     )
+
+
+@pytest.mark.parametrize(
+    ("field_path", "error_fragment"),
+    [
+        (
+            ("launch_manifest",),
+            "training summary launch manifest evidence keys are invalid",
+        ),
+        (("runtime_config",), "runtime config evidence keys are invalid"),
+        (("final_checkpoint",), "final checkpoint evidence keys are invalid"),
+        (("source",), "training summary source keys are invalid"),
+        (
+            ("completion_contract",),
+            "training summary completion contract keys are invalid",
+        ),
+        (("observed_training_state",), "observed training state keys are invalid"),
+        (("training_health",), "training health evidence keys are invalid"),
+        (
+            ("tensor_finiteness",),
+            "live tensor finiteness evidence keys are invalid",
+        ),
+        (
+            ("tensor_finiteness", "raw_model"),
+            "live raw model keys are invalid",
+        ),
+        (
+            ("final_checkpoint", "semantic_audit", "live_model_match"),
+            "checkpoint/live-model match keys are invalid",
+        ),
+        (
+            ("final_checkpoint", "semantic_audit", "live_ema_match"),
+            "checkpoint/live-EMA match keys are invalid",
+        ),
+        (
+            ("startup", "verified_mdlm_warm_start_report"),
+            "MDLM warm-start report keys are invalid",
+        ),
+    ],
+)
+def test_training_summary_rejects_undeclared_nested_extensions(
+    receipt_repository, field_path, error_fragment
+):
+    repository, revision = receipt_repository
+    paths = _paths(repository)
+    summary = _valid_summary(paths, revision)
+    target = summary
+    for field in field_path:
+        target = target[field]
+    target["unexpected_extension"] = True
+
+    with pytest.raises(ValueError, match=error_fragment):
+        _validate_summary_direct(paths, revision, summary)
+
+
+def test_additive_warm_start_rejects_film_only_variant_and_count(
+    receipt_repository,
+):
+    repository, revision = receipt_repository
+    paths = _paths(repository)
+    summary = _valid_summary(paths, revision)
+    summary["startup"]["verified_mdlm_warm_start_report"].update(
+        {
+            "conditioning_variant": "additive",
+            "conditioning_parameter_tensors": 2,
+        }
+    )
+
+    with pytest.raises(ValueError, match="MDLM warm-start report keys are invalid"):
+        _validate_summary_direct(paths, revision, summary)
+
+
+@pytest.mark.parametrize(
+    ("field", "error_fragment"),
+    [
+        ("raw_model", "live and serialized raw-model finiteness evidence disagree"),
+        ("ema", "live and serialized EMA finiteness evidence disagree"),
+    ],
+)
+def test_top_level_finiteness_must_equal_checkpoint_semantic_record(
+    receipt_repository, field, error_fragment
+):
+    repository, revision = receipt_repository
+    paths = _paths(repository)
+    summary = _valid_summary(paths, revision)
+    summary["tensor_finiteness"][field]["floating_element_count"] += 1
+
+    with pytest.raises(ValueError, match=error_fragment):
+        _validate_summary_direct(paths, revision, summary)
+
+
+@pytest.mark.parametrize("field_path", [(), ("source",)])
+def test_runtime_config_rejects_undeclared_root_or_source_extensions(
+    receipt_repository, field_path
+):
+    repository, revision = receipt_repository
+    paths = _paths(repository)
+    summary = _valid_summary(paths, revision)
+    runtime_path = paths["run_dir"] / "runtime_config.json"
+    runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
+    target = runtime
+    for field in field_path:
+        target = target[field]
+    target["unexpected_extension"] = True
+
+    with pytest.raises(ValueError, match="keys are invalid"):
+        receipt_writer.validate_runtime_config(
+            runtime,
+            expected_source_revision=revision,
+            expected_config_sha256=EXPECTED_CONFIG_SHA256,
+            expected_argv_sha256=EXPECTED_ARGV_SHA256,
+            expected_launch_manifest_path=paths["manifest"],
+            expected_launch_manifest_sha256=hashlib.sha256(
+                paths["manifest"].read_bytes()
+            ).hexdigest(),
+            expected_selected_gpu_uuids=EXPECTED_SELECTED_GPU_UUIDS,
+            expected_completion_contract=summary["completion_contract"],
+        )
+
+
+def test_explicit_null_gradient_clip_algorithm_normalizes_to_effective_norm(
+    receipt_repository,
+):
+    repository, revision = receipt_repository
+    paths = _paths(repository)
+    summary = _valid_summary(paths, revision)
+    resolved_config = copy.deepcopy(RESOLVED_TRAINING_CONFIG)
+    resolved_config["trainer"]["gradient_clip_algorithm"] = None
+    resolved_config_sha256 = _canonical_sha256(resolved_config)
+    summary["resolved_training_config_sha256"] = resolved_config_sha256
+    semantic = summary["final_checkpoint"]["semantic_audit"]
+    semantic.update(
+        _auxiliary_checkpoint_records(resolved_training_config=resolved_config)
+    )
+
+    bindings = _validate_summary_direct(
+        paths,
+        revision,
+        summary,
+        resolved_training_config=resolved_config,
+    )
+    assert bindings["schema_version"] == receipt_writer.TRAINING_SUMMARY_SCHEMA_VERSION
+    assert (
+        semantic["trainer_live_configuration_match"]["gradient_clip_algorithm"]
+        == "norm"
+    )
+
+    semantic["trainer_live_configuration_match"]["gradient_clip_algorithm"] = None
+    with pytest.raises(ValueError, match="live Trainer configuration match is invalid"):
+        _validate_summary_direct(
+            paths,
+            revision,
+            summary,
+            resolved_training_config=resolved_config,
+        )
 
 
 def test_successful_pipeline_writes_launch_bound_receipt(receipt_repository):
@@ -1813,7 +2144,7 @@ def test_required_health_semantic_runtime_and_startup_evidence_cannot_be_forged(
         ),
         (
             ("final_checkpoint", "semantic_audit"),
-            None,
+            {},
             "final checkpoint semantic audit",
         ),
         (
@@ -1838,7 +2169,7 @@ def test_required_health_semantic_runtime_and_startup_evidence_cannot_be_forged(
         ),
         (
             ("runtime_config", "record_sha256"),
-            None,
+            "not-a-sha256",
             "runtime config canonical record digest",
         ),
         (("startup",), None, "training summary keys are invalid"),
@@ -2089,6 +2420,11 @@ def test_training_accounting_must_match_resolved_runtime_config(
     summary = _valid_summary(paths, revision)
     mismatched_config = json.loads(json.dumps(RESOLVED_TRAINING_CONFIG))
     mismatched_config["loader"]["batch_size"] = 3
+    mismatched_config_sha256 = _canonical_sha256(mismatched_config)
+    summary["resolved_training_config_sha256"] = mismatched_config_sha256
+    summary["final_checkpoint"]["semantic_audit"]["checkpoint_hyperparameters_match"][
+        "resolved_config_sha256"
+    ] = mismatched_config_sha256
 
     with pytest.raises(
         ValueError, match="accounting micro-batch size disagrees with resolved config"
@@ -2098,7 +2434,7 @@ def test_training_accounting_must_match_resolved_runtime_config(
             summary_path=paths["summary"],
             expected_schema_version=receipt_writer.TRAINING_SUMMARY_SCHEMA_VERSION,
             expected_source_revision=revision,
-            expected_config_sha256=EXPECTED_CONFIG_SHA256,
+            expected_config_sha256=mismatched_config_sha256,
             expected_argv_sha256=EXPECTED_ARGV_SHA256,
             expected_launch_manifest_path=paths["manifest"],
             expected_launch_manifest_sha256=hashlib.sha256(
@@ -2133,6 +2469,11 @@ def test_receipt_v4_validates_and_echoes_film_gradient_certificate(
             "udlm": {"conditioning_variant": "film_adaln"},
         }
     )
+    resolved_config_sha256 = _canonical_sha256(resolved_config)
+    summary["resolved_training_config_sha256"] = resolved_config_sha256
+    summary["final_checkpoint"]["semantic_audit"]["checkpoint_hyperparameters_match"][
+        "resolved_config_sha256"
+    ] = resolved_config_sha256
     summary["training_accounting"]["trainable_parameter_counts"] = {
         "base_backbone": 3,
         "time_conditioner": 12,
@@ -2145,6 +2486,12 @@ def test_receipt_v4_validates_and_echoes_film_gradient_certificate(
         "purpose": "isolate_training_randomness_from_architecture_constructor_draws",
         "applied_before_dataloader_and_trainer_construction": True,
     }
+    summary["startup"]["verified_mdlm_warm_start_report"].update(
+        {
+            "conditioning_variant": "film_adaln",
+            "conditioning_parameter_tensors": 6,
+        }
+    )
     summary["conditioning_gradient_audit"] = audit
     state_audit = {
         "schema_version": 1,
@@ -2152,7 +2499,7 @@ def test_receipt_v4_validates_and_echoes_film_gradient_certificate(
             "after_verified_mdlm_ema_warm_start_before_training_rng_reseed_and_optimizer_creation"
         ),
         "source_checkpoint_sha256": EXPECTED_WARM_START_SHA256,
-        "resolved_training_config_sha256": EXPECTED_CONFIG_SHA256,
+        "resolved_training_config_sha256": resolved_config_sha256,
         "training_seed": 7,
         "conditioning_variant": "film_adaln",
         "common_backbone_tensor_count": 100,
@@ -2162,38 +2509,13 @@ def test_receipt_v4_validates_and_echoes_film_gradient_certificate(
     }
     summary["screen_initialization_state_audit"] = state_audit
 
-    bindings = receipt_writer.validate_training_summary(
-        summary,
-        summary_path=paths["summary"],
-        expected_schema_version=receipt_writer.TRAINING_SUMMARY_SCHEMA_VERSION,
-        expected_source_revision=revision,
-        expected_config_sha256=EXPECTED_CONFIG_SHA256,
-        expected_argv_sha256=EXPECTED_ARGV_SHA256,
-        expected_launch_manifest_path=paths["manifest"],
-        expected_launch_manifest_sha256=hashlib.sha256(
-            paths["manifest"].read_bytes()
-        ).hexdigest(),
-        expected_selected_gpu_uuids=EXPECTED_SELECTED_GPU_UUIDS,
-        expected_max_steps=10,
-        expected_world_size=1,
-        expected_final_checkpoint_path=paths["checkpoint"],
-        expected_initialization_checkpoint_sha256=EXPECTED_WARM_START_SHA256,
-        resolved_training_config=resolved_config,
-        launch_manifest=launch_manifest,
-    )
-    assert bindings["conditioning_gradient_audit"] == audit
-    assert bindings["screen_initialization_state_audit"] == state_audit
-
-    summary["conditioning_gradient_audit"]["optimizer_checks"][2][
-        "timestep_mlp_groups"
-    ][0]["all_parameter_gradients_nonzero"] = False
-    with pytest.raises(ValueError, match="required conditioning gradients are zero"):
-        receipt_writer.validate_training_summary(
+    def validate():
+        return receipt_writer.validate_training_summary(
             summary,
             summary_path=paths["summary"],
             expected_schema_version=receipt_writer.TRAINING_SUMMARY_SCHEMA_VERSION,
             expected_source_revision=revision,
-            expected_config_sha256=EXPECTED_CONFIG_SHA256,
+            expected_config_sha256=resolved_config_sha256,
             expected_argv_sha256=EXPECTED_ARGV_SHA256,
             expected_launch_manifest_path=paths["manifest"],
             expected_launch_manifest_sha256=hashlib.sha256(
@@ -2203,10 +2525,34 @@ def test_receipt_v4_validates_and_echoes_film_gradient_certificate(
             expected_max_steps=10,
             expected_world_size=1,
             expected_final_checkpoint_path=paths["checkpoint"],
-            expected_initialization_checkpoint_sha256=(EXPECTED_WARM_START_SHA256),
+            expected_initialization_checkpoint_sha256=EXPECTED_WARM_START_SHA256,
             resolved_training_config=resolved_config,
             launch_manifest=launch_manifest,
         )
+
+    bindings = validate()
+    assert bindings["conditioning_gradient_audit"] == audit
+    assert bindings["screen_initialization_state_audit"] == state_audit
+
+    warm_start_report = summary["startup"]["verified_mdlm_warm_start_report"]
+    warm_start_report["conditioning_variant"] = "additive"
+    with pytest.raises(ValueError, match="warm-start conditioning variant"):
+        validate()
+    warm_start_report["conditioning_variant"] = "film_adaln"
+
+    warm_start_report["conditioning_parameter_tensors"] = 5
+    with pytest.raises(
+        ValueError,
+        match="conditioning parameter tensor count disagrees",
+    ):
+        validate()
+    warm_start_report["conditioning_parameter_tensors"] = 6
+
+    summary["conditioning_gradient_audit"]["optimizer_checks"][2][
+        "timestep_mlp_groups"
+    ][0]["all_parameter_gradients_nonzero"] = False
+    with pytest.raises(ValueError, match="required conditioning gradients are zero"):
+        validate()
 
 
 def test_receipt_writer_rejects_legacy_training_summary_schema(receipt_repository):
@@ -2216,7 +2562,7 @@ def test_receipt_writer_rejects_legacy_training_summary_schema(receipt_repositor
     summary["schema_version"] = 1
 
     with pytest.raises(
-        ValueError, match="unsupported training summary schema version 1; expected 4"
+        ValueError, match="unsupported training summary schema version 1; expected 5"
     ):
         receipt_writer.validate_training_summary(
             summary,

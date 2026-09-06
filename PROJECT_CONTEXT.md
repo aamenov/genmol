@@ -1,6 +1,6 @@
 # GenMol v2 project context
 
-Snapshot: 2026-09-06, pre-launch utilization-policy revision. Recheck dynamic
+Snapshot: 2026-09-06, post-failed-R instrumentation repair before relaunch. Recheck dynamic
 state, especially Git status, logs, tmux sessions, and GPU occupancy, before
 acting.
 
@@ -13,8 +13,10 @@ acting.
   `/home/aidar.alimbayev/Documents/genmolv2/run_sources/udlm_genmol_worktree`
   on branch `codex/udlm-genmol`, not in the dirty main checkout. Preserve all
   unrelated and uncommitted work.
-- The current pushed parent implementation revision is
-  `a083ece7a993fc8b09a9abc0c50c5290a7c8a2ac`. It includes strict optimizer-step
+- The instrumentation repair descends from the last pre-repair pushed revision
+  `12bdce22809f9672dbb6666fa3a6e828b39aadb0`. Resolve the exact current health
+  source from a clean pushed `HEAD`; never infer it from this document. The
+  parent revision includes strict optimizer-step
   scheduler identity, prospective E-L0/E-L1 bundles, the warm-start-compatible
   A1 post-BERT FiLM conditioner, exact conditioning checkpoint identity,
   constructor-RNG isolation, the registry preparer and registry-aware launcher,
@@ -136,7 +138,7 @@ later GPU-count-specific arm registry in
 canonical SHA-256
 `ff45961276df75f445221fd1aa4629262d21fdb852bd9b226ad56fe2559315d5`.
 It binds the ordered names and shapes of all 24 FiLM and four timestep-MLP
-tensors plus optimizer observations 1--3. Training-summary schema 4 always
+tensors plus optimizer observations 1--3. Training-summary schema 5 always
 contains `conditioning_gradient_audit`: null for non-A1 arms and a
 contract-bound staged-gradient certificate for A1. Exit-receipt schema 5
 revalidates and echoes that value. Every optimization-screen arm additionally
@@ -229,7 +231,7 @@ unchanged lease owned by that launch. Missing, malformed, mismatched, or
 nonzero-status evidence makes the launcher fail. The semantic checkpoint audit
 now deserializes the same open file descriptor whose bytes and identity were
 certified, so a byte-identical pathname replacement also fails. The launch
-manifest uses schema 2, runtime config schema 2, training-summary schema 4, and
+manifest uses schema 2, runtime config schema 2, training-summary schema 5, and
 exit-receipt schema 5. They record the training seed, optimizer updates, world
 size, microbatch, accumulation, requested example exposure, hosted-stream partition
 policy, trainable base/time-adapter parameter split, exact EMA shadow
@@ -273,11 +275,18 @@ query was used for this validation.
 
 ## Registered superiority and baseline evidence
 
-The frozen protocol is
-`experiments/udlm/protocols/de_novo_superiority_v1.json`, raw SHA-256
-`d734e2771e94b54f3bdb2e86e6da496d855a3eb7a7bd07abbbcdfbf406ab4a20`
+The current frozen protocol is
+`experiments/udlm/protocols/de_novo_superiority_v3.json`, raw SHA-256
+`27a1f3e4fa66988d77eddeb66025eae64b514c452e089bb5c62fff99060c9f16`
 and canonical SHA-256
-`3b36fc1df19d4fdce4e522b3f9963eb55a9a136575bab361362b114dae25f53d`.
+`e7b108dce51cd1445758a9f7dc852532b2ee075a80f783ae009303a7550577ee`.
+It retains v1 and v2 byte-for-byte, changes no scientific setting or decision
+threshold, and prospectively repairs only the schema-5 training and independent
+verification instrumentation after the failed 10-update R health process. That
+failed R performed no denoising or molecular scoring; since the v2 freeze, no
+registered candidate checkpoint selection/ranking or candidate final-evaluation
+run occurred. Earlier ineligible CPU generation smokes and the audited MDLM
+baseline rescoring remain disclosed and unchanged.
 The publication gate
 requires all four point estimates and all four one-sided 95% interval criteria
 for one checkpoint locked before final seeds 0, 1, and 2. Validity uses pooled
@@ -466,20 +475,45 @@ malformed evidence means incomplete/no winner, never a silent control fallback.
 
 ## GPU status and required next pilot
 
-At this snapshot no UDLM GPU training job has been launched. The exact W=1
-health dry-run at pushed source `a083ece7a993fc8b09a9abc0c50c5290a7c8a2ac`
-passed without querying a GPU or mutating launch artifacts. Its R resolved-
-config SHA-256 was
-`b54089ddf6f0f966db46c1bc9fddcc125f15b9a90aaa41e8fbd540de4521cd09`
-and matched-panel SHA-256 was
-`5dd443114d2a7b76d4da287943548e52507472e0be4387ef4d4ca026b8305602`.
-An external waiter then polled GPU telemetry under the superseded zero-process
-rule. Its last poll saw a process-free GPU, but the exact launcher's subsequent
-fresh initial inventory saw a process and rejected every card before device
-selection or final UUID re-probe. It created no run directory, and no health
-tmux session or repository-global lease remains. Preserve
-`output/logs/wait-health-w1-a083ece.log` as the operational record, but never
-let that obsolete waiter launch this or a later source revision.
+The exact W=1 health dry-run at pushed source
+`12bdce22809f9672dbb6666fa3a6e828b39aadb0` passed without querying a GPU,
+mutating launch artifacts, or operating tmux. Its R resolved-config SHA-256 was
+`eb6abeab8c1f6b7953cbeb2febe9024dae512b8ae9ef34ef37cdc5f40696be38`,
+matched-panel SHA-256 was
+`68400cc4d15f9a02f436ea86fc0ddf19d3462385d46b034b3d14181fd7d6558e`,
+and training-argv SHA-256 was
+`7512c329314d5bdeb9d6ba6b1fb216270fa3382b72b3bcd3d9eba716683fa41d`.
+
+The first real R health member at that source ran all 10 optimizer updates on
+the dynamically selected physical GPU 3,
+`GPU-2cd1aa5b-616e-e6d3-b54d-49241cc8f959`. Both launch probes recorded 5%
+utilization, at least 47,455 MiB free, Default compute mode, and the pre-existing
+process telemetry authorized by the utilization-based policy. The training
+process then legitimately raised utilization above the pre-launch value. It
+wrote `checkpoints/10.ckpt`, but the post-training audit failed closed before
+publishing `training_summary.json`: a blanket whole-checkpoint finiteness scan
+mistook Lightning 2.5.1's scalar float32
+`ModelCheckpoint.kth_value=+inf` bookkeeping sentinel for learned-state
+corruption. The failed schema-5 receipt records training exit 1, wrapper status
+97, and no bound checkpoint artifact; the single-job lease was released.
+
+Preserve the failed namespace
+`output/udlm/health-w1-r-12bdce22809f9672dbb6666fa3a6e828b39aadb0`
+and its log in place. Its manifest SHA-256 is
+`ff0a946c8504b058574e082cadc14441295c4955352adc867e442521bf756f05`,
+runtime-config SHA-256 is
+`14547b9be4772b1c78f5bc639e9d0d2ed17103daf6ea1e3dd8b4a346807bc24a`,
+failed-receipt SHA-256 is
+`5336a4791256910632412ae09eec9d20e223c22765bcfd8796d00408248d3b99`,
+log SHA-256 is
+`6b6f14759c9d45cb6c0200ce188ccfdb912b91544912e9c01d07cf58a5aeef95`,
+and the 1,409,647,617-byte diagnostic checkpoint SHA-256 is
+`f85230b09ddacd319082571b59773a9c3d26f61f27cfde8f206eae549cce4cb6`.
+That checkpoint is unsuccessful evidence and must never initialize, rank, or
+authorize anything. A read-only scan found its raw model (208 tensors), EMA
+(206 tensors), and optimizer (618 tensors) entirely finite; the single
+framework sentinel was the only non-finite value among 353,765,767 floating
+elements.
 
 The user selected **one GPU** for this matched health/screen lineage and later
 authorized up to three GPUs without another permission check. The frozen W=1
@@ -497,13 +531,16 @@ dynamically selected UUID through
 `CUDA_VISIBLE_DEVICES`; logical `cuda:0` then refers only to that isolated
 mapping. A fresh last-moment probe—not this snapshot—is launch authority.
 
-The first GPU training launch should remain the exact wrapper-controlled R
-engineering pilot: full-size BERT for 10
+The next GPU training launch must restart a fresh exact wrapper-controlled R
+engineering pilot from the clean pushed descendant containing the narrow
+sentinel repair: full-size BERT for 10
 optimizer steps, checking memory, throughput, finite values, checkpoint
 save/load, exact runtime-config capture, and source/config/argv gates. Use the
 reviewed `scripts/udlm/launch_health_panel.py`, which delegates to the pilot
 launcher in a clearly named `tmux` session,
-and `output/logs/`. Keep the three variants matched, preserve
+and `output/logs/`. The wrapper now treats a failed or malformed receipt as
+terminal for its source-revision namespace instead of counting it as a
+completed predecessor. Keep the three variants matched, preserve
 `schedule_uniform` as the causal control for `empirical_frequency`. Do not
 generate or rank from this health panel. Advance to
 larger training or three-seed 1,000-sample evaluation only after a small pilot
@@ -614,29 +651,50 @@ Completed prior items:
   CPU suite passed 1,156 tests with 14 dependency warnings in 218.14 seconds.
   Ruff, formatting, `py_compile`, notebook regeneration/idempotence, and
   `git diff --check` passed; independent final audit found no remaining P0--P2
-  issue. This policy revision itself is not a health result and must still be
-  committed, pushed, and dry-run before a real launch.
+  issue. It was committed and pushed as
+  `12bdce22809f9672dbb6666fa3a6e828b39aadb0`; its exact W=1 dry-run passed.
+- The first real R member at `12bdce2` completed the requested 10 optimizer
+  updates and wrote a checkpoint, then intentionally produced a failed receipt
+  because the semantic auditor encountered Lightning's expected `kth_value`
+  positive-infinity callback sentinel. No S arm was launched and the lease was
+  released. The descendant repair advances training-summary schema 4 to 5,
+  verifies that exact framework sentinel structurally, keeps every other
+  floating tensor under strict finiteness checks, makes all receipt/screen/gate
+  consumers validate the new record, and makes the health wrapper stop on a
+  failed receipt. The failed source namespace and hashes are recorded above.
+- The descendant instrumentation repair passed the exact-worktree full CPU
+  suite: 1,286 tests with 14 dependency warnings in 237.29 seconds. An
+  independent final audit additionally observed 660 focused passes, validated
+  protocol v3 at canonical SHA-256
+  `e7b108dce51cd1445758a9f7dc852532b2ee075a80f783ae009303a7550577ee`,
+  reconstructed all W=1 R/S/E configs and models, and found no P0--P2 issue.
+  Ruff, formatting, `py_compile`, notebook regeneration/idempotence, notebook
+  code parsing, and `git diff --check` passed. No GPU query or launch occurred
+  in this repair/test tranche.
 
 Remaining sequence:
 
-1. Finish validating, commit, and push the utilization-policy revision as the
-   new exact health source H. Do not launch from the superseded `a083ece` H.
-2. From that clean pushed H and the user's selected `W=1`, run the CPU-only
-   health wrapper dry-run. Immediately afterward inspect the live inventory; if
-   one GPU has utilization strictly below 10%, at least 30,000 MiB free, and
-   non-prohibited compute mode, let the wrapper dynamically select/re-probe its
-   UUID and launch R even when recorded process telemetry is nonempty.
-   Invoke the wrapper again only after each preceding receipt succeeds, producing
-   the exact matched 10-step `R/S/E` health chain.
-3. Review its authoritative manifests, receipts, checkpoints, and
+1. Resolve the clean pushed `HEAD` containing the exact
+   Lightning-sentinel/failed-receipt repair as the new health source H.
+   Preserve every failed `12bdce2` artifact at its canonical path; do not use
+   its checkpoint. From H and the user's selected `W=1`, run the CPU-only
+   health wrapper dry-run
+   and verify that the six new H-bound run/log destinations are absent.
+   Immediately afterward inspect the live inventory; if one GPU has utilization
+   strictly below 10%, at least 30,000 MiB free, and non-prohibited compute mode,
+   let the wrapper dynamically select/re-probe its UUID and launch a fresh R even
+   when recorded process telemetry is nonempty. Invoke the wrapper again only
+   after each preceding receipt succeeds, producing the exact matched 10-step
+   `R/S/E` health chain.
+2. Review its authoritative manifests, receipts, checkpoints, and
    non-authoritative logs. If the health gate passes, materialize the six exact
    configs for the user-selected GPU count, commit and push them with the
    reviewed implementation as R0, then run the CPU-only freezer and commit/push
    its registry as the sole R1 change. The launcher, evidence schemas,
    initialization/gradient producers, collector, and independent selector are
    already implemented. Do not generate or rank from the 10-step health panel.
-4. Run E-L0/E-L1 only under the frozen 100-update registry. If complete, use
+3. Run E-L0/E-L1 only under the frozen 100-update registry. If complete, use
    its verified scheduler decision for two fresh 500-update A0/A1 warm starts;
    never continue a scheduler-screen checkpoint or use final seeds.
-5. Update the final PDF only after the required controlled experiments and
+4. Update the final PDF only after the required controlled experiments and
    ablations exist; keep all caveats and paper comparisons explicit.

@@ -25,6 +25,103 @@ def _mock_verified_floor_audit(monkeypatch):
     )
 
 
+def _auxiliary_checkpoint_records(
+    *, expected_steps: int, resolved_training_config: dict, parameter_state_count=2
+):
+    callback_key = (
+        "ModelCheckpoint{'monitor': None, 'mode': 'min', "
+        f"'every_n_train_steps': {expected_steps}, 'every_n_epochs': 0, "
+        "'train_time_interval': None}"
+    )
+    scheduler_config = resolved_training_config["optim"]["scheduler"]
+    schedule_check_count = (
+        max(
+            expected_steps,
+            scheduler_config["warmup_updates"] + 1,
+            (scheduler_config["horizon_updates"] or 0) + 1,
+        )
+        + 1
+    )
+    accumulation = resolved_training_config["trainer"]["accumulate_grad_batches"]
+    config_sha256 = launcher.canonical_json_sha256(resolved_training_config)
+    return {
+        "checkpoint_python_floats": {
+            "all_finite": True,
+            "floating_scalar_count": 6,
+        },
+        "optimizer_live_state_match": {
+            "exact_serialized_live_match": True,
+            "optimizer_count": 1,
+            "optimizer_class": "AdamW",
+            "parameter_group_count": 1,
+            "parameter_state_count": parameter_state_count,
+            "exact_resolved_config_match": True,
+        },
+        "scheduler_live_state_match": {
+            "exact_serialized_live_match": True,
+            "scheduler_count": 1,
+            "scheduler_class": "LambdaLR",
+            "interval": "step",
+            "name": "lr",
+            "last_epoch": expected_steps,
+            "step_count": expected_steps + 1,
+            "exact_model_spec_match": True,
+            "exact_callable_schedule_match": True,
+            "callable_schedule_index_checks": schedule_check_count,
+        },
+        "sampler_live_state_match": {
+            "exact_hosted_stream_contract_match": True,
+            "random_state_is_none": True,
+            "live_state_dict_available": False,
+            "sampler_class_module": "torch.utils.data.dataloader",
+            "sampler_class_name": "_InfiniteConstantSampler",
+        },
+        "trainer_live_configuration_match": {
+            "exact_detect_anomaly_match": True,
+            "detect_anomaly": True,
+            "exact_gradient_clip_val_match": True,
+            "gradient_clip_val": float(
+                resolved_training_config["trainer"]["gradient_clip_val"]
+            ),
+            "exact_gradient_clip_algorithm_match": True,
+            "gradient_clip_algorithm": (
+                "norm"
+                if resolved_training_config["trainer"].get("gradient_clip_algorithm")
+                is None
+                else resolved_training_config["trainer"]["gradient_clip_algorithm"]
+            ),
+            "exact_precision_match": True,
+            "configured_precision": str(
+                resolved_training_config["trainer"]["precision"]
+            ),
+            "live_precision": "bf16-mixed",
+        },
+        "model_checkpoint_live_state_match": {
+            "exact_serialized_live_match": True,
+            "model_checkpoint_callback_count": 1,
+            "state_key": callback_key,
+            "configuration_matches_pilot_contract": True,
+        },
+        "checkpoint_hyperparameters_match": {
+            "hparams_name": "kwargs",
+            "exact_hyperparameter_keys": True,
+            "exact_checkpoint_preflight_config_match": True,
+            "exact_live_model_preflight_config_match": True,
+            "exact_live_hparams_preflight_config_match": True,
+            "exact_checkpoint_live_model_unresolved_config_match": True,
+            "exact_checkpoint_live_hparams_unresolved_config_match": True,
+            "resolved_config_sha256": config_sha256,
+        },
+        "checkpoint_loop_state_match": {
+            "exact_serialized_progress_match": True,
+            "epoch": 0,
+            "optimizer_steps": expected_steps,
+            "accumulate_grad_batches": accumulation,
+            "microbatches": expected_steps * accumulation,
+        },
+    }
+
+
 def test_pilot_floor_is_an_override_and_manual_defaults_remain_historical():
     for relative_path in ("configs/base.yaml", "configs/udlm_categorical.yaml"):
         config = OmegaConf.load(launcher.REPOSITORY_ROOT / relative_path)
@@ -705,7 +802,9 @@ def test_child_command_sanitizes_python_and_binds_source_argv_config(
     )
     assert environment["PYTHONHASHSEED"] == "7"
     assert environment["GENMOL_TRAIN_SUMMARY_PATH"] == str(summary_path)
-    assert environment["GENMOL_TRAIN_EXPECTED_SUMMARY_SCHEMA_VERSION"] == "4"
+    assert environment["GENMOL_TRAIN_EXPECTED_SUMMARY_SCHEMA_VERSION"] == str(
+        launcher.TRAINING_SUMMARY_SCHEMA_VERSION
+    )
     assert environment["GENMOL_TRAIN_EXPECTED_FINAL_CHECKPOINT_PATH"] == str(
         checkpoint_path
     )
@@ -1028,7 +1127,13 @@ def test_matched_panel_rejects_seed_outside_exact_lightning_range(seed):
 
 
 def _predecessor_test_config(
-    repository_root, run_name, training_variant, *, seed=7, gpu_count=1
+    repository_root,
+    run_name,
+    training_variant,
+    *,
+    seed=7,
+    gpu_count=1,
+    conditioning_variant="additive",
 ):
     return {
         "seed": seed,
@@ -1041,7 +1146,7 @@ def _predecessor_test_config(
                 "prior_variant": launcher.TRAINING_VARIANTS[training_variant][
                     "prior_variant"
                 ],
-                "conditioning_variant": "additive",
+                "conditioning_variant": conditioning_variant,
             },
         },
         "trainer": {
@@ -1050,11 +1155,26 @@ def _predecessor_test_config(
             "max_steps": 10,
             "accumulate_grad_batches": 16 // (2 * gpu_count),
             "detect_anomaly": True,
+            "gradient_clip_val": 1.0,
+            "precision": "bf16",
         },
         "loader": {
             "global_batch_size": 16,
             "batch_size": 2,
             "num_workers": 1,
+        },
+        "optim": {
+            "weight_decay": 0,
+            "lr": 3e-4,
+            "beta1": 0.9,
+            "beta2": 0.999,
+            "eps": 1e-8,
+            "scheduler": {
+                "name": "constant_with_linear_warmup",
+                "warmup_updates": 2500,
+                "horizon_updates": None,
+                "decay_floor_lr": None,
+            },
         },
         "callback": {
             "dirpath": str(repository_root / f"output/udlm/{run_name}/checkpoints"),
@@ -1072,6 +1192,7 @@ def _predecessor_test_panel(
     gpu_count=1,
     checkpoint=None,
     checkpoint_sha256=None,
+    conditioning_variant="additive",
 ):
     resolved = _predecessor_test_config(
         repository_root,
@@ -1079,6 +1200,7 @@ def _predecessor_test_panel(
         "udlm",
         seed=seed,
         gpu_count=gpu_count,
+        conditioning_variant=conditioning_variant,
     )
     common_digest = launcher.matched_panel_config_sha256(resolved)
     return launcher.build_matched_panel_spec(
@@ -1111,6 +1233,7 @@ def _write_successful_predecessor(
     manifest_created="2026-09-06T12:00:00+00:00",
     summary_completed="2026-09-06T12:01:00+00:00",
     receipt_recorded="2026-09-06T12:02:00+00:00",
+    conditioning_variant="additive",
 ):
     if lock_acquired is None:
         lock_acquired = manifest_created
@@ -1133,6 +1256,7 @@ def _write_successful_predecessor(
         training_variant,
         seed=common["seed"],
         gpu_count=common["requested_gpu_count"],
+        conditioning_variant=conditioning_variant,
     )
     resolved_sha256 = launcher.canonical_json_sha256(resolved_config)
     if python_executable_path is None:
@@ -1371,6 +1495,21 @@ def _write_successful_predecessor(
             "weights": "ema",
             "parameter_tensors": 2,
         }
+        if conditioning_variant == "film_adaln":
+            warm_start_report.update(
+                {
+                    "conditioning_variant": "film_adaln",
+                    "conditioning_parameter_tensors": 28,
+                }
+            )
+    trainable_parameter_counts = {
+        "base_backbone": 3,
+        "time_conditioner": 2,
+        "total": 5,
+    }
+    if conditioning_variant == "film_adaln":
+        trainable_parameter_counts["film_modulation"] = 4
+        trainable_parameter_counts["total"] = 9
     training_accounting = {
         "training_seed": common["seed"],
         "optimizer_updates": common["max_steps"],
@@ -1386,11 +1525,7 @@ def _write_successful_predecessor(
         "hosted_stream_rank_partition_policy": (
             launcher._HOSTED_STREAM_RANK_PARTITION_POLICY
         ),
-        "trainable_parameter_counts": {
-            "base_backbone": 3,
-            "time_conditioner": 2,
-            "total": 5,
-        },
+        "trainable_parameter_counts": trainable_parameter_counts,
     }
     summary = {
         "schema_version": launcher.TRAINING_SUMMARY_SCHEMA_VERSION,
@@ -1437,7 +1572,16 @@ def _write_successful_predecessor(
                 "ema": finiteness,
                 "ema_metadata": ema_metadata,
                 "optimizer": finiteness,
-                "all_checkpoint_tensors": finiteness,
+                "non_sentinel_checkpoint_tensors": finiteness,
+                "framework_nonfinite_sentinels": (
+                    launcher._expected_framework_nonfinite_sentinels(
+                        expected_steps=common["max_steps"]
+                    )
+                ),
+                **_auxiliary_checkpoint_records(
+                    expected_steps=common["max_steps"],
+                    resolved_training_config=resolved_config,
+                ),
                 "udlm_process_identity_verified": True,
                 "live_model_match": {
                     "exact_key_set": True,
@@ -1774,6 +1918,114 @@ def test_s_and_e_require_exact_successful_immediate_predecessors(monkeypatch, tm
     assert e_binding["expected_predecessor_variant_position"] == 1
     assert e_binding["predecessor_run_name"] == "S"
     assert e_binding["chronology"]["strictly_ordered_timestamps_verified"] is True
+
+
+def test_predecessor_accepts_exact_film_parameter_schema(monkeypatch, tmp_path):
+    repository_root = tmp_path / "worktree"
+    repository_root.mkdir()
+    monkeypatch.setattr(launcher, "REPOSITORY_ROOT", repository_root)
+    initialization_checkpoint = repository_root / "initialization/mdlm.ckpt"
+    initialization_checkpoint.parent.mkdir()
+    initialization_checkpoint.write_bytes(b"fixture MDLM checkpoint\n")
+    initialization_sha256 = launcher.hashlib.sha256(
+        initialization_checkpoint.read_bytes()
+    ).hexdigest()
+    panel, panel_sha256 = _predecessor_test_panel(
+        repository_root,
+        checkpoint=initialization_checkpoint,
+        checkpoint_sha256=initialization_sha256,
+        conditioning_variant="film_adaln",
+    )
+    genesis = launcher.build_predecessor_receipt_binding(
+        training_variant="udlm",
+        explicit_genesis=True,
+        predecessor_receipt_path=None,
+        matched_panel_spec=panel,
+        matched_panel_spec_sha256=panel_sha256,
+    )
+    receipt_path = _write_successful_predecessor(
+        repository_root,
+        run_name="R_film",
+        training_variant="udlm",
+        panel_spec=panel,
+        panel_sha256=panel_sha256,
+        predecessor_binding=genesis,
+        conditioning_variant="film_adaln",
+    )
+
+    binding = launcher.build_predecessor_receipt_binding(
+        training_variant="schedule_uniform",
+        explicit_genesis=False,
+        predecessor_receipt_path=receipt_path,
+        matched_panel_spec=panel,
+        matched_panel_spec_sha256=panel_sha256,
+    )
+
+    assert binding["state"] == "validated_successful_predecessor"
+
+
+@pytest.mark.parametrize(
+    ("conditioning_variant", "mutation", "error_fragment"),
+    [
+        ("additive", "unexpected_film", "keys differ"),
+        ("film_adaln", "missing_film", "keys differ"),
+        ("film_adaln", "zero_film", "positive integer"),
+        ("film_adaln", "bad_total", "must equal 9"),
+    ],
+)
+def test_predecessor_rejects_cross_topology_and_invalid_parameter_counts(
+    monkeypatch, tmp_path, conditioning_variant, mutation, error_fragment
+):
+    repository_root = tmp_path / "worktree"
+    repository_root.mkdir()
+    monkeypatch.setattr(launcher, "REPOSITORY_ROOT", repository_root)
+    panel, panel_sha256 = _predecessor_test_panel(
+        repository_root, conditioning_variant=conditioning_variant
+    )
+    genesis = launcher.build_predecessor_receipt_binding(
+        training_variant="udlm",
+        explicit_genesis=True,
+        predecessor_receipt_path=None,
+        matched_panel_spec=panel,
+        matched_panel_spec_sha256=panel_sha256,
+    )
+    receipt_path = _write_successful_predecessor(
+        repository_root,
+        run_name=f"R_bad_parameters_{mutation}",
+        training_variant="udlm",
+        panel_spec=panel,
+        panel_sha256=panel_sha256,
+        predecessor_binding=genesis,
+        conditioning_variant=conditioning_variant,
+    )
+    summary_path = receipt_path.parent / "training_summary.json"
+    summary = launcher.json.loads(summary_path.read_text(encoding="utf-8"))
+    counts = summary["training_accounting"]["trainable_parameter_counts"]
+    if mutation == "unexpected_film":
+        counts["film_modulation"] = 4
+        counts["total"] = 9
+    elif mutation == "missing_film":
+        counts.pop("film_modulation")
+        counts["total"] = 5
+    elif mutation == "zero_film":
+        counts["film_modulation"] = 0
+        counts["total"] = 5
+    else:
+        counts["total"] = 8
+    receipt = _rebind_mutated_predecessor_summary(receipt_path, summary)
+    receipt_path.write_text(
+        launcher.json.dumps(receipt, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=error_fragment):
+        launcher.build_predecessor_receipt_binding(
+            training_variant="schedule_uniform",
+            explicit_genesis=False,
+            predecessor_receipt_path=receipt_path,
+            matched_panel_spec=panel,
+            matched_panel_spec_sha256=panel_sha256,
+        )
 
 
 def test_successor_has_no_fail_open_missing_receipt(monkeypatch, tmp_path):
@@ -2274,7 +2526,7 @@ def test_predecessor_rejects_impossible_gpu_producer_evidence(
 @pytest.mark.parametrize(
     ("mutation", "error_fragment"),
     [
-        ("shadow_count", "live EMA tensor count"),
+        ("shadow_count", "optimizer parameter-state count"),
         ("live_ema_count", "live EMA tensor count"),
         ("serialized_ema_count", "serialized EMA tensor count"),
         ("ema_decay", "EMA decay disagrees"),
@@ -2340,6 +2592,13 @@ def test_predecessor_rejects_incoherent_ema_or_health_evidence(
         ("source_size_bytes", 0, "source size"),
         ("weights", "raw", "warm-start weights"),
         ("parameter_tensors", 0, "parameter tensor count"),
+        ("conditioning_variant", "film_adaln", "keys differ"),
+        (
+            "conditioning_parameter_tensors",
+            28,
+            "keys differ",
+        ),
+        ("unexpected", True, "keys differ"),
         (
             "byte_identity_verified_before_and_after_load",
             False,
@@ -2389,6 +2648,76 @@ def test_predecessor_warm_start_report_is_source_bound(
     summary_path = receipt_path.parent / "training_summary.json"
     summary = launcher.json.loads(summary_path.read_text(encoding="utf-8"))
     summary["startup"]["verified_mdlm_warm_start_report"][field] = replacement
+    receipt = _rebind_mutated_predecessor_summary(receipt_path, summary)
+    receipt_path.write_text(
+        launcher.json.dumps(receipt, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=error_fragment):
+        launcher.build_predecessor_receipt_binding(
+            training_variant="schedule_uniform",
+            explicit_genesis=False,
+            predecessor_receipt_path=receipt_path,
+            matched_panel_spec=panel,
+            matched_panel_spec_sha256=panel_sha256,
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "error_fragment"),
+    [
+        ("wrong_variant", "conditioning variant"),
+        ("wrong_count", "must equal 28"),
+        ("missing_variant", "keys differ"),
+        ("extra", "keys differ"),
+    ],
+)
+def test_predecessor_film_warm_start_report_is_topology_bound(
+    monkeypatch, tmp_path, mutation, error_fragment
+):
+    repository_root = tmp_path / "worktree"
+    repository_root.mkdir()
+    monkeypatch.setattr(launcher, "REPOSITORY_ROOT", repository_root)
+    initialization_checkpoint = repository_root / "initialization/mdlm.ckpt"
+    initialization_checkpoint.parent.mkdir()
+    initialization_checkpoint.write_bytes(b"fixture MDLM checkpoint\n")
+    initialization_sha256 = launcher.hashlib.sha256(
+        initialization_checkpoint.read_bytes()
+    ).hexdigest()
+    panel, panel_sha256 = _predecessor_test_panel(
+        repository_root,
+        checkpoint=initialization_checkpoint,
+        checkpoint_sha256=initialization_sha256,
+        conditioning_variant="film_adaln",
+    )
+    genesis = launcher.build_predecessor_receipt_binding(
+        training_variant="udlm",
+        explicit_genesis=True,
+        predecessor_receipt_path=None,
+        matched_panel_spec=panel,
+        matched_panel_spec_sha256=panel_sha256,
+    )
+    receipt_path = _write_successful_predecessor(
+        repository_root,
+        run_name=f"R_bad_film_warm_{mutation}",
+        training_variant="udlm",
+        panel_spec=panel,
+        panel_sha256=panel_sha256,
+        predecessor_binding=genesis,
+        conditioning_variant="film_adaln",
+    )
+    summary_path = receipt_path.parent / "training_summary.json"
+    summary = launcher.json.loads(summary_path.read_text(encoding="utf-8"))
+    report = summary["startup"]["verified_mdlm_warm_start_report"]
+    if mutation == "wrong_variant":
+        report["conditioning_variant"] = "additive"
+    elif mutation == "wrong_count":
+        report["conditioning_parameter_tensors"] = 27
+    elif mutation == "missing_variant":
+        report.pop("conditioning_variant")
+    else:
+        report["unexpected"] = True
     receipt = _rebind_mutated_predecessor_summary(receipt_path, summary)
     receipt_path.write_text(
         launcher.json.dumps(receipt, indent=2, sort_keys=True) + "\n",
@@ -3406,7 +3735,10 @@ def test_main_keeps_final_uuid_probe_adjacent_to_tmux_spawn(monkeypatch, tmp_pat
                 repository_root / "output/udlm/ordering/checkpoints/1.ckpt"
             )
             assert manifest["training_summary_path"] == str(summary_path)
-            assert manifest["training_summary_schema_version"] == 4
+            assert (
+                manifest["training_summary_schema_version"]
+                == launcher.TRAINING_SUMMARY_SCHEMA_VERSION
+            )
             receipt_path = (
                 repository_root / "output/udlm/ordering/pilot_exit_status.json"
             )

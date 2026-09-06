@@ -34,6 +34,7 @@ for _import_root in (REPOSITORY_SRC, REPOSITORY_ROOT):
 PILOT_EVIDENCE_SCHEMA_VERSION = 2
 BENCHMARK_SCHEMA_VERSION = 7
 EXIT_RECEIPT_SCHEMA_VERSION = 5
+TRAINING_SUMMARY_SCHEMA_VERSION = 5
 PILOT_FAILURE_RECEIPT_SCHEMA_VERSION = 1
 PILOT_FAILURE_RECEIPT_KIND = "pilot_failure"
 FINAL_BENCHMARK_SAMPLES_PER_SEED = 1_000
@@ -514,7 +515,7 @@ def _production_training_artifact_validator(
     validated_bindings = receipt_writer.validate_training_summary(
         dict(summary),
         summary_path=summary_path,
-        expected_schema_version=4,
+        expected_schema_version=TRAINING_SUMMARY_SCHEMA_VERSION,
         expected_source_revision=expected_contract["source_revision"],
         expected_config_sha256=expected_contract["resolved_training_config_sha256"],
         expected_argv_sha256=expected_contract["training_argv_sha256"],
@@ -599,7 +600,10 @@ def validate_successful_training_receipt(
 
     expected = _mapping(receipt.get("expected_contract"), "receipt expected contract")
     _exact_keys(expected, _EXPECTED_CONTRACT_FIELDS, "receipt expected contract")
-    if expected.get("training_summary_schema_version") != 4:
+    if (
+        expected.get("training_summary_schema_version")
+        != TRAINING_SUMMARY_SCHEMA_VERSION
+    ):
         raise PilotEvidenceError(
             "receipt expects an unsupported training-summary schema"
         )

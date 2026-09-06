@@ -27,7 +27,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 RUN_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}\Z")
 LAUNCH_MANIFEST_SCHEMA_VERSION = 2
 RUNTIME_CONFIG_SCHEMA_VERSION = 2
-TRAINING_SUMMARY_SCHEMA_VERSION = 4
+TRAINING_SUMMARY_SCHEMA_VERSION = 5
 EXIT_STATUS_SCHEMA_VERSION = 5
 INCOMPLETE_EXIT_STATUS = 97
 HOSTED_STREAM_RANK_PARTITION_POLICY = (
@@ -403,9 +403,15 @@ def _validate_snapshot_claim(
     value: object,
     *,
     expected_path: Path,
+    extra_keys: set[str] | None = None,
     label: str,
 ) -> dict[str, object]:
     snapshot = _required_mapping(value, label=label)
+    _require_exact_keys(
+        snapshot,
+        _STABLE_ARTIFACT_SNAPSHOT_KEYS | (extra_keys or set()),
+        label=label,
+    )
     _exact_string(snapshot.get("path"), str(expected_path), label=f"{label} path")
     _required_true(
         snapshot,
@@ -440,9 +446,15 @@ def _require_snapshot_matches_claim(
     path: Path,
     claim: object,
     *,
+    extra_keys: set[str] | None = None,
     label: str,
 ) -> dict[str, object]:
-    claimed = _validate_snapshot_claim(claim, expected_path=path, label=label)
+    claimed = _validate_snapshot_claim(
+        claim,
+        expected_path=path,
+        extra_keys=extra_keys,
+        label=label,
+    )
     fields = (
         "path",
         "device",
@@ -676,13 +688,12 @@ def _require_exact_snapshot_claim(
     extra_keys: set[str] | None = None,
     label: str,
 ) -> dict[str, object]:
-    claim = _required_mapping(value, label=label)
-    _require_exact_keys(
-        claim,
-        _STABLE_ARTIFACT_SNAPSHOT_KEYS | (extra_keys or set()),
+    return _validate_snapshot_claim(
+        value,
+        expected_path=expected_path,
+        extra_keys=extra_keys,
         label=label,
     )
-    return _validate_snapshot_claim(claim, expected_path=expected_path, label=label)
 
 
 def _validate_successful_pipeline(value: object) -> None:
@@ -1533,6 +1544,7 @@ def _validate_predecessor_producer_artifacts(
         runtime_snapshot,
         runtime_path,
         summary_runtime_claim,
+        extra_keys={"schema_version", "record_sha256"},
         label="predecessor summary runtime-config evidence",
     )
     _exact_integer(
@@ -1599,6 +1611,7 @@ def _validate_predecessor_producer_artifacts(
         checkpoint_snapshot,
         checkpoint_path,
         summary_checkpoint_claim,
+        extra_keys={"semantic_audit"},
         label="predecessor summary final-checkpoint evidence",
     )
     validated_bindings = validate_training_summary(
@@ -2169,6 +2182,11 @@ def _validated_predecessor_binding_at_receipt(
 
 def _validate_finiteness_record(value: object, *, label: str) -> None:
     record = _required_mapping(value, label=label)
+    _require_exact_keys(
+        record,
+        {"all_finite", "floating_tensor_count", "floating_element_count"},
+        label=label,
+    )
     _required_true(record, "all_finite", label=f"{label} all-finite flag")
     tensor_count = _positive_integer_field(
         record,
@@ -2182,6 +2200,283 @@ def _validate_finiteness_record(value: object, *, label: str) -> None:
     )
     if element_count < tensor_count:
         raise ValueError(f"{label} has fewer elements than tensors")
+
+
+def _expected_framework_nonfinite_sentinels(
+    *, expected_steps: int
+) -> dict[str, object]:
+    callback_key = (
+        "ModelCheckpoint{'monitor': None, 'mode': 'min', "
+        f"'every_n_train_steps': {expected_steps}, 'every_n_epochs': 0, "
+        "'train_time_interval': None}"
+    )
+    return {
+        "all_expected_and_only_expected_verified": True,
+        "nonfinite_tensor_count": 1,
+        "nonfinite_element_count": 1,
+        "records": [
+            {
+                "tensor_path_components": [
+                    "checkpoint",
+                    "callbacks",
+                    callback_key,
+                    "kth_value",
+                ],
+                "framework": "lightning",
+                "framework_version": "2.5.1",
+                "callback": "ModelCheckpoint",
+                "field": "kth_value",
+                "dtype": "float32",
+                "shape": [],
+                "value": "+inf",
+                "meaning": "unranked_min_mode_checkpoint_sentinel",
+                "excluded_from_non_sentinel_finiteness": True,
+            }
+        ],
+    }
+
+
+def _validate_framework_nonfinite_sentinels(
+    value: object, *, expected_steps: int, label: str
+) -> None:
+    record = _required_mapping(value, label=label)
+    expected = _expected_framework_nonfinite_sentinels(expected_steps=expected_steps)
+    if canonical_json_sha256(record) != canonical_json_sha256(expected):
+        raise ValueError(
+            f"{label} does not match the exact Lightning sentinel contract"
+        )
+
+
+def _validate_auxiliary_checkpoint_records(
+    semantic: dict[str, object],
+    *,
+    expected_steps: int,
+    resolved_training_config: object,
+    label: str,
+) -> int:
+    resolved = _required_mapping(
+        resolved_training_config,
+        label=f"{label} resolved training config",
+    )
+    config_sha256 = canonical_json_sha256(resolved)
+    trainer_config = _required_mapping(
+        resolved.get("trainer"),
+        label=f"{label} resolved trainer config",
+    )
+    accumulation = trainer_config.get("accumulate_grad_batches")
+    if type(accumulation) is not int or accumulation <= 0:
+        raise ValueError(f"{label} resolved accumulation is invalid")
+    optim_config = _required_mapping(
+        resolved.get("optim"),
+        label=f"{label} resolved optimizer config",
+    )
+    scheduler_config = _required_mapping(
+        optim_config.get("scheduler"),
+        label=f"{label} resolved scheduler config",
+    )
+    warmup_updates = scheduler_config.get("warmup_updates")
+    horizon_updates = scheduler_config.get("horizon_updates")
+    if type(warmup_updates) is not int or warmup_updates < 0:
+        raise ValueError(f"{label} resolved scheduler warmup is invalid")
+    if horizon_updates is not None and (
+        type(horizon_updates) is not int or horizon_updates < 0
+    ):
+        raise ValueError(f"{label} resolved scheduler horizon is invalid")
+    schedule_check_count = (
+        max(expected_steps, warmup_updates + 1, (horizon_updates or 0) + 1) + 1
+    )
+    python_floats = _required_mapping(
+        semantic.get("checkpoint_python_floats"),
+        label=f"{label} Python-float finiteness",
+    )
+    _require_exact_keys(
+        python_floats,
+        {"all_finite", "floating_scalar_count"},
+        label=f"{label} Python-float finiteness",
+    )
+    _required_true(
+        python_floats,
+        "all_finite",
+        label=f"{label} Python-float all-finite flag",
+    )
+    _positive_integer_field(
+        python_floats,
+        "floating_scalar_count",
+        label=f"{label} Python-float count",
+    )
+
+    optimizer = _required_mapping(
+        semantic.get("optimizer_live_state_match"),
+        label=f"{label} optimizer live-state match",
+    )
+    _require_exact_keys(
+        optimizer,
+        {
+            "exact_serialized_live_match",
+            "optimizer_count",
+            "optimizer_class",
+            "parameter_group_count",
+            "parameter_state_count",
+            "exact_resolved_config_match",
+        },
+        label=f"{label} optimizer live-state match",
+    )
+    _required_true(
+        optimizer,
+        "exact_serialized_live_match",
+        label=f"{label} optimizer exact-match flag",
+    )
+    _required_true(
+        optimizer,
+        "exact_resolved_config_match",
+        label=f"{label} optimizer resolved-config flag",
+    )
+    _exact_integer(
+        optimizer.get("optimizer_count"), 1, label=f"{label} optimizer count"
+    )
+    if optimizer.get("optimizer_class") != "AdamW":
+        raise ValueError(f"{label} optimizer class is invalid")
+    _exact_integer(
+        optimizer.get("parameter_group_count"),
+        1,
+        label=f"{label} optimizer parameter-group count",
+    )
+    parameter_state_count = _positive_integer_field(
+        optimizer,
+        "parameter_state_count",
+        label=f"{label} optimizer parameter-state count",
+    )
+
+    scheduler = _required_mapping(
+        semantic.get("scheduler_live_state_match"),
+        label=f"{label} scheduler live-state match",
+    )
+    expected_scheduler = {
+        "exact_serialized_live_match": True,
+        "scheduler_count": 1,
+        "scheduler_class": "LambdaLR",
+        "interval": "step",
+        "name": "lr",
+        "last_epoch": expected_steps,
+        "step_count": expected_steps + 1,
+        "exact_model_spec_match": True,
+        "exact_callable_schedule_match": True,
+        "callable_schedule_index_checks": schedule_check_count,
+    }
+    if canonical_json_sha256(scheduler) != canonical_json_sha256(expected_scheduler):
+        raise ValueError(f"{label} scheduler live-state match is invalid")
+
+    sampler = _required_mapping(
+        semantic.get("sampler_live_state_match"),
+        label=f"{label} sampler live-state match",
+    )
+    if canonical_json_sha256(sampler) != canonical_json_sha256(
+        {
+            "exact_hosted_stream_contract_match": True,
+            "random_state_is_none": True,
+            "live_state_dict_available": False,
+            "sampler_class_module": "torch.utils.data.dataloader",
+            "sampler_class_name": "_InfiniteConstantSampler",
+        }
+    ):
+        raise ValueError(f"{label} sampler live-state match is invalid")
+
+    callback_key = (
+        "ModelCheckpoint{'monitor': None, 'mode': 'min', "
+        f"'every_n_train_steps': {expected_steps}, 'every_n_epochs': 0, "
+        "'train_time_interval': None}"
+    )
+    callback = _required_mapping(
+        semantic.get("model_checkpoint_live_state_match"),
+        label=f"{label} ModelCheckpoint live-state match",
+    )
+    if canonical_json_sha256(callback) != canonical_json_sha256(
+        {
+            "exact_serialized_live_match": True,
+            "model_checkpoint_callback_count": 1,
+            "state_key": callback_key,
+            "configuration_matches_pilot_contract": True,
+        }
+    ):
+        raise ValueError(f"{label} ModelCheckpoint live-state match is invalid")
+
+    hyperparameters = _required_mapping(
+        semantic.get("checkpoint_hyperparameters_match"),
+        label=f"{label} checkpoint hyperparameter match",
+    )
+    if canonical_json_sha256(hyperparameters) != canonical_json_sha256(
+        {
+            "hparams_name": "kwargs",
+            "exact_hyperparameter_keys": True,
+            "exact_checkpoint_preflight_config_match": True,
+            "exact_live_model_preflight_config_match": True,
+            "exact_live_hparams_preflight_config_match": True,
+            "exact_checkpoint_live_model_unresolved_config_match": True,
+            "exact_checkpoint_live_hparams_unresolved_config_match": True,
+            "resolved_config_sha256": config_sha256,
+        }
+    ):
+        raise ValueError(f"{label} checkpoint hyperparameter match is invalid")
+
+    configured_clip = trainer_config.get("gradient_clip_val")
+    configured_precision = trainer_config.get("precision")
+    precision_aliases = {
+        "16": "16-mixed",
+        "bf16": "bf16-mixed",
+        "32": "32-true",
+        "64": "64-true",
+        16: "16-mixed",
+        32: "32-true",
+        64: "64-true",
+    }
+    live_precision = precision_aliases.get(configured_precision, configured_precision)
+    configured_clip_algorithm = trainer_config.get("gradient_clip_algorithm")
+    effective_clip_algorithm = (
+        "norm" if configured_clip_algorithm is None else configured_clip_algorithm
+    )
+    if (
+        isinstance(configured_clip, bool)
+        or not isinstance(configured_clip, (int, float))
+        or not math.isfinite(configured_clip)
+        or configured_clip < 0.0
+        or not isinstance(live_precision, str)
+        or effective_clip_algorithm not in {"norm", "value"}
+    ):
+        raise ValueError(f"{label} resolved live-Trainer config is invalid")
+    trainer_match = _required_mapping(
+        semantic.get("trainer_live_configuration_match"),
+        label=f"{label} live Trainer configuration match",
+    )
+    if canonical_json_sha256(trainer_match) != canonical_json_sha256(
+        {
+            "exact_detect_anomaly_match": True,
+            "detect_anomaly": True,
+            "exact_gradient_clip_val_match": True,
+            "gradient_clip_val": float(configured_clip),
+            "exact_gradient_clip_algorithm_match": True,
+            "gradient_clip_algorithm": effective_clip_algorithm,
+            "exact_precision_match": True,
+            "configured_precision": str(configured_precision),
+            "live_precision": live_precision,
+        }
+    ):
+        raise ValueError(f"{label} live Trainer configuration match is invalid")
+
+    loop_state = _required_mapping(
+        semantic.get("checkpoint_loop_state_match"),
+        label=f"{label} checkpoint loop-state match",
+    )
+    if canonical_json_sha256(loop_state) != canonical_json_sha256(
+        {
+            "exact_serialized_progress_match": True,
+            "epoch": 0,
+            "optimizer_steps": expected_steps,
+            "accumulate_grad_batches": accumulation,
+            "microbatches": expected_steps * accumulation,
+        }
+    ):
+        raise ValueError(f"{label} checkpoint loop-state match is invalid")
+    return parameter_state_count
 
 
 def _conditioning_configuration(
@@ -2556,6 +2851,11 @@ def validate_runtime_config(
     expected_completion_contract: dict[str, object],
 ) -> None:
     record = _required_mapping(runtime, label="runtime config record")
+    _require_exact_keys(
+        record,
+        _PILOT_RUNTIME_CONFIG_KEYS,
+        label="runtime config record",
+    )
     _exact_integer(
         record.get("schema_version"),
         RUNTIME_CONFIG_SCHEMA_VERSION,
@@ -2572,6 +2872,11 @@ def validate_runtime_config(
         label="runtime config source revision",
     )
     source = _required_mapping(record.get("source"), label="runtime config source")
+    _require_exact_keys(
+        source,
+        {"head", "upstream"},
+        label="runtime config source",
+    )
     for key in ("head", "upstream"):
         _exact_string(
             source.get(key),
@@ -2613,6 +2918,7 @@ def validate_runtime_config(
     launch_manifest_claim = _validate_snapshot_claim(
         record.get("launch_manifest"),
         expected_path=expected_launch_manifest_path,
+        extra_keys={"selected_gpu_uuids"},
         label="runtime launch manifest evidence",
     )
     _exact_string(
@@ -2662,6 +2968,15 @@ def validate_training_summary(
         )
     if not isinstance(summary, dict):
         raise ValueError("training summary root must be a JSON object")
+    resolved_training_config = _required_mapping(
+        resolved_training_config,
+        label="resolved training configuration",
+    )
+    _exact_string(
+        canonical_json_sha256(resolved_training_config),
+        expected_config_sha256,
+        label="resolved training configuration content digest",
+    )
     _require_exact_keys(
         summary,
         {
@@ -2723,6 +3038,11 @@ def validate_training_summary(
     source = summary.get("source")
     if not isinstance(source, dict):
         raise ValueError("training summary source binding must be an object")
+    _require_exact_keys(
+        source,
+        {"head", "upstream"},
+        label="training summary source",
+    )
     _exact_string(
         source.get("head"),
         expected_source_revision,
@@ -2737,6 +3057,7 @@ def validate_training_summary(
     summary_manifest_claim = _validate_snapshot_claim(
         summary.get("launch_manifest"),
         expected_path=expected_launch_manifest_path,
+        extra_keys={"selected_gpu_uuids"},
         label="training summary launch manifest evidence",
     )
     _exact_string(
@@ -2752,6 +3073,11 @@ def validate_training_summary(
     completion = summary.get("completion_contract")
     if not isinstance(completion, dict):
         raise ValueError("training summary completion contract must be an object")
+    _require_exact_keys(
+        completion,
+        _SUMMARY_COMPLETION_CONTRACT_KEYS,
+        label="training summary completion contract",
+    )
     _exact_integer(
         completion.get("summary_schema_version"),
         expected_schema_version,
@@ -2792,6 +3118,7 @@ def validate_training_summary(
     runtime_config = _validate_snapshot_claim(
         summary.get("runtime_config"),
         expected_path=runtime_path,
+        extra_keys={"schema_version", "record_sha256"},
         label="runtime config evidence",
     )
     _exact_integer(
@@ -2808,6 +3135,11 @@ def validate_training_summary(
     observed = summary.get("observed_training_state")
     if not isinstance(observed, dict):
         raise ValueError("observed training state must be an object")
+    _require_exact_keys(
+        observed,
+        {"global_rank", "global_step", "world_size"},
+        label="observed training state",
+    )
     _exact_integer(observed.get("global_rank"), 0, label="observed global rank")
     _exact_integer(
         observed.get("global_step"),
@@ -2987,6 +3319,20 @@ def validate_training_summary(
     health = _required_mapping(
         summary.get("training_health"), label="training health evidence"
     )
+    _require_exact_keys(
+        health,
+        {
+            "scope",
+            "all_losses_finite",
+            "all_observed_gradients_finite",
+            "every_optimizer_step_had_a_nonzero_gradient",
+            "loss_checks",
+            "optimizer_step_checks",
+            "gradient_tensor_observations",
+            "gradient_element_observations",
+        },
+        label="training health evidence",
+    )
     if not isinstance(health.get("scope"), str) or not health["scope"]:
         raise ValueError("training health scope must be a nonempty string")
     for key, label in (
@@ -3028,10 +3374,36 @@ def validate_training_summary(
     final_checkpoint = _validate_snapshot_claim(
         summary.get("final_checkpoint"),
         expected_path=expected_final_checkpoint_path,
+        extra_keys={"semantic_audit"},
         label="final checkpoint evidence",
     )
     semantic = _required_mapping(
         final_checkpoint.get("semantic_audit"),
+        label="final checkpoint semantic audit",
+    )
+    _require_exact_keys(
+        semantic,
+        {
+            "deserialized",
+            "global_step",
+            "raw_model",
+            "ema",
+            "ema_metadata",
+            "optimizer",
+            "non_sentinel_checkpoint_tensors",
+            "checkpoint_python_floats",
+            "framework_nonfinite_sentinels",
+            "checkpoint_hyperparameters_match",
+            "checkpoint_loop_state_match",
+            "optimizer_live_state_match",
+            "scheduler_live_state_match",
+            "sampler_live_state_match",
+            "trainer_live_configuration_match",
+            "model_checkpoint_live_state_match",
+            "udlm_process_identity_verified",
+            "live_model_match",
+            "live_ema_match",
+        },
         label="final checkpoint semantic audit",
     )
     _required_true(
@@ -3048,9 +3420,23 @@ def validate_training_summary(
         ("raw_model", "serialized checkpoint raw model"),
         ("ema", "serialized checkpoint EMA"),
         ("optimizer", "serialized checkpoint optimizer"),
-        ("all_checkpoint_tensors", "all serialized checkpoint tensors"),
+        (
+            "non_sentinel_checkpoint_tensors",
+            "serialized non-sentinel checkpoint tensors",
+        ),
     ):
         _validate_finiteness_record(semantic.get(key), label=label)
+    _validate_framework_nonfinite_sentinels(
+        semantic.get("framework_nonfinite_sentinels"),
+        expected_steps=expected_max_steps,
+        label="checkpoint framework non-finite sentinels",
+    )
+    optimizer_parameter_state_count = _validate_auxiliary_checkpoint_records(
+        semantic,
+        expected_steps=expected_max_steps,
+        resolved_training_config=resolved_config,
+        label="checkpoint",
+    )
     _required_true(
         semantic,
         "udlm_process_identity_verified",
@@ -3058,6 +3444,11 @@ def validate_training_summary(
     )
     live_model = _required_mapping(
         semantic.get("live_model_match"), label="checkpoint/live-model match"
+    )
+    _require_exact_keys(
+        live_model,
+        {"exact_key_set", "exact_tensor_values", "tensor_count"},
+        label="checkpoint/live-model match",
     )
     _required_true(live_model, "exact_key_set", label="live-model exact-key flag")
     _required_true(
@@ -3070,6 +3461,11 @@ def validate_training_summary(
     )
     live_ema = _required_mapping(
         semantic.get("live_ema_match"), label="checkpoint/live-EMA match"
+    )
+    _require_exact_keys(
+        live_ema,
+        {"exact_tensor_values", "tensor_count"},
+        label="checkpoint/live-EMA match",
     )
     _required_true(
         live_ema,
@@ -3095,6 +3491,10 @@ def validate_training_summary(
     )
     if shadow_parameter_count != live_ema_tensor_count:
         raise ValueError("checkpoint EMA metadata count disagrees with live EMA")
+    if optimizer_parameter_state_count != shadow_parameter_count:
+        raise ValueError(
+            "checkpoint optimizer parameter-state count disagrees with EMA shadows"
+        )
     serialized_ema = _required_mapping(
         semantic.get("ema"), label="serialized checkpoint EMA"
     )
@@ -3126,6 +3526,11 @@ def validate_training_summary(
     finiteness = _required_mapping(
         summary.get("tensor_finiteness"), label="live tensor finiteness evidence"
     )
+    _require_exact_keys(
+        finiteness,
+        {"raw_model", "ema"},
+        label="live tensor finiteness evidence",
+    )
     for key, label in (
         ("raw_model", "live raw model"),
         ("ema", "live EMA"),
@@ -3149,8 +3554,28 @@ def validate_training_summary(
     )
     _exact_string(startup_mode, expected_startup_mode, label="startup mode")
     warm_start = startup.get("verified_mdlm_warm_start_report")
+    conditioning_parameter_tensors: int | None = None
     if startup_mode == "warm_start":
         report = _required_mapping(warm_start, label="MDLM warm-start report")
+        expected_warm_start_keys = {
+            "source_path",
+            "source_resolved_path",
+            "source_sha256",
+            "source_size_bytes",
+            "expected_source_sha256",
+            "byte_identity_verified_before_and_after_load",
+            "weights",
+            "parameter_tensors",
+        }
+        if conditioning_variant == "film_adaln":
+            expected_warm_start_keys.update(
+                {"conditioning_variant", "conditioning_parameter_tensors"}
+            )
+        _require_exact_keys(
+            report,
+            expected_warm_start_keys,
+            label="MDLM warm-start report",
+        )
         source_sha256 = _sha256_field(
             report, "source_sha256", label="warm-start source digest"
         )
@@ -3179,6 +3604,17 @@ def validate_training_summary(
         for key in ("source_path", "source_resolved_path"):
             if not isinstance(report.get(key), str) or not report[key]:
                 raise ValueError(f"warm-start {key} is invalid")
+        if conditioning_variant == "film_adaln":
+            _exact_string(
+                report.get("conditioning_variant"),
+                "film_adaln",
+                label="warm-start conditioning variant",
+            )
+            conditioning_parameter_tensors = _positive_integer_field(
+                report,
+                "conditioning_parameter_tensors",
+                label="warm-start conditioning parameter tensor count",
+            )
     elif warm_start is not None:
         raise ValueError("non-warm-start summary contains an MDLM warm-start report")
 
@@ -3221,6 +3657,14 @@ def validate_training_summary(
             screen.get("conditioning_gradient_contract"),
             screen.get("conditioning_gradient_contract_sha256"),
         )
+        expected_conditioning_parameter_tensors = sum(
+            len(group["parameters"]) for group in gradient_contract["groups"]
+        )
+        if conditioning_parameter_tensors != expected_conditioning_parameter_tensors:
+            raise ValueError(
+                "warm-start conditioning parameter tensor count disagrees with "
+                "the registered gradient contract"
+            )
         contract_counts = {
             group["group_id"]: sum(
                 math.prod(parameter["shape"]) for parameter in group["parameters"]
@@ -3480,6 +3924,7 @@ def build_exit_receipt(args: argparse.Namespace) -> tuple[dict[str, object], int
             current_manifest,
             launch_manifest_path,
             parsed.get("launch_manifest"),
+            extra_keys={"selected_gpu_uuids"},
             label="training summary launch manifest evidence",
         )
         manifest_evidence["matches_training_summary_snapshot"] = True
@@ -3491,6 +3936,7 @@ def build_exit_receipt(args: argparse.Namespace) -> tuple[dict[str, object], int
             current_runtime,
             runtime_config_path,
             parsed.get("runtime_config"),
+            extra_keys={"schema_version", "record_sha256"},
             label="runtime config evidence",
         )
         runtime_evidence["matches_training_summary_snapshot"] = True
@@ -3504,6 +3950,7 @@ def build_exit_receipt(args: argparse.Namespace) -> tuple[dict[str, object], int
             current_manifest,
             launch_manifest_path,
             runtime_mapping.get("launch_manifest"),
+            extra_keys={"selected_gpu_uuids"},
             label="runtime launch manifest evidence",
         )
         manifest_evidence["matches_runtime_config_snapshot"] = True
@@ -3568,6 +4015,7 @@ def build_exit_receipt(args: argparse.Namespace) -> tuple[dict[str, object], int
             current_checkpoint,
             final_checkpoint_path,
             parsed.get("final_checkpoint"),
+            extra_keys={"semantic_audit"},
             label="final checkpoint evidence",
         )
         checkpoint_evidence["matches_training_summary_snapshot"] = True

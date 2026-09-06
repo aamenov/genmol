@@ -14,6 +14,7 @@ import argparse
 import json
 import os
 import stat
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Sequence
 
@@ -99,6 +100,32 @@ def _require_direct_receipt(path: Path, *, label: str) -> None:
         )
 
 
+def _require_successful_receipt(path: Path, *, label: str) -> None:
+    _snapshot, payload = launch_train_pilot.stable_repository_artifact_snapshot(
+        path,
+        suffix=".json",
+        label=f"{label} completion receipt",
+    )
+    receipt = launch_train_pilot.strict_json_loads(
+        payload, label=f"{label} completion receipt"
+    )
+    if not isinstance(receipt, Mapping):
+        raise RuntimeError(f"{label} completion receipt is not a JSON object")
+    if (
+        receipt.get("schema_version")
+        != launch_train_pilot.PILOT_EXIT_STATUS_SCHEMA_VERSION
+        or receipt.get("status") != "completed"
+        or receipt.get("overall_status") != "completed"
+        or type(receipt.get("process_exit_status")) is not int
+        or receipt.get("process_exit_status") != 0
+    ):
+        raise RuntimeError(
+            f"{label} has a failed or malformed completion receipt; preserve this "
+            "source-revision namespace and retry the full R -> S -> E panel from "
+            "a new clean pushed descendant"
+        )
+
+
 def _completed_prefix(
     paths: tuple[tuple[str, Path, Path], ...],
 ) -> int:
@@ -118,6 +145,7 @@ def _completed_prefix(
             )
         _require_direct_directory(run_dir, label=f"{variant} health run")
         _require_direct_receipt(receipt_path, label=f"{variant} health run")
+        _require_successful_receipt(receipt_path, label=f"{variant} health run")
         completed += 1
     return completed
 

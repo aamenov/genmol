@@ -2,6 +2,7 @@ import json
 import sys
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 from omegaconf import OmegaConf
@@ -432,12 +433,27 @@ def test_pilot_config_digest_is_checked_and_recorded_once(tmp_path, monkeypatch)
             "data": "safe",
             "seed": 7,
             "loader": {"global_batch_size": 16, "batch_size": 2},
+            "optim": {
+                "weight_decay": 0,
+                "lr": 3e-4,
+                "beta1": 0.9,
+                "beta2": 0.999,
+                "eps": 1e-8,
+                "scheduler": {
+                    "name": "constant_with_linear_warmup",
+                    "warmup_updates": 2500,
+                    "horizon_updates": None,
+                    "decay_floor_lr": None,
+                },
+            },
             "trainer": {
                 "devices": 2,
                 "num_nodes": 1,
                 "max_steps": 10,
                 "accumulate_grad_batches": 4,
                 "detect_anomaly": True,
+                "gradient_clip_val": 1.0,
+                "precision": "bf16",
             },
             "callback": {
                 "dirpath": str(checkpoint_dir),
@@ -510,6 +526,11 @@ def test_pilot_config_digest_is_checked_and_recorded_once(tmp_path, monkeypatch)
         train_entrypoint._validate_and_record_pilot_config(config)
 
 
+class _FixtureIterableDataset(torch.utils.data.IterableDataset):
+    def __iter__(self):
+        return iter(())
+
+
 def _completion_fixture(tmp_path, monkeypatch):
     checkpoint_dir = tmp_path / "checkpoints"
     checkpoint_dir.mkdir()
@@ -518,8 +539,40 @@ def _completion_fixture(tmp_path, monkeypatch):
     checkpoint_path = checkpoint_dir / "10.ckpt"
     checkpoint_state = {"weight": torch.tensor([1.0, -2.0])}
     checkpoint_ema = [torch.tensor([0.5, 3.0])]
+    callback_key = train_entrypoint._model_checkpoint_callback_state_key(10)
+    callback_state = {
+        "monitor": None,
+        "best_model_score": None,
+        "best_model_path": str(checkpoint_path),
+        "current_score": None,
+        "dirpath": str(checkpoint_dir),
+        "best_k_models": {},
+        "kth_best_model_path": "",
+        "kth_value": torch.tensor(float("inf"), dtype=torch.float32),
+        "last_model_path": "",
+    }
+    base_parameter = torch.nn.Parameter(torch.ones(3))
+    conditioner_parameter = torch.nn.Parameter(torch.ones(2))
+    optimizer = torch.optim.AdamW(
+        [base_parameter, conditioner_parameter],
+        lr=3e-4,
+        betas=(0.9, 0.999),
+        eps=1e-8,
+        weight_decay=0,
+    )
+    scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer,
+        lr_lambda=lambda index: index / 2500 if index < 2500 else 1.0,
+    )
+    for _index in range(10):
+        base_parameter.grad = torch.full_like(base_parameter, 0.25)
+        conditioner_parameter.grad = torch.full_like(conditioner_parameter, 0.5)
+        optimizer.step()
+        scheduler.step()
+        optimizer.zero_grad(set_to_none=True)
     torch.save(
         {
+            "pytorch-lightning_version": "2.5.1",
             "global_step": 10,
             "state_dict": checkpoint_state,
             "ema": {
@@ -527,17 +580,10 @@ def _completion_fixture(tmp_path, monkeypatch):
                 "decay": 0.9999,
                 "num_updates": 10,
             },
-            "optimizer_states": [
-                {
-                    "state": {
-                        0: {
-                            "step": torch.tensor(10.0),
-                            "exp_avg": torch.tensor([0.1, -0.2]),
-                            "exp_avg_sq": torch.tensor([0.01, 0.04]),
-                        }
-                    }
-                }
-            ],
+            "optimizer_states": [optimizer.state_dict()],
+            "lr_schedulers": [scheduler.state_dict()],
+            "sampler": {"random_state": None},
+            "callbacks": {callback_key: callback_state},
         },
         checkpoint_path,
     )
@@ -547,12 +593,27 @@ def _completion_fixture(tmp_path, monkeypatch):
             "data": "safe",
             "seed": 7,
             "loader": {"global_batch_size": 16, "batch_size": 2},
+            "optim": {
+                "weight_decay": 0,
+                "lr": 3e-4,
+                "beta1": 0.9,
+                "beta2": 0.999,
+                "eps": 1e-8,
+                "scheduler": {
+                    "name": "constant_with_linear_warmup",
+                    "warmup_updates": 2500,
+                    "horizon_updates": None,
+                    "decay_floor_lr": None,
+                },
+            },
             "trainer": {
                 "devices": 2,
                 "num_nodes": 1,
                 "max_steps": 10,
                 "accumulate_grad_batches": 4,
                 "detect_anomaly": True,
+                "gradient_clip_val": 1.0,
+                "precision": "bf16",
             },
             "callback": {
                 "dirpath": str(checkpoint_dir),
@@ -569,6 +630,19 @@ def _completion_fixture(tmp_path, monkeypatch):
         }
     )
     resolved = OmegaConf.to_container(config, resolve=True, enum_to_str=True)
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    checkpoint.update(
+        {
+            "epoch": 0,
+            "hparams_name": "kwargs",
+            "hyper_parameters": {"config": config},
+            "loops": train_entrypoint._expected_lightning_loop_state(
+                optimizer_steps=10,
+                accumulation=4,
+            ),
+        }
+    )
+    torch.save(checkpoint, checkpoint_path)
     selected_gpu_uuids = ["GPU-test-a", "GPU-test-b"]
     manifest_path, manifest_sha256, manifest_snapshot = _launch_manifest_fixture(
         tmp_path, selected_gpu_uuids
@@ -614,6 +688,15 @@ def _completion_fixture(tmp_path, monkeypatch):
         health_callback.on_before_backward(None, None, torch.tensor(1.25))
         parameter.grad = torch.tensor([0.5])
         health_callback.on_before_optimizer_step(None, health_module, None)
+    checkpoint_callback = train_entrypoint.L.pytorch.callbacks.ModelCheckpoint(
+        dirpath=str(checkpoint_dir),
+        filename="{step}",
+        save_top_k=-1,
+        auto_insert_metric_name=False,
+        enable_version_counter=False,
+        every_n_train_steps=10,
+    )
+    checkpoint_callback.load_state_dict(callback_state)
     trainer = SimpleNamespace(
         is_global_zero=True,
         global_rank=0,
@@ -622,18 +705,33 @@ def _completion_fixture(tmp_path, monkeypatch):
         num_nodes=1,
         max_steps=10,
         accumulate_grad_batches=4,
-        train_dataloader=SimpleNamespace(batch_size=2),
-        callbacks=[health_callback],
+        _detect_anomaly=True,
+        gradient_clip_val=1.0,
+        gradient_clip_algorithm=None,
+        precision="bf16-mixed",
+        train_dataloader=torch.utils.data.DataLoader(
+            _FixtureIterableDataset(),
+            batch_size=2,
+        ),
+        callbacks=[checkpoint_callback, health_callback],
+        optimizers=[optimizer],
+        lr_scheduler_configs=[
+            SimpleNamespace(scheduler=scheduler, interval="step", name="lr")
+        ],
     )
-    base_parameter = torch.nn.Parameter(torch.ones(3))
-    conditioner_parameter = torch.nn.Parameter(torch.ones(2))
     backbone = SimpleNamespace(
+        parameters=lambda: iter([base_parameter, conditioner_parameter]),
         named_parameters=lambda: [
             ("base_weight", base_parameter),
             ("time_conditioner.weight", conditioner_parameter),
-        ]
+        ],
     )
     model = SimpleNamespace(
+        config=config,
+        hparams={"config": config},
+        optimizer_scheduler_spec=train_entrypoint.optimizer_scheduler_spec(
+            resolved["optim"]
+        ),
         backbone=backbone,
         named_parameters=lambda: [
             ("backbone.base_weight", base_parameter),
@@ -932,7 +1030,95 @@ def test_pilot_completion_summary_binds_and_verifies_every_artifact(
         "num_updates": 10,
     }
     assert checkpoint_audit["optimizer"]["all_finite"] is True
-    assert checkpoint_audit["all_checkpoint_tensors"]["all_finite"] is True
+    assert checkpoint_audit["non_sentinel_checkpoint_tensors"]["all_finite"] is True
+    callback_key = train_entrypoint._model_checkpoint_callback_state_key(10)
+    assert checkpoint_audit["framework_nonfinite_sentinels"] == {
+        "all_expected_and_only_expected_verified": True,
+        "nonfinite_tensor_count": 1,
+        "nonfinite_element_count": 1,
+        "records": [
+            {
+                "tensor_path_components": [
+                    "checkpoint",
+                    "callbacks",
+                    callback_key,
+                    "kth_value",
+                ],
+                "framework": "lightning",
+                "framework_version": "2.5.1",
+                "callback": "ModelCheckpoint",
+                "field": "kth_value",
+                "dtype": "float32",
+                "shape": [],
+                "value": "+inf",
+                "meaning": "unranked_min_mode_checkpoint_sentinel",
+                "excluded_from_non_sentinel_finiteness": True,
+            }
+        ],
+    }
+    assert checkpoint_audit["checkpoint_python_floats"]["all_finite"] is True
+    assert checkpoint_audit["checkpoint_python_floats"]["floating_scalar_count"] > 0
+    assert checkpoint_audit["optimizer_live_state_match"] == {
+        "exact_serialized_live_match": True,
+        "optimizer_count": 1,
+        "optimizer_class": "AdamW",
+        "parameter_group_count": 1,
+        "parameter_state_count": 2,
+        "exact_resolved_config_match": True,
+    }
+    assert checkpoint_audit["scheduler_live_state_match"] == {
+        "exact_serialized_live_match": True,
+        "scheduler_count": 1,
+        "scheduler_class": "LambdaLR",
+        "interval": "step",
+        "name": "lr",
+        "last_epoch": 10,
+        "step_count": 11,
+        "exact_model_spec_match": True,
+        "exact_callable_schedule_match": True,
+        "callable_schedule_index_checks": 2502,
+    }
+    assert checkpoint_audit["sampler_live_state_match"] == {
+        "exact_hosted_stream_contract_match": True,
+        "random_state_is_none": True,
+        "live_state_dict_available": False,
+        "sampler_class_module": "torch.utils.data.dataloader",
+        "sampler_class_name": "_InfiniteConstantSampler",
+    }
+    assert checkpoint_audit["trainer_live_configuration_match"] == {
+        "exact_detect_anomaly_match": True,
+        "detect_anomaly": True,
+        "exact_gradient_clip_val_match": True,
+        "gradient_clip_val": 1.0,
+        "exact_gradient_clip_algorithm_match": True,
+        "gradient_clip_algorithm": "norm",
+        "exact_precision_match": True,
+        "configured_precision": "bf16",
+        "live_precision": "bf16-mixed",
+    }
+    assert checkpoint_audit["model_checkpoint_live_state_match"] == {
+        "exact_serialized_live_match": True,
+        "model_checkpoint_callback_count": 1,
+        "state_key": callback_key,
+        "configuration_matches_pilot_contract": True,
+    }
+    assert checkpoint_audit["checkpoint_hyperparameters_match"] == {
+        "hparams_name": "kwargs",
+        "exact_hyperparameter_keys": True,
+        "exact_checkpoint_preflight_config_match": True,
+        "exact_live_model_preflight_config_match": True,
+        "exact_live_hparams_preflight_config_match": True,
+        "exact_checkpoint_live_model_unresolved_config_match": True,
+        "exact_checkpoint_live_hparams_unresolved_config_match": True,
+        "resolved_config_sha256": contract["GENMOL_TRAIN_EXPECTED_CONFIG_SHA256"],
+    }
+    assert checkpoint_audit["checkpoint_loop_state_match"] == {
+        "exact_serialized_progress_match": True,
+        "epoch": 0,
+        "optimizer_steps": 10,
+        "accumulate_grad_batches": 4,
+        "microbatches": 40,
+    }
     assert checkpoint_audit["udlm_process_identity_verified"] is True
     assert checkpoint_audit["live_model_match"]["exact_tensor_values"] is True
     assert checkpoint_audit["live_ema_match"]["exact_tensor_values"] is True
@@ -1001,7 +1187,9 @@ def test_pilot_training_accounting_rejects_type_or_config_mismatch(
     if mutation == "boolean_seed":
         config.seed = True
     elif mutation == "runtime_micro_batch":
-        trainer.train_dataloader.batch_size = 1
+        trainer.train_dataloader = torch.utils.data.DataLoader(
+            _FixtureIterableDataset(), batch_size=1
+        )
     elif mutation == "runtime_accumulation":
         trainer.accumulate_grad_batches = 3
     elif mutation == "configured_global_batch":
@@ -1186,7 +1374,7 @@ def test_pilot_completion_rejects_undecodable_checkpoint(tmp_path, monkeypatch):
 def test_pilot_checkpoint_audit_rejects_path_swap_during_deserialization(
     tmp_path, monkeypatch
 ):
-    _config, contract, _preflight, _trainer, model, _warm_start = _completion_fixture(
+    _config, contract, preflight, trainer, model, _warm_start = _completion_fixture(
         tmp_path, monkeypatch
     )
     checkpoint_path = contract["final_checkpoint_path"]
@@ -1217,6 +1405,9 @@ def test_pilot_checkpoint_audit_rejects_path_swap_during_deserialization(
             checkpoint_path,
             expected_steps=10,
             model=model,
+            trainer=trainer,
+            expected_resolved_config=preflight["resolved_training_config"],
+            expected_config_sha256=contract["GENMOL_TRAIN_EXPECTED_CONFIG_SHA256"],
         )
     assert swapped is True
 
@@ -1277,6 +1468,275 @@ def test_pilot_completion_rejects_invalid_serialized_checkpoint(
             startup_mode="warm_start",
             warm_start_report=warm_start,
         )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("nan", "exact scalar float32 positive-infinity sentinel"),
+        ("negative_inf", "exact scalar float32 positive-infinity sentinel"),
+        ("vector_inf", "exact scalar float32 positive-infinity sentinel"),
+        ("wrong_checkpoint_path", "unranked final-step checkpoint contract"),
+        ("nonempty_top_k", "unranked final-step checkpoint contract"),
+        ("wrong_callback_key", "callback-state keys disagree"),
+        ("wrong_lightning_version", "Lightning version"),
+        ("second_nonfinite", "serialized checkpoint optimizer state"),
+        ("nonfinite_optimizer", "serialized checkpoint optimizer state"),
+    ],
+)
+def test_pilot_checkpoint_allows_only_the_exact_lightning_sentinel(
+    tmp_path, monkeypatch, mutation, message
+):
+    config, contract, preflight, trainer, model, warm_start = _completion_fixture(
+        tmp_path, monkeypatch
+    )
+    checkpoint = torch.load(
+        contract["final_checkpoint_path"], map_location="cpu", weights_only=False
+    )
+    callback_key = train_entrypoint._model_checkpoint_callback_state_key(10)
+    callback_state = checkpoint["callbacks"][callback_key]
+    if mutation == "nan":
+        callback_state["kth_value"] = torch.tensor(float("nan"))
+    elif mutation == "negative_inf":
+        callback_state["kth_value"] = torch.tensor(float("-inf"))
+    elif mutation == "vector_inf":
+        callback_state["kth_value"] = torch.tensor([float("inf")])
+    elif mutation == "wrong_checkpoint_path":
+        callback_state["best_model_path"] = str(tmp_path / "other.ckpt")
+    elif mutation == "nonempty_top_k":
+        callback_state["best_k_models"] = {"other.ckpt": torch.tensor(1.0)}
+    elif mutation == "wrong_callback_key":
+        checkpoint["callbacks"][f"{callback_key}-tampered"] = checkpoint[
+            "callbacks"
+        ].pop(callback_key)
+    elif mutation == "wrong_lightning_version":
+        checkpoint["pytorch-lightning_version"] = "2.5.0"
+    elif mutation == "second_nonfinite":
+        checkpoint["optimizer_states"][0]["state"][0]["unexpected_nonfinite"] = (
+            torch.tensor(float("inf"))
+        )
+    elif mutation == "nonfinite_optimizer":
+        checkpoint["optimizer_states"][0]["state"][0]["exp_avg"] = torch.tensor(
+            [float("nan")]
+        )
+    else:  # pragma: no cover - the parameter table is exhaustive
+        raise AssertionError(mutation)
+    torch.save(checkpoint, contract["final_checkpoint_path"])
+
+    with pytest.raises((RuntimeError, FloatingPointError), match=message):
+        train_entrypoint._write_pilot_training_summary(
+            config=config,
+            trainer=trainer,
+            model=model,
+            preflight_record=preflight,
+            startup_mode="warm_start",
+            warm_start_report=warm_start,
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("missing_hyperparameters", "hyper_parameters must contain exactly config"),
+        ("resolved_hyperparameter_drift", "checkpoint/preflight resolved config"),
+        ("alternate_interpolation", "checkpoint/live-model unresolved config"),
+        ("loop_progress", "serialized Lightning loop state"),
+        ("optimizer_config", "AdamW/resolved-config parameter group"),
+        ("scheduler_callable", "LambdaLR callable disagrees"),
+        ("wrong_sampler", "unexpected hosted-stream sampler"),
+        ("live_callback", "live ModelCheckpoint disagrees"),
+        ("python_float", "non-finite serialized checkpoint Python float"),
+        ("numpy_array", "unsupported NumPy numeric leaf"),
+        ("unknown_top_level", "top-level keys disagree"),
+        ("opaque_top_level", "top-level keys disagree"),
+        ("ema_finite_extra", "EMA keys disagree"),
+        ("ema_opaque_extra", "EMA keys disagree"),
+    ],
+)
+def test_pilot_checkpoint_rejects_semantic_state_drift(
+    tmp_path, monkeypatch, mutation, message
+):
+    config, contract, preflight, trainer, model, warm_start = _completion_fixture(
+        tmp_path, monkeypatch
+    )
+    checkpoint_path = contract["final_checkpoint_path"]
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    if mutation == "missing_hyperparameters":
+        checkpoint["hyper_parameters"] = {}
+    elif mutation == "resolved_hyperparameter_drift":
+        checkpoint["hyper_parameters"]["config"].data = "other"
+    elif mutation == "alternate_interpolation":
+        monkeypatch.delenv("UDLM_AUDIT_FAKE_DATA", raising=False)
+        alternate = OmegaConf.create(
+            OmegaConf.to_container(config, resolve=False, enum_to_str=True)
+        )
+        alternate.data = "${oc.env:UDLM_AUDIT_FAKE_DATA,safe}"
+        assert OmegaConf.to_container(alternate, resolve=True)["data"] == "safe"
+        checkpoint["hyper_parameters"]["config"] = alternate
+    elif mutation == "loop_progress":
+        checkpoint["loops"]["fit_loop"]["epoch_loop.batch_progress"]["total"][
+            "ready"
+        ] -= 1
+    elif mutation == "optimizer_config":
+        trainer.optimizers[0].param_groups[0]["betas"] = (0.8, 0.999)
+        checkpoint["optimizer_states"] = [trainer.optimizers[0].state_dict()]
+    elif mutation == "scheduler_callable":
+        trainer.lr_scheduler_configs[0].scheduler.lr_lambdas[0] = lambda _index: 1.0
+    elif mutation == "wrong_sampler":
+        trainer.train_dataloader = SimpleNamespace(
+            batch_size=2,
+            sampler=SimpleNamespace(),
+        )
+    elif mutation == "live_callback":
+        trainer.callbacks[0].mode = "max"
+    elif mutation == "python_float":
+        checkpoint["ema"]["unexpected_python_float"] = float("inf")
+    elif mutation == "numpy_array":
+        checkpoint["ema"]["unexpected_numpy"] = np.array([np.nan], dtype=np.float32)
+    elif mutation == "unknown_top_level":
+        checkpoint["unexpected"] = "finite but outside the exact schema"
+    elif mutation == "opaque_top_level":
+        checkpoint["opaque_extra"] = SimpleNamespace(hidden=torch.tensor(float("nan")))
+    elif mutation == "ema_finite_extra":
+        checkpoint["ema"]["unexpected"] = "finite but outside the exact schema"
+    elif mutation == "ema_opaque_extra":
+        checkpoint["ema"]["opaque_extra"] = SimpleNamespace(
+            hidden=torch.tensor(float("nan"))
+        )
+    else:  # pragma: no cover - the parameter table is exhaustive
+        raise AssertionError(mutation)
+    torch.save(checkpoint, checkpoint_path)
+
+    with pytest.raises((RuntimeError, FloatingPointError), match=message):
+        train_entrypoint._write_pilot_training_summary(
+            config=config,
+            trainer=trainer,
+            model=model,
+            preflight_record=preflight,
+            startup_mode="warm_start",
+            warm_start_report=warm_start,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("_detect_anomaly", False, "did not enable anomaly detection"),
+        ("gradient_clip_val", 0.5, "gradient clipping disagrees"),
+        (
+            "gradient_clip_algorithm",
+            SimpleNamespace(value="value"),
+            "gradient-clip algorithm disagrees",
+        ),
+        ("precision", "32-true", "precision disagrees"),
+    ],
+)
+def test_pilot_completion_rejects_live_trainer_config_drift(
+    tmp_path, monkeypatch, field, value, message
+):
+    config, _contract, preflight, trainer, model, warm_start = _completion_fixture(
+        tmp_path, monkeypatch
+    )
+    setattr(trainer, field, value)
+
+    with pytest.raises(RuntimeError, match=message):
+        train_entrypoint._write_pilot_training_summary(
+            config=config,
+            trainer=trainer,
+            model=model,
+            preflight_record=preflight,
+            startup_mode="warm_start",
+            warm_start_report=warm_start,
+        )
+
+
+@pytest.mark.parametrize(
+    ("algorithm_config", "live_algorithm", "accepted"),
+    [
+        ({}, None, True),
+        ({"gradient_clip_algorithm": None}, None, True),
+        ({"gradient_clip_algorithm": "norm"}, SimpleNamespace(value="norm"), True),
+        (
+            {"gradient_clip_algorithm": "value"},
+            SimpleNamespace(value="value"),
+            True,
+        ),
+        ({"gradient_clip_algorithm": "norm"}, None, False),
+        ({}, SimpleNamespace(value="norm"), False),
+        (
+            {"gradient_clip_algorithm": "norm"},
+            SimpleNamespace(value="value"),
+            False,
+        ),
+    ],
+)
+def test_live_trainer_gradient_clip_algorithm_contract(
+    algorithm_config, live_algorithm, accepted
+):
+    trainer_config = {
+        "detect_anomaly": True,
+        "gradient_clip_val": 1.0,
+        "precision": "bf16",
+        **algorithm_config,
+    }
+    trainer = SimpleNamespace(
+        _detect_anomaly=True,
+        gradient_clip_val=1.0,
+        gradient_clip_algorithm=live_algorithm,
+        precision="bf16-mixed",
+    )
+
+    if accepted:
+        result = train_entrypoint._validated_live_trainer_configuration(
+            {"trainer": trainer_config}, trainer
+        )
+        assert result["gradient_clip_algorithm"] == (
+            algorithm_config.get("gradient_clip_algorithm") or "norm"
+        )
+    else:
+        with pytest.raises(RuntimeError, match="gradient-clip algorithm disagrees"):
+            train_entrypoint._validated_live_trainer_configuration(
+                {"trainer": trainer_config}, trainer
+            )
+
+
+def test_checkpoint_top_level_schema_requires_conditional_udlm_metadata(
+    tmp_path, monkeypatch
+):
+    _config, contract, _preflight, _trainer, model, _warm_start = _completion_fixture(
+        tmp_path, monkeypatch
+    )
+
+    class _CategoricalProcess:
+        pass
+
+    monkeypatch.setattr(
+        train_entrypoint, "ContinuousCategoricalDiffusion", _CategoricalProcess
+    )
+    model.mdlm = _CategoricalProcess()
+    model.udlm_conditioning_metadata = object()
+    checkpoint = torch.load(
+        contract["final_checkpoint_path"], map_location="cpu", weights_only=False
+    )
+    checkpoint[train_entrypoint.UDLM_PRIOR_CHECKPOINT_KEY] = {}
+    checkpoint[train_entrypoint.UDLM_CONDITIONING_CHECKPOINT_KEY] = {}
+
+    train_entrypoint._validated_checkpoint_top_level_schema(checkpoint, model=model)
+
+    checkpoint.pop(train_entrypoint.UDLM_PRIOR_CHECKPOINT_KEY)
+    with pytest.raises(RuntimeError, match="top-level keys disagree"):
+        train_entrypoint._validated_checkpoint_top_level_schema(checkpoint, model=model)
+
+
+def test_checkpoint_tensor_walk_does_not_resolve_hydra_interpolations():
+    unresolved = OmegaConf.create({"value": "${not_registered:anything}"})
+
+    assert list(
+        train_entrypoint._nested_named_tensors(
+            {"hyper_parameters": unresolved, "weight": torch.tensor([1.0])},
+            prefix="checkpoint",
+        )
+    ) == [('checkpoint["weight"]', torch.tensor([1.0]))]
 
 
 def test_nonpilot_completion_and_callbacks_are_no_ops(tmp_path, monkeypatch):

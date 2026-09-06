@@ -28,6 +28,8 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 
+import numpy as np
+
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 _PILOT_ENVIRONMENT_KEYS = {
@@ -45,8 +47,9 @@ _PILOT_ENVIRONMENT_KEYS = {
     "GENMOL_TRAIN_SELECTED_GPU_UUIDS_JSON",
 }
 _RUNTIME_CONFIG_SCHEMA_VERSION = 2
-_TRAINING_SUMMARY_SCHEMA_VERSION = 4
+_TRAINING_SUMMARY_SCHEMA_VERSION = 5
 _MAX_TRAINING_SEED = 2**32 - 1
+_PINNED_LIGHTNING_VERSION = "2.5.1"
 _HOSTED_STREAM_RANK_PARTITION_POLICY = (
     "huggingface_split_dataset_by_node_disjoint_rank_streams"
 )
@@ -497,7 +500,14 @@ import lightning as L
 import omegaconf
 import torch
 from genmol.backbone import is_conditioning_parameter_name
-from genmol.model import GenMol
+from genmol.diffusion import ContinuousCategoricalDiffusion
+from genmol.model import (
+    GenMol,
+    UDLM_CONDITIONING_CHECKPOINT_KEY,
+    UDLM_PRIOR_CHECKPOINT_KEY,
+    optimizer_scheduler_multiplier,
+    optimizer_scheduler_spec,
+)
 from genmol.utils.checkpoint_io import verified_checkpoint_file
 from genmol.utils.utils_data import get_dataloader, get_last_checkpoint
 
@@ -1400,19 +1410,884 @@ def _floating_tensor_finiteness(named_tensors, *, label):
     }
 
 
-def _nested_named_tensors(value, *, prefix):
-    """Yield every tensor in a checkpoint with a deterministic diagnostic name."""
+def _nested_path_leaves(value, *, path):
+    """Yield nested leaves with structural path components and no interpolation."""
 
-    if isinstance(value, torch.Tensor):
-        yield prefix, value
+    if isinstance(value, omegaconf.DictConfig):
+        for key, item in value.items_ex(resolve=False):
+            yield from _nested_path_leaves(item, path=(*path, key))
+        return
+    if isinstance(value, omegaconf.ListConfig):
+        for index, item in enumerate(value._iter_ex(resolve=False)):
+            yield from _nested_path_leaves(item, path=(*path, index))
         return
     if isinstance(value, Mapping):
         for key, item in value.items():
-            yield from _nested_named_tensors(item, prefix=f"{prefix}.{key}")
+            yield from _nested_path_leaves(item, path=(*path, key))
         return
     if isinstance(value, (list, tuple)):
         for index, item in enumerate(value):
-            yield from _nested_named_tensors(item, prefix=f"{prefix}[{index}]")
+            yield from _nested_path_leaves(item, path=(*path, index))
+        return
+    yield path, value
+
+
+def _format_structural_path(path):
+    rendered = str(path[0])
+    for component in path[1:]:
+        if isinstance(component, int):
+            rendered += f"[{component}]"
+        else:
+            rendered += f"[{json.dumps(str(component), ensure_ascii=False)}]"
+    return rendered
+
+
+def _nested_named_tensors(value, *, prefix):
+    """Yield every tensor with an unambiguous structural diagnostic path."""
+
+    for path, item in _nested_path_leaves(value, path=(prefix,)):
+        if isinstance(item, torch.Tensor):
+            yield _format_structural_path(path), item
+
+
+def _python_float_finiteness(value, *, prefix, label):
+    floating_scalar_count = 0
+    for path, item in _nested_path_leaves(value, path=(prefix,)):
+        if isinstance(item, (np.ndarray, np.generic)):
+            raise RuntimeError(
+                f"unsupported NumPy numeric leaf in {label}: "
+                f"{_format_structural_path(path)}"
+            )
+        if type(item) is not float:
+            continue
+        floating_scalar_count += 1
+        if not math.isfinite(item):
+            raise FloatingPointError(
+                f"non-finite {label} Python float: {_format_structural_path(path)}"
+            )
+    return {
+        "all_finite": True,
+        "floating_scalar_count": floating_scalar_count,
+    }
+
+
+def _exact_nested_state_match(serialized, live, *, label, path=()):
+    """Require exact recursive types, keys, shapes, dtypes, and values."""
+
+    diagnostic = label if not path else f"{label} {_format_structural_path(path)}"
+    if isinstance(serialized, torch.Tensor) or isinstance(live, torch.Tensor):
+        if not isinstance(serialized, torch.Tensor) or not isinstance(
+            live, torch.Tensor
+        ):
+            raise RuntimeError(f"{diagnostic} tensor type disagrees")
+        if (
+            serialized.device.type == "meta"
+            or live.device.type == "meta"
+            or serialized.shape != live.shape
+            or serialized.dtype != live.dtype
+            or not torch.equal(serialized.detach().cpu(), live.detach().cpu())
+        ):
+            raise RuntimeError(f"{diagnostic} tensor value disagrees")
+        return
+    if isinstance(serialized, Mapping) or isinstance(live, Mapping):
+        if not isinstance(serialized, Mapping) or not isinstance(live, Mapping):
+            raise RuntimeError(f"{diagnostic} mapping type disagrees")
+        if set(serialized) != set(live):
+            raise RuntimeError(f"{diagnostic} mapping keys disagree")
+        for key in serialized:
+            _exact_nested_state_match(
+                serialized[key], live[key], label=label, path=(*path, key)
+            )
+        return
+    if isinstance(serialized, (list, tuple)) or isinstance(live, (list, tuple)):
+        if type(serialized) is not type(live) or len(serialized) != len(live):
+            raise RuntimeError(f"{diagnostic} sequence structure disagrees")
+        for index, (serialized_item, live_item) in enumerate(
+            zip(serialized, live, strict=True)
+        ):
+            _exact_nested_state_match(
+                serialized_item,
+                live_item,
+                label=label,
+                path=(*path, index),
+            )
+        return
+    if type(serialized) is not type(live) or serialized != live:
+        raise RuntimeError(f"{diagnostic} scalar value disagrees")
+
+
+def _validated_checkpoint_top_level_schema(checkpoint, *, model):
+    """Require exactly the Lightning and conditional UDLM checkpoint records."""
+
+    expected_keys = {
+        "callbacks",
+        "ema",
+        "epoch",
+        "global_step",
+        "hparams_name",
+        "hyper_parameters",
+        "loops",
+        "lr_schedulers",
+        "optimizer_states",
+        "pytorch-lightning_version",
+        "sampler",
+        "state_dict",
+    }
+    if type(getattr(model, "mdlm", None)) is ContinuousCategoricalDiffusion:
+        expected_keys.add(UDLM_PRIOR_CHECKPOINT_KEY)
+    if getattr(model, "udlm_conditioning_metadata", None) is not None:
+        expected_keys.add(UDLM_CONDITIONING_CHECKPOINT_KEY)
+    observed_keys = set(checkpoint)
+    if observed_keys != expected_keys:
+        missing = sorted(expected_keys - observed_keys)
+        unexpected = sorted(repr(key) for key in observed_keys - expected_keys)
+        raise RuntimeError(
+            "pilot checkpoint top-level keys disagree with the exact schema: "
+            f"missing={missing}, unexpected={unexpected}"
+        )
+
+
+def _model_checkpoint_callback_state_key(expected_steps):
+    return (
+        "ModelCheckpoint{'monitor': None, 'mode': 'min', "
+        f"'every_n_train_steps': {expected_steps}, 'every_n_epochs': 0, "
+        "'train_time_interval': None}"
+    )
+
+
+def _validated_lightning_checkpoint_sentinel(
+    checkpoint, *, checkpoint_path, expected_steps, trainer
+):
+    """Verify Lightning's sole legitimate non-finite bookkeeping tensor.
+
+    Lightning 2.5.1 initializes ``ModelCheckpoint.kth_value`` to positive
+    infinity for ``mode='min'``.  With the pilot's ``monitor=None`` and
+    ``save_top_k=-1`` contract, that value remains the unranked-checkpoint
+    sentinel when the final checkpoint is serialized.  It is framework state,
+    not model, EMA, optimizer, or scheduler state, and is accepted only after
+    the complete callback record is matched to the final checkpoint contract.
+    """
+
+    framework_version = checkpoint.get("pytorch-lightning_version")
+    if framework_version != _PINNED_LIGHTNING_VERSION:
+        raise RuntimeError(
+            "pilot checkpoint Lightning version "
+            f"{framework_version!r}; expected {_PINNED_LIGHTNING_VERSION!r}"
+        )
+    if L.__version__ != _PINNED_LIGHTNING_VERSION:
+        raise RuntimeError(
+            "pilot runtime Lightning version "
+            f"{L.__version__!r}; expected {_PINNED_LIGHTNING_VERSION!r}"
+        )
+    callbacks = checkpoint.get("callbacks")
+    if not isinstance(callbacks, Mapping):
+        raise RuntimeError("pilot checkpoint has no callback-state mapping")
+    callback_key = _model_checkpoint_callback_state_key(expected_steps)
+    if set(callbacks) != {callback_key}:
+        raise RuntimeError(
+            "pilot checkpoint callback-state keys disagree with the exact "
+            "ModelCheckpoint contract"
+        )
+    state = callbacks[callback_key]
+    if not isinstance(state, Mapping):
+        raise RuntimeError("pilot ModelCheckpoint state is not a mapping")
+    expected_state_keys = {
+        "monitor",
+        "best_model_score",
+        "best_model_path",
+        "current_score",
+        "dirpath",
+        "best_k_models",
+        "kth_best_model_path",
+        "kth_value",
+        "last_model_path",
+    }
+    if set(state) != expected_state_keys:
+        raise RuntimeError("pilot ModelCheckpoint state keys are invalid")
+    checkpoint_path = Path(os.path.abspath(os.fspath(checkpoint_path)))
+    if (
+        state.get("monitor") is not None
+        or state.get("best_model_score") is not None
+        or state.get("current_score") is not None
+        or state.get("best_model_path") != str(checkpoint_path)
+        or state.get("dirpath") != str(checkpoint_path.parent)
+        or state.get("best_k_models") != {}
+        or state.get("kth_best_model_path") != ""
+        or state.get("last_model_path") != ""
+    ):
+        raise RuntimeError(
+            "pilot ModelCheckpoint state disagrees with the unranked final-step "
+            "checkpoint contract"
+        )
+    sentinel = state.get("kth_value")
+    if (
+        not isinstance(sentinel, torch.Tensor)
+        or sentinel.dtype != torch.float32
+        or sentinel.device.type != "cpu"
+        or sentinel.shape != torch.Size([])
+        or not bool(torch.isposinf(sentinel).item())
+    ):
+        raise FloatingPointError(
+            "pilot ModelCheckpoint kth_value is not the exact scalar float32 "
+            "positive-infinity sentinel"
+        )
+    live_callbacks = getattr(trainer, "callbacks", None)
+    model_checkpoint_callbacks = (
+        []
+        if not isinstance(live_callbacks, (list, tuple))
+        else [
+            callback
+            for callback in live_callbacks
+            if isinstance(callback, L.pytorch.callbacks.ModelCheckpoint)
+        ]
+    )
+    if len(model_checkpoint_callbacks) != 1:
+        raise RuntimeError("pilot must have exactly one live ModelCheckpoint callback")
+    live_callback = model_checkpoint_callbacks[0]
+    if (
+        live_callback.state_key != callback_key
+        or live_callback.monitor is not None
+        or live_callback.mode != "min"
+        or live_callback.save_top_k != -1
+        or live_callback.save_last is not None
+        or live_callback.save_weights_only is not False
+        or live_callback.filename != "{step}"
+        or live_callback.auto_insert_metric_name is not False
+        or live_callback._enable_version_counter is not False
+        or live_callback._every_n_train_steps != expected_steps
+        or live_callback._every_n_epochs != 0
+        or live_callback._train_time_interval is not None
+        or live_callback._save_on_train_epoch_end is not None
+        or Path(os.path.abspath(os.fspath(live_callback.dirpath)))
+        != checkpoint_path.parent
+    ):
+        raise RuntimeError(
+            "pilot live ModelCheckpoint disagrees with the exact final-step contract"
+        )
+    _exact_nested_state_match(
+        state,
+        live_callback.state_dict(),
+        label="pilot serialized/live ModelCheckpoint state",
+    )
+    tensor_path = ("checkpoint", "callbacks", callback_key, "kth_value")
+    return (
+        tensor_path,
+        sentinel,
+        {
+            "all_expected_and_only_expected_verified": True,
+            "nonfinite_tensor_count": 1,
+            "nonfinite_element_count": 1,
+            "records": [
+                {
+                    "tensor_path_components": list(tensor_path),
+                    "framework": "lightning",
+                    "framework_version": _PINNED_LIGHTNING_VERSION,
+                    "callback": "ModelCheckpoint",
+                    "field": "kth_value",
+                    "dtype": "float32",
+                    "shape": [],
+                    "value": "+inf",
+                    "meaning": "unranked_min_mode_checkpoint_sentinel",
+                    "excluded_from_non_sentinel_finiteness": True,
+                }
+            ],
+        },
+        {
+            "exact_serialized_live_match": True,
+            "model_checkpoint_callback_count": 1,
+            "state_key": callback_key,
+            "configuration_matches_pilot_contract": True,
+        },
+    )
+
+
+def _resolved_omegaconf_mapping(value, *, label):
+    if not isinstance(value, omegaconf.DictConfig):
+        raise RuntimeError(f"{label} must be an OmegaConf DictConfig")
+    try:
+        resolved = omegaconf.OmegaConf.to_container(
+            value,
+            resolve=True,
+            enum_to_str=True,
+        )
+    except Exception as error:
+        raise RuntimeError(f"{label} cannot be fully resolved") from error
+    if not isinstance(resolved, Mapping):
+        raise RuntimeError(f"{label} did not resolve to a mapping")
+    return dict(resolved)
+
+
+def _unresolved_omegaconf_mapping(value, *, label):
+    if not isinstance(value, omegaconf.DictConfig):
+        raise RuntimeError(f"{label} must be an OmegaConf DictConfig")
+    try:
+        unresolved = omegaconf.OmegaConf.to_container(
+            value,
+            resolve=False,
+            enum_to_str=True,
+        )
+    except Exception as error:
+        raise RuntimeError(f"{label} cannot be structurally serialized") from error
+    if not isinstance(unresolved, Mapping):
+        raise RuntimeError(f"{label} did not serialize to a mapping")
+    return dict(unresolved)
+
+
+def _validated_checkpoint_hyperparameters(
+    checkpoint,
+    *,
+    model,
+    expected_resolved_config,
+    expected_config_sha256,
+):
+    """Bind reload-time checkpoint configuration to preflight and the live model."""
+
+    if not isinstance(expected_resolved_config, Mapping):
+        raise RuntimeError("pilot preflight resolved config is not a mapping")
+    expected_resolved_config = dict(expected_resolved_config)
+    if _canonical_json_sha256(expected_resolved_config) != expected_config_sha256:
+        raise RuntimeError("pilot preflight resolved config digest changed")
+    if checkpoint.get("hparams_name") != "kwargs":
+        raise RuntimeError("pilot checkpoint hparams_name must be exactly 'kwargs'")
+    hyperparameters = checkpoint.get("hyper_parameters")
+    if not isinstance(hyperparameters, Mapping) or set(hyperparameters) != {"config"}:
+        raise RuntimeError(
+            "pilot checkpoint hyper_parameters must contain exactly config"
+        )
+    checkpoint_config = _resolved_omegaconf_mapping(
+        hyperparameters["config"],
+        label="pilot checkpoint hyper_parameters.config",
+    )
+    _exact_nested_state_match(
+        checkpoint_config,
+        expected_resolved_config,
+        label="pilot checkpoint/preflight resolved config",
+    )
+
+    live_config = _resolved_omegaconf_mapping(
+        getattr(model, "config", None),
+        label="pilot live model config",
+    )
+    _exact_nested_state_match(
+        live_config,
+        expected_resolved_config,
+        label="pilot live-model/preflight resolved config",
+    )
+    live_hyperparameters = getattr(model, "hparams", None)
+    if not isinstance(live_hyperparameters, Mapping) or set(live_hyperparameters) != {
+        "config"
+    }:
+        raise RuntimeError("pilot live model hparams must contain exactly config")
+    live_hparams_config = _resolved_omegaconf_mapping(
+        live_hyperparameters["config"],
+        label="pilot live model hparams.config",
+    )
+    _exact_nested_state_match(
+        live_hparams_config,
+        expected_resolved_config,
+        label="pilot live-hparams/preflight resolved config",
+    )
+    checkpoint_unresolved_config = _unresolved_omegaconf_mapping(
+        hyperparameters["config"],
+        label="pilot checkpoint hyper_parameters.config",
+    )
+    live_unresolved_config = _unresolved_omegaconf_mapping(
+        getattr(model, "config", None),
+        label="pilot live model config",
+    )
+    live_hparams_unresolved_config = _unresolved_omegaconf_mapping(
+        live_hyperparameters["config"],
+        label="pilot live model hparams.config",
+    )
+    _exact_nested_state_match(
+        checkpoint_unresolved_config,
+        live_unresolved_config,
+        label="pilot checkpoint/live-model unresolved config",
+    )
+    _exact_nested_state_match(
+        checkpoint_unresolved_config,
+        live_hparams_unresolved_config,
+        label="pilot checkpoint/live-hparams unresolved config",
+    )
+    return {
+        "hparams_name": "kwargs",
+        "exact_hyperparameter_keys": True,
+        "exact_checkpoint_preflight_config_match": True,
+        "exact_live_model_preflight_config_match": True,
+        "exact_live_hparams_preflight_config_match": True,
+        "exact_checkpoint_live_model_unresolved_config_match": True,
+        "exact_checkpoint_live_hparams_unresolved_config_match": True,
+        "resolved_config_sha256": expected_config_sha256,
+    }
+
+
+def _normalized_lightning_precision(value):
+    aliases = {
+        "16": "16-mixed",
+        "bf16": "bf16-mixed",
+        "32": "32-true",
+        "64": "64-true",
+        16: "16-mixed",
+        32: "32-true",
+        64: "64-true",
+    }
+    return aliases.get(value, value)
+
+
+def _validated_live_trainer_configuration(config, trainer):
+    """Bind safety- and numerics-relevant live Trainer settings to config."""
+
+    trainer_config = config.get("trainer")
+    if not isinstance(trainer_config, Mapping):
+        raise RuntimeError("pilot resolved trainer config is not a mapping")
+    if trainer_config.get("detect_anomaly") is not True:
+        raise RuntimeError("pilot resolved config must enable anomaly detection")
+    if getattr(trainer, "_detect_anomaly", None) is not True:
+        raise RuntimeError("pilot live Trainer did not enable anomaly detection")
+
+    configured_clip = trainer_config.get("gradient_clip_val")
+    live_clip = getattr(trainer, "gradient_clip_val", None)
+    if (
+        isinstance(configured_clip, bool)
+        or not isinstance(configured_clip, (int, float))
+        or not math.isfinite(configured_clip)
+        or configured_clip < 0.0
+        or isinstance(live_clip, bool)
+        or not isinstance(live_clip, (int, float))
+        or float(live_clip) != float(configured_clip)
+    ):
+        raise RuntimeError(
+            "pilot live Trainer gradient clipping disagrees with resolved config"
+        )
+    configured_clip_algorithm = trainer_config.get("gradient_clip_algorithm")
+    live_clip_algorithm_object = getattr(trainer, "gradient_clip_algorithm", None)
+    if configured_clip_algorithm is None:
+        # Lightning 2.5.1 retains ``None`` on Trainer when the field is omitted
+        # or null, then applies its documented effective default, norm, at the
+        # clipping call site.
+        exact_clip_algorithm_match = live_clip_algorithm_object is None
+        effective_clip_algorithm = "norm"
+    else:
+        live_clip_algorithm = getattr(live_clip_algorithm_object, "value", None)
+        exact_clip_algorithm_match = (
+            configured_clip_algorithm in {"norm", "value"}
+            and live_clip_algorithm == configured_clip_algorithm
+        )
+        effective_clip_algorithm = configured_clip_algorithm
+    if not exact_clip_algorithm_match:
+        raise RuntimeError(
+            "pilot live Trainer gradient-clip algorithm disagrees with resolved "
+            "config"
+        )
+
+    configured_precision = trainer_config.get("precision")
+    expected_live_precision = _normalized_lightning_precision(configured_precision)
+    live_precision = getattr(trainer, "precision", None)
+    if (
+        not isinstance(configured_precision, (str, int))
+        or isinstance(configured_precision, bool)
+        or not isinstance(expected_live_precision, str)
+        or live_precision != expected_live_precision
+    ):
+        raise RuntimeError(
+            "pilot live Trainer precision disagrees with resolved config"
+        )
+    return {
+        "exact_detect_anomaly_match": True,
+        "detect_anomaly": True,
+        "exact_gradient_clip_val_match": True,
+        "gradient_clip_val": float(configured_clip),
+        "exact_gradient_clip_algorithm_match": True,
+        "gradient_clip_algorithm": effective_clip_algorithm,
+        "exact_precision_match": True,
+        "configured_precision": str(configured_precision),
+        "live_precision": live_precision,
+    }
+
+
+def _expected_lightning_loop_state(*, optimizer_steps, accumulation):
+    microbatches = optimizer_steps * accumulation
+    zero_batch_progress = {
+        "total": {"ready": 0, "completed": 0, "started": 0, "processed": 0},
+        "current": {"ready": 0, "completed": 0, "started": 0, "processed": 0},
+        "is_last_batch": False,
+    }
+    return {
+        "fit_loop": {
+            "state_dict": {},
+            "epoch_loop.state_dict": {"_batches_that_stepped": optimizer_steps},
+            "epoch_loop.batch_progress": {
+                "total": {
+                    "ready": microbatches,
+                    "completed": microbatches,
+                    "started": microbatches,
+                    "processed": microbatches,
+                },
+                "current": {
+                    "ready": microbatches,
+                    "completed": microbatches,
+                    "started": microbatches,
+                    "processed": microbatches,
+                },
+                "is_last_batch": False,
+            },
+            "epoch_loop.scheduler_progress": {
+                "total": {"ready": optimizer_steps, "completed": optimizer_steps},
+                "current": {"ready": optimizer_steps, "completed": optimizer_steps},
+            },
+            "epoch_loop.automatic_optimization.state_dict": {},
+            "epoch_loop.automatic_optimization.optim_progress": {
+                "optimizer": {
+                    "step": {
+                        "total": {
+                            "ready": optimizer_steps,
+                            "completed": optimizer_steps,
+                        },
+                        "current": {
+                            "ready": optimizer_steps,
+                            "completed": optimizer_steps,
+                        },
+                    },
+                    "zero_grad": {
+                        "total": {
+                            "ready": optimizer_steps,
+                            "completed": optimizer_steps,
+                            "started": optimizer_steps,
+                        },
+                        "current": {
+                            "ready": optimizer_steps,
+                            "completed": optimizer_steps,
+                            "started": optimizer_steps,
+                        },
+                    },
+                }
+            },
+            "epoch_loop.manual_optimization.state_dict": {},
+            "epoch_loop.manual_optimization.optim_step_progress": {
+                "total": {"ready": 0, "completed": 0},
+                "current": {"ready": 0, "completed": 0},
+            },
+            "epoch_loop.val_loop.state_dict": {},
+            "epoch_loop.val_loop.batch_progress": zero_batch_progress,
+            "epoch_progress": {
+                "total": {"ready": 1, "completed": 0, "started": 1, "processed": 0},
+                "current": {
+                    "ready": 1,
+                    "completed": 0,
+                    "started": 1,
+                    "processed": 0,
+                },
+            },
+        },
+        "validate_loop": {"state_dict": {}, "batch_progress": zero_batch_progress},
+        "test_loop": {"state_dict": {}, "batch_progress": zero_batch_progress},
+        "predict_loop": {
+            "state_dict": {},
+            "batch_progress": {
+                "total": {
+                    "ready": 0,
+                    "completed": 0,
+                    "started": 0,
+                    "processed": 0,
+                },
+                "current": {
+                    "ready": 0,
+                    "completed": 0,
+                    "started": 0,
+                    "processed": 0,
+                },
+            },
+        },
+    }
+
+
+def _validated_checkpoint_loop_state(
+    checkpoint, *, expected_steps, expected_resolved_config
+):
+    trainer_config = expected_resolved_config.get("trainer")
+    if not isinstance(trainer_config, Mapping):
+        raise RuntimeError("pilot resolved config has no trainer mapping")
+    accumulation = trainer_config.get("accumulate_grad_batches")
+    if type(accumulation) is not int or accumulation <= 0:
+        raise RuntimeError("pilot resolved gradient accumulation is invalid")
+    epoch = checkpoint.get("epoch")
+    if type(epoch) is not int or epoch != 0:
+        raise RuntimeError("pilot checkpoint epoch must be zero for the hosted stream")
+    expected_loops = _expected_lightning_loop_state(
+        optimizer_steps=expected_steps,
+        accumulation=accumulation,
+    )
+    _exact_nested_state_match(
+        checkpoint.get("loops"),
+        expected_loops,
+        label="pilot serialized Lightning loop state",
+    )
+    return {
+        "exact_serialized_progress_match": True,
+        "epoch": 0,
+        "optimizer_steps": expected_steps,
+        "accumulate_grad_batches": accumulation,
+        "microbatches": expected_steps * accumulation,
+    }
+
+
+def _validated_live_training_state(
+    checkpoint,
+    *,
+    trainer,
+    model,
+    expected_steps,
+    expected_resolved_config,
+):
+    optimizer_states = checkpoint.get("optimizer_states")
+    live_optimizers = getattr(trainer, "optimizers", None)
+    if (
+        not isinstance(optimizer_states, list)
+        or len(optimizer_states) != 1
+        or not isinstance(live_optimizers, (list, tuple))
+        or len(live_optimizers) != 1
+        or not isinstance(live_optimizers[0], torch.optim.AdamW)
+    ):
+        raise RuntimeError("pilot requires exactly one serialized/live AdamW optimizer")
+    live_optimizer = live_optimizers[0]
+    backbone = getattr(model, "backbone", None)
+    backbone_parameters = (
+        None if backbone is None else getattr(backbone, "parameters", None)
+    )
+    if not callable(backbone_parameters):
+        raise RuntimeError("pilot model backbone does not expose its parameters")
+    expected_parameters = list(backbone_parameters())
+    expected_optim = expected_resolved_config.get("optim")
+    if not isinstance(expected_optim, Mapping) or set(expected_optim) != {
+        "weight_decay",
+        "lr",
+        "beta1",
+        "beta2",
+        "eps",
+        "scheduler",
+    }:
+        raise RuntimeError("pilot resolved optimizer config is invalid")
+    try:
+        expected_schedule_spec = optimizer_scheduler_spec(expected_optim)
+    except (TypeError, ValueError) as error:
+        raise RuntimeError("pilot resolved optimizer schedule is invalid") from error
+    if getattr(model, "optimizer_scheduler_spec", None) != expected_schedule_spec:
+        raise RuntimeError(
+            "pilot live model optimizer-scheduler spec disagrees with resolved config"
+        )
+    beta1 = expected_optim.get("beta1")
+    beta2 = expected_optim.get("beta2")
+    eps = expected_optim.get("eps")
+    weight_decay = expected_optim.get("weight_decay")
+    if (
+        any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            for value in (beta1, beta2, eps, weight_decay)
+        )
+        or not 0.0 <= beta1 < 1.0
+        or not 0.0 <= beta2 < 1.0
+        or eps <= 0.0
+        or weight_decay < 0.0
+    ):
+        raise RuntimeError("pilot resolved AdamW hyperparameters are invalid")
+    live_parameter_groups = live_optimizer.param_groups
+    if (
+        len(live_parameter_groups) != 1
+        or list(live_parameter_groups[0].get("params", [])) != expected_parameters
+    ):
+        raise RuntimeError(
+            "pilot AdamW does not optimize exactly the backbone parameters"
+        )
+    serialized_optimizer = optimizer_states[0]
+    live_optimizer_state = live_optimizer.state_dict()
+    _exact_nested_state_match(
+        serialized_optimizer,
+        live_optimizer_state,
+        label="pilot serialized/live AdamW state",
+    )
+    if (
+        not isinstance(serialized_optimizer, Mapping)
+        or set(serialized_optimizer) != {"state", "param_groups"}
+        or not isinstance(serialized_optimizer["state"], Mapping)
+        or not serialized_optimizer["state"]
+        or not isinstance(serialized_optimizer["param_groups"], list)
+        or len(serialized_optimizer["param_groups"]) != 1
+    ):
+        raise RuntimeError("pilot serialized AdamW state structure is invalid")
+    serialized_group = serialized_optimizer["param_groups"][0]
+    if not isinstance(serialized_group, Mapping):
+        raise RuntimeError("pilot serialized AdamW parameter group is invalid")
+    expected_current_lr = expected_schedule_spec.peak_lr * (
+        optimizer_scheduler_multiplier(expected_schedule_spec, expected_steps)
+    )
+    expected_group_without_parameters = {
+        "lr": expected_current_lr,
+        "betas": (beta1, beta2),
+        "eps": eps,
+        "weight_decay": weight_decay,
+        "amsgrad": False,
+        "foreach": None,
+        "maximize": False,
+        "capturable": False,
+        "differentiable": False,
+        "fused": None,
+        "initial_lr": expected_schedule_spec.peak_lr,
+    }
+    serialized_group_without_parameters = {
+        key: value for key, value in serialized_group.items() if key != "params"
+    }
+    _exact_nested_state_match(
+        serialized_group_without_parameters,
+        expected_group_without_parameters,
+        label="pilot serialized AdamW/resolved-config parameter group",
+    )
+    serialized_parameter_ids = serialized_group.get("params")
+    if (
+        not isinstance(serialized_parameter_ids, list)
+        or not serialized_parameter_ids
+        or any(
+            type(value) is not int or value < 0 for value in serialized_parameter_ids
+        )
+        or len(set(serialized_parameter_ids)) != len(serialized_parameter_ids)
+        or set(serialized_parameter_ids) != set(serialized_optimizer["state"])
+    ):
+        raise RuntimeError(
+            "pilot serialized AdamW parameter IDs/state are inconsistent"
+        )
+    for parameter_id, state in serialized_optimizer["state"].items():
+        if not isinstance(state, Mapping) or set(state) != {
+            "step",
+            "exp_avg",
+            "exp_avg_sq",
+        }:
+            raise RuntimeError(
+                f"pilot serialized AdamW state entry is invalid: {parameter_id}"
+            )
+        step = state["step"]
+        if (
+            not isinstance(step, torch.Tensor)
+            or step.shape != torch.Size([])
+            or not bool((step == expected_steps).item())
+        ):
+            raise RuntimeError(
+                f"pilot serialized AdamW step is invalid: {parameter_id}"
+            )
+
+    serialized_schedulers = checkpoint.get("lr_schedulers")
+    live_scheduler_configs = getattr(trainer, "lr_scheduler_configs", None)
+    if (
+        not isinstance(serialized_schedulers, list)
+        or len(serialized_schedulers) != 1
+        or not isinstance(live_scheduler_configs, (list, tuple))
+        or len(live_scheduler_configs) != 1
+    ):
+        raise RuntimeError("pilot requires exactly one serialized/live LR scheduler")
+    live_scheduler_config = live_scheduler_configs[0]
+    live_scheduler = getattr(live_scheduler_config, "scheduler", None)
+    if (
+        not isinstance(live_scheduler, torch.optim.lr_scheduler.LambdaLR)
+        or live_scheduler.optimizer is not live_optimizer
+        or getattr(live_scheduler_config, "interval", None) != "step"
+        or getattr(live_scheduler_config, "name", None) != "lr"
+    ):
+        raise RuntimeError("pilot live LR scheduler contract is invalid")
+    serialized_scheduler = serialized_schedulers[0]
+    live_scheduler_state = live_scheduler.state_dict()
+    _exact_nested_state_match(
+        serialized_scheduler,
+        live_scheduler_state,
+        label="pilot serialized/live LambdaLR state",
+    )
+    if (
+        not isinstance(serialized_scheduler, Mapping)
+        or serialized_scheduler.get("last_epoch") != expected_steps
+        or serialized_scheduler.get("_step_count") != expected_steps + 1
+        or serialized_scheduler.get("base_lrs") != [serialized_group.get("initial_lr")]
+        or serialized_scheduler.get("_last_lr") != [serialized_group.get("lr")]
+    ):
+        raise RuntimeError("pilot serialized LambdaLR step/LR state is invalid")
+    live_lambdas = getattr(live_scheduler, "lr_lambdas", None)
+    if (
+        not isinstance(live_lambdas, list)
+        or len(live_lambdas) != 1
+        or not callable(live_lambdas[0])
+    ):
+        raise RuntimeError("pilot live LambdaLR callable structure is invalid")
+    schedule_check_maximum = max(
+        expected_steps,
+        expected_schedule_spec.warmup_updates + 1,
+        (expected_schedule_spec.horizon_updates or 0) + 1,
+    )
+    for scheduler_index in range(schedule_check_maximum + 1):
+        observed_multiplier = live_lambdas[0](scheduler_index)
+        expected_multiplier = optimizer_scheduler_multiplier(
+            expected_schedule_spec, scheduler_index
+        )
+        if (
+            isinstance(observed_multiplier, bool)
+            or not isinstance(observed_multiplier, (int, float))
+            or not math.isfinite(observed_multiplier)
+            or float(observed_multiplier) != expected_multiplier
+        ):
+            raise RuntimeError(
+                "pilot live LambdaLR callable disagrees with resolved schedule at "
+                f"index {scheduler_index}"
+            )
+
+    serialized_sampler = checkpoint.get("sampler")
+    train_dataloader = getattr(trainer, "train_dataloader", None)
+    if train_dataloader is None:
+        raise RuntimeError("pilot trainer has no hosted-stream train dataloader")
+    sampler = getattr(train_dataloader, "sampler", None)
+    if (
+        sampler is None
+        or type(sampler).__module__ != "torch.utils.data.dataloader"
+        or type(sampler).__name__ != "_InfiniteConstantSampler"
+    ):
+        raise RuntimeError("pilot trainer has an unexpected hosted-stream sampler")
+    sampler_state_dict = (
+        None if sampler is None else getattr(sampler, "state_dict", None)
+    )
+    if callable(sampler_state_dict):
+        raise RuntimeError(
+            "pilot hosted-stream sampler unexpectedly exposes mutable state"
+        )
+    if serialized_sampler != {"random_state": None}:
+        raise RuntimeError(
+            "pilot hosted-stream sampler must have exact null random-state evidence"
+        )
+
+    return {
+        "optimizer": {
+            "exact_serialized_live_match": True,
+            "optimizer_count": 1,
+            "optimizer_class": "AdamW",
+            "parameter_group_count": 1,
+            "parameter_state_count": len(serialized_optimizer["state"]),
+            "exact_resolved_config_match": True,
+        },
+        "scheduler": {
+            "exact_serialized_live_match": True,
+            "scheduler_count": 1,
+            "scheduler_class": "LambdaLR",
+            "interval": "step",
+            "name": "lr",
+            "last_epoch": expected_steps,
+            "step_count": expected_steps + 1,
+            "exact_model_spec_match": True,
+            "exact_callable_schedule_match": True,
+            "callable_schedule_index_checks": schedule_check_maximum + 1,
+        },
+        "sampler": {
+            "exact_hosted_stream_contract_match": True,
+            "random_state_is_none": True,
+            "live_state_dict_available": False,
+            "sampler_class_module": "torch.utils.data.dataloader",
+            "sampler_class_name": "_InfiniteConstantSampler",
+        },
+    }
 
 
 def _validate_checkpoint_matches_live_model(checkpoint_state, model):
@@ -1486,6 +2361,15 @@ def _validate_checkpoint_ema_matches_live(checkpoint_shadows, model):
 
 
 def _validated_ema_metadata(ema_state, *, label, expected_updates):
+    expected_keys = {"shadow_params", "decay", "num_updates"}
+    if not isinstance(ema_state, Mapping) or set(ema_state) != expected_keys:
+        observed_keys = set(ema_state) if isinstance(ema_state, Mapping) else set()
+        missing = sorted(expected_keys - observed_keys)
+        unexpected = sorted(repr(key) for key in observed_keys - expected_keys)
+        raise RuntimeError(
+            f"{label} EMA keys disagree with the exact schema: "
+            f"missing={missing}, unexpected={unexpected}"
+        )
     shadows = ema_state.get("shadow_params")
     if not isinstance(shadows, (list, tuple)) or not shadows:
         raise RuntimeError(f"{label} has no EMA shadow tensors")
@@ -1507,7 +2391,15 @@ def _validated_ema_metadata(ema_state, *, label, expected_updates):
     }
 
 
-def _audit_pilot_checkpoint(path, *, expected_steps, model):
+def _audit_pilot_checkpoint(
+    path,
+    *,
+    expected_steps,
+    model,
+    trainer,
+    expected_resolved_config,
+    expected_config_sha256,
+):
     """Load and semantically audit the exact stable checkpoint bytes."""
 
     path = Path(os.path.abspath(os.fspath(path)))
@@ -1549,6 +2441,23 @@ def _audit_pilot_checkpoint(path, *, expected_steps, model):
         raise RuntimeError("pilot final checkpoint changed while it was audited")
     if not isinstance(checkpoint, Mapping):
         raise RuntimeError("pilot final checkpoint must deserialize to a mapping")
+    _validated_checkpoint_top_level_schema(checkpoint, model=model)
+    checkpoint_python_floats = _python_float_finiteness(
+        checkpoint,
+        prefix="checkpoint",
+        label="serialized checkpoint",
+    )
+    checkpoint_hyperparameters_match = _validated_checkpoint_hyperparameters(
+        checkpoint,
+        model=model,
+        expected_resolved_config=expected_resolved_config,
+        expected_config_sha256=expected_config_sha256,
+    )
+    checkpoint_loop_state_match = _validated_checkpoint_loop_state(
+        checkpoint,
+        expected_steps=expected_steps,
+        expected_resolved_config=expected_resolved_config,
+    )
     checkpoint_step = checkpoint.get("global_step")
     if (
         isinstance(checkpoint_step, bool)
@@ -1590,10 +2499,52 @@ def _audit_pilot_checkpoint(path, *, expected_steps, model):
         _nested_named_tensors(optimizer_states, prefix="optimizer_states"),
         label="serialized checkpoint optimizer state",
     )
-    all_tensors = _floating_tensor_finiteness(
-        _nested_named_tensors(checkpoint, prefix="checkpoint"),
-        label="serialized checkpoint",
+    live_training_state_match = _validated_live_training_state(
+        checkpoint,
+        trainer=trainer,
+        model=model,
+        expected_steps=expected_steps,
+        expected_resolved_config=expected_resolved_config,
     )
+    trainer_live_configuration_match = _validated_live_trainer_configuration(
+        expected_resolved_config,
+        trainer,
+    )
+    (
+        framework_sentinel_path,
+        framework_sentinel,
+        framework_sentinels,
+        model_checkpoint_live_state_match,
+    ) = _validated_lightning_checkpoint_sentinel(
+        checkpoint,
+        checkpoint_path=path,
+        expected_steps=expected_steps,
+        trainer=trainer,
+    )
+    sentinel_occurrences = 0
+
+    def non_sentinel_checkpoint_tensors():
+        nonlocal sentinel_occurrences
+        for tensor_path, item in _nested_path_leaves(checkpoint, path=("checkpoint",)):
+            if not isinstance(item, torch.Tensor):
+                continue
+            if tensor_path == framework_sentinel_path:
+                if item is not framework_sentinel:
+                    raise RuntimeError(
+                        "pilot checkpoint sentinel structural identity changed"
+                    )
+                sentinel_occurrences += 1
+                continue
+            yield _format_structural_path(tensor_path), item
+
+    non_sentinel_tensors = _floating_tensor_finiteness(
+        non_sentinel_checkpoint_tensors(),
+        label="serialized non-sentinel checkpoint",
+    )
+    if sentinel_occurrences != 1:
+        raise RuntimeError(
+            "pilot checkpoint did not consume exactly one framework sentinel"
+        )
     prior_validator = getattr(model, "_validate_udlm_prior_checkpoint", None)
     if not callable(prior_validator):
         raise RuntimeError("pilot model has no UDLM checkpoint identity validator")
@@ -1627,7 +2578,16 @@ def _audit_pilot_checkpoint(path, *, expected_steps, model):
         "ema": ema_tensors,
         "ema_metadata": ema_metadata,
         "optimizer": optimizer_tensors,
-        "all_checkpoint_tensors": all_tensors,
+        "non_sentinel_checkpoint_tensors": non_sentinel_tensors,
+        "checkpoint_python_floats": checkpoint_python_floats,
+        "framework_nonfinite_sentinels": framework_sentinels,
+        "checkpoint_hyperparameters_match": checkpoint_hyperparameters_match,
+        "checkpoint_loop_state_match": checkpoint_loop_state_match,
+        "optimizer_live_state_match": live_training_state_match["optimizer"],
+        "scheduler_live_state_match": live_training_state_match["scheduler"],
+        "sampler_live_state_match": live_training_state_match["sampler"],
+        "trainer_live_configuration_match": trainer_live_configuration_match,
+        "model_checkpoint_live_state_match": model_checkpoint_live_state_match,
         "udlm_process_identity_verified": True,
         "live_model_match": live_match,
         "live_ema_match": live_ema_match,
@@ -1851,6 +2811,9 @@ def _write_pilot_training_summary(
         _PILOT_CONTRACT["final_checkpoint_path"],
         expected_steps=expected_steps,
         model=model,
+        trainer=trainer,
+        expected_resolved_config=preflight_record.get("resolved_training_config"),
+        expected_config_sha256=_PILOT_CONTRACT["GENMOL_TRAIN_EXPECTED_CONFIG_SHA256"],
     )
     retained_warm_start = _verified_warm_start_report(
         config, startup_mode, warm_start_report

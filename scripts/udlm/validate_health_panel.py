@@ -74,6 +74,16 @@ def _mapping(value: object, *, label: str) -> Mapping[str, Any]:
     return value
 
 
+def _exact_keys(value: Mapping[str, Any], expected: set[str], *, label: str) -> None:
+    observed = set(value)
+    if observed != expected:
+        raise HealthPanelValidationError(
+            f"{label} keys are invalid: "
+            f"missing={sorted(expected - observed)}, "
+            f"unexpected={sorted(observed - expected)}"
+        )
+
+
 def _exact(value: object, expected: object, *, label: str) -> None:
     if type(value) is not type(expected) or value != expected:
         raise HealthPanelValidationError(
@@ -668,9 +678,28 @@ def _require_member_contract(
     )
 
     startup = _mapping(summary.get("startup"), label=f"{variant} startup")
+    _exact_keys(
+        startup,
+        {"mode", "verified_mdlm_warm_start_report"},
+        label=f"{variant} startup",
+    )
     _exact(startup.get("mode"), "warm_start", label=f"{variant} startup mode")
     warm_start = _mapping(
         startup.get("verified_mdlm_warm_start_report"),
+        label=f"{variant} MDLM warm-start report",
+    )
+    _exact_keys(
+        warm_start,
+        {
+            "source_path",
+            "source_resolved_path",
+            "source_sha256",
+            "source_size_bytes",
+            "expected_source_sha256",
+            "byte_identity_verified_before_and_after_load",
+            "weights",
+            "parameter_tensors",
+        },
         label=f"{variant} MDLM warm-start report",
     )
     for key, value in (
@@ -681,6 +710,7 @@ def _require_member_contract(
         ("weights", "ema"),
         ("byte_identity_verified_before_and_after_load", True),
         ("source_size_bytes", EXPECTED_MDLM_CHECKPOINT_SIZE_BYTES),
+        ("parameter_tensors", 202),
     ):
         _exact(warm_start.get(key), value, label=f"{variant} warm start {key}")
 

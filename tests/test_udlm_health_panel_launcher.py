@@ -35,7 +35,17 @@ def _complete_prefix(
     paths = _paths(repository_root, gpu_count=gpu_count)
     for _variant, run_dir, receipt in paths[:count]:
         run_dir.mkdir(parents=True)
-        receipt.write_text('{"status":"test fixture"}\n')
+        receipt.write_text(
+            json.dumps(
+                {
+                    "schema_version": pilot.PILOT_EXIT_STATUS_SCHEMA_VERSION,
+                    "status": "completed",
+                    "overall_status": "completed",
+                    "process_exit_status": 0,
+                }
+            )
+            + "\n"
+        )
     return paths
 
 
@@ -180,7 +190,17 @@ def test_out_of_order_run_directories_fail_before_pilot(
     for position in existing_positions:
         _variant, run_dir, receipt = paths[position]
         run_dir.mkdir(parents=True)
-        receipt.write_text("{}\n")
+        receipt.write_text(
+            json.dumps(
+                {
+                    "schema_version": pilot.PILOT_EXIT_STATUS_SCHEMA_VERSION,
+                    "status": "completed",
+                    "overall_status": "completed",
+                    "process_exit_status": 0,
+                }
+            )
+            + "\n"
+        )
     monkeypatch.setattr(
         pilot,
         "main",
@@ -188,6 +208,40 @@ def test_out_of_order_run_directories_fail_before_pilot(
     )
 
     with pytest.raises(RuntimeError, match="out of R -> S -> E order"):
+        launcher.main(["--gpu-count", "1"])
+
+
+@pytest.mark.parametrize(
+    "receipt",
+    [
+        {
+            "schema_version": pilot.PILOT_EXIT_STATUS_SCHEMA_VERSION,
+            "status": "failed",
+            "overall_status": "failed",
+            "process_exit_status": 97,
+        },
+        {
+            "schema_version": pilot.PILOT_EXIT_STATUS_SCHEMA_VERSION,
+            "status": "completed",
+            "overall_status": "completed",
+            "process_exit_status": True,
+        },
+        {"status": "completed"},
+    ],
+)
+def test_failed_or_malformed_receipt_closes_revision_without_advancing(
+    monkeypatch, isolated_repository, receipt
+):
+    _variant, run_dir, receipt_path = _paths(isolated_repository)[0]
+    run_dir.mkdir(parents=True)
+    receipt_path.write_text(json.dumps(receipt) + "\n")
+    monkeypatch.setattr(
+        pilot,
+        "main",
+        lambda _argv: pytest.fail("failed health arm must not call pilot"),
+    )
+
+    with pytest.raises(RuntimeError, match="failed or malformed completion receipt"):
         launcher.main(["--gpu-count", "1"])
 
 

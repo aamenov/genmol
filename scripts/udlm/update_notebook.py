@@ -1146,7 +1146,7 @@ reviewed pilot may hold the lease.
 
 The raw bytes of `launch_manifest.json` are frozen by repository-relative path,
 SHA-256, and schema 2. Training receives that digest out of band so the manifest
-need not hash itself. Runtime-config schema 2, training-summary schema 4, and
+need not hash itself. Runtime-config schema 2, training-summary schema 5, and
 successful-exit-receipt schema 5 must each repeat the same stable manifest
 snapshot and exact $U$. The receipt also validates the still-held lease before
 publication; after tmux handoff, only its writer may then unlink that exact
@@ -1154,6 +1154,32 @@ unchanged lease. Before handoff, the launcher may release only its own exact
 lease if launch fails. Unexplained or stale leases fail closed for manual
 review. A candidate lock that lacks any link in
 `launch -> runtime -> summary -> receipt -> checkpoint` is inadmissible.
+Summary schema 5 requires every model, EMA, optimizer, and other non-sentinel
+floating checkpoint tensor to be finite. It separately verifies and records
+the sole non-finite framework exception: Lightning 2.5.1's scalar float32
+`ModelCheckpoint.kth_value=+inf` bookkeeping sentinel under the exact
+unmonitored, minimum-mode callback state. This is not a general `Inf`
+allowance; a wrong callback identity, value, shape, path, or second non-finite
+tensor fails.
+It also closes the checkpoint's top-level and EMA key schemas, binds the saved
+Hydra configuration and Lightning loop progress to the live model and trainer,
+and binds the live anomaly, clipping, precision, optimizer, scheduler, sampler,
+and checkpoint callback state. For example, an opaque extra object hidden under
+`ema` is rejected even if its tensor visitor cannot inspect that object's
+internals. The independent optimization-screen verifier rechecks closed summary
+and receipt shapes and their manifest/runtime/config joins instead of trusting
+the producer's `completed` label.
+
+Protocol v3 records why schema 5 was needed. The first 10-update R health
+process completed its updates but failed closed before a valid summary because
+Lightning's exact `kth_value=+inf` sentinel met the older blanket finiteness
+rule. Its namespace and artifact hashes remain immutable and scientifically
+ineligible. That failed R performed no denoising or molecular scoring. Since
+the v2 freeze, no registered candidate checkpoint selection/ranking or
+candidate final-evaluation run occurred. Earlier ineligible CPU generation
+smokes and the audited MDLM baseline rescoring remain disclosed rather than
+being erased by this scoped attestation, and every scientific setting and
+threshold is byte-for-byte identical to v2.
 Candidate-lock schema 2 additionally binds one terminal E successful receipt.
 The final gate reconstructs that receipt's transitive R→S→E chain, requires
 both the E receipt and selected training receipt to predate the lock, and
@@ -1185,8 +1211,11 @@ as a rejection criterion and never interrupts or kills them.
 Let $H$ be the full clean pushed 40-character source revision. The deterministic
 run names are `health-w{W}-r-{H}`, `health-w{W}-s-{H}`, and
 `health-w{W}-e-{H}`. Each wrapper invocation launches only the first missing
-member and rejects incomplete or out-of-order directories. R requires explicit
-genesis. S and E cannot reach a GPU probe without a validated successful receipt
+member after a successful prefix and rejects incomplete, failed, malformed, or
+out-of-order directories. A failed receipt closes that H namespace: preserve it
+in place, repair and push a descendant, and restart R under the descendant's
+distinct full-revision names. R requires explicit genesis. S and E cannot reach
+a GPU probe without a validated successful receipt
 from the immediately preceding arm; the exact receipt, manifest, and summary
 snapshots are bound into the successor manifest and revalidated before its
 successful exit receipt. The predecessor receipt must predate the successor's
@@ -1336,7 +1365,7 @@ The exact production observation topology is frozen in
 canonical SHA-256
 `ff45961276df75f445221fd1aa4629262d21fdb852bd9b226ad56fe2559315d5`.
 It binds all 24 FiLM and four timestep-MLP tensor names and shapes. Summary
-schema 4 and receipt schema 5 require an explicit null for non-A1 arms or a contract-bound
+schema 5 and receipt schema 5 require an explicit null for non-A1 arms or a contract-bound
 A1 gradient certificate.
 
 **Exact initialization-state attestation.** Immediately after each verified
@@ -1553,14 +1582,83 @@ stage20_superiority_protocol_path = (
     / "experiments"
     / "udlm"
     / "protocols"
-    / "de_novo_superiority_v2.json"
+    / "de_novo_superiority_v3.json"
 )
 stage20_superiority_protocol_bytes = stage20_superiority_protocol_path.read_bytes()
 assert stage20_hashlib.sha256(stage20_superiority_protocol_bytes).hexdigest() == (
-    "f845429dae7ca889c09aad3af7946d20a5a05c189d2a19ec5ad8da7fff075a66"
+    "27a1f3e4fa66988d77eddeb66025eae64b514c452e089bb5c62fff99060c9f16"
 )
 stage20_superiority_protocol = stage20_json.loads(stage20_superiority_protocol_bytes)
-assert stage20_superiority_protocol["status"] == "frozen_before_gpu_pilots"
+stage20_superiority_protocol_canonical_sha256 = stage20_hashlib.sha256(
+    stage20_json.dumps(
+        stage20_superiority_protocol,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+).hexdigest()
+assert stage20_superiority_protocol_canonical_sha256 == (
+    "e7b108dce51cd1445758a9f7dc852532b2ee075a80f783ae009303a7550577ee"
+)
+assert stage20_superiority_protocol["schema_version"] == 3
+assert stage20_superiority_protocol["protocol_id"] == (
+    "genmol_udlm_de_novo_superiority_v3"
+)
+assert stage20_superiority_protocol["status"] == (
+    "frozen_after_failed_health_instrumentation_before_scientific_screens"
+)
+stage20_protocol_amendment = stage20_superiority_protocol["amends"]
+assert stage20_protocol_amendment["gpu_training_process_executed_before_amendment"]
+assert not stage20_protocol_amendment["successful_health_panels_before_amendment"]
+for stage20_forbidden_pre_amendment_activity in (
+    "failed_health_run_denoising_sampling_executed",
+    "failed_health_run_molecular_scoring_executed",
+    "registered_candidate_checkpoint_selection_or_ranking_executed_since_v2_freeze",
+    "candidate_final_evaluation_run_executed_since_v2_freeze",
+    "scientific_decision_thresholds_changed",
+):
+    assert not stage20_protocol_amendment[stage20_forbidden_pre_amendment_activity]
+assert stage20_protocol_amendment[
+    "pre_v2_ineligible_cpu_smokes_and_audited_baseline_rescoring_remain_disclosed"
+]
+stage20_failed_health = stage20_protocol_amendment["failed_health_instrumentation"]
+assert stage20_failed_health["optimizer_updates_completed"] == 10
+assert not stage20_failed_health["training_summary_published"]
+assert not stage20_failed_health["successful_exit_receipt"]
+assert not stage20_failed_health["scientifically_eligible"]
+
+stage20_previous_protocol_path = stage20_superiority_protocol_path.with_name(
+    "de_novo_superiority_v2.json"
+)
+stage20_previous_protocol_bytes = stage20_previous_protocol_path.read_bytes()
+assert stage20_hashlib.sha256(stage20_previous_protocol_bytes).hexdigest() == (
+    stage20_protocol_amendment["raw_sha256"]
+)
+stage20_previous_protocol = stage20_json.loads(stage20_previous_protocol_bytes)
+assert stage20_hashlib.sha256(
+    stage20_json.dumps(
+        stage20_previous_protocol,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+).hexdigest() == stage20_protocol_amendment["canonical_sha256"]
+for stage20_unchanged_scientific_field in (
+    "primary_claim",
+    "baseline",
+    "final_operating_point",
+    "selection_firewall",
+    "point_estimate_gates",
+    "uncertainty_gates",
+    "decision",
+    "claim_boundaries",
+):
+    assert (
+        stage20_superiority_protocol[stage20_unchanged_scientific_field]
+        == stage20_previous_protocol[stage20_unchanged_scientific_field]
+    )
 stage20_candidate_lock_requirements = stage20_superiority_protocol[
     "candidate_lock_requirements"
 ]
@@ -1575,7 +1673,7 @@ assert stage20_candidate_lock_requirements[
 ] == {{
     "launch_manifest": 2,
     "runtime_config": 2,
-    "training_summary": 4,
+    "training_summary": 5,
     "successful_exit_receipt": 5,
 }}
 for stage20_required_launch_binding in (
@@ -1603,6 +1701,12 @@ for stage20_required_launch_binding in (
     "final_candidate_qed_sa_diversity_independently_recomputed_from_raw_model_text",
     "independent_rescore_source_and_dependency_hashes_required",
     "gate_report_rescore_launcher_writer_source_hashes_plus_scipy_version_required",
+    "training_summary_checkpoint_audit_excludes_only_exact_live_bound_lightning_sentinel_required",
+    "training_summary_checkpoint_exact_top_level_schema_and_nonfinite_python_numpy_rejection_required",
+    "training_summary_checkpoint_hyperparameters_loop_progress_and_live_trainer_configuration_match_required",
+    "training_summary_optimizer_scheduler_sampler_and_model_checkpoint_live_state_matches_required",
+    "independent_optimization_screen_exact_closed_schema_and_cross_artifact_bindings_required",
+    "failed_health_namespaces_are_immutable_and_never_eligible_for_candidate_selection",
 ):
     assert stage20_candidate_lock_requirements[stage20_required_launch_binding] is True
 stage20_protocol_prior_floor = stage20_candidate_lock_requirements[
@@ -1619,7 +1723,7 @@ assert stage20_selection_firewall["eligible_nfe"] == 128
 assert stage20_selection_firewall["eligible_metric_branch"] == "released_comparable"
 
 stage20_future_pilot_plan = {{
-    "status": "implemented_cpu_plumbing_not_registered_not_authorized_not_executed",
+    "status": "screen_plumbing_implemented_not_registered_or_executed_health_r_failed_closed",
     "execution_authority": {{
         "exact_health_launcher_implemented": True,
         "exact_health_validator_implemented": True,
@@ -1627,6 +1731,8 @@ stage20_future_pilot_plan = {{
         "registry_aware_launcher_implemented": True,
         "evidence_collector_implemented": True,
         "independent_selection_verifier_implemented": True,
+        "failed_health_r_executed": True,
+        "successful_health_panel_completed": False,
         "exact_arm_registry_frozen": False,
         "reviewed_launcher_authorizes_screen_arms": False,
         "gpu_screen_executed": False,
@@ -2334,7 +2440,7 @@ stage20_decision_gate_report_rows = [
         "Final-candidate lock",
         "Commit and push the candidate manifest before seeds 0,1,2; bind launch "
         "candidate-lock schema 2, terminal-E full-chain receipt, launch manifest schema 2, "
-        "runtime schema 2, summary schema 4, receipt schema 5, exact UUIDs, "
+        "runtime schema 2, summary schema 5, receipt schema 5, exact UUIDs, "
         "final-idle telemetry, global-lease evidence, checkpoint, schema-2 pilot "
         "envelopes, and schema-1 failure receipts; evaluate and independently "
         "re-score each final seed once; do not select or tune from final-seed results.",
@@ -3705,7 +3811,7 @@ def _update_completion_gate(notebook: dict) -> None:
   not confirmatory or molecular-quality evidence; historical/manual artifacts
   remain at 0.01.
 - Candidate training must bind launch-manifest schema 2, runtime schema 2,
-  summary schema 4, and receipt schema 5, including the exact selected UUIDs,
+  summary schema 5, and receipt schema 5, including the exact selected UUIDs,
   final-idle telemetry, repository-global single-job lease, and exact R/S/E
   predecessor artifacts. The lease machine-enforces one-job concurrency; the
   genesis/predecessor chain independently machine-enforces registered order.

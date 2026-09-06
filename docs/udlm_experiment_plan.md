@@ -31,13 +31,24 @@ forbidden: re-deduplicating resampled rows manufactures duplicates and does not
 represent the uncertainty of these nonlinear per-run set metrics.
 
 The current frozen machine-readable protocol is
-`experiments/udlm/protocols/de_novo_superiority_v2.json` (raw SHA-256
-`f845429dae7ca889c09aad3af7946d20a5a05c189d2a19ec5ad8da7fff075a66`,
+`experiments/udlm/protocols/de_novo_superiority_v3.json` (raw SHA-256
+`27a1f3e4fa66988d77eddeb66025eae64b514c452e089bb5c62fff99060c9f16`,
 canonical SHA-256
-`b3b890ba19368e0caefda7a6ca9b082c9d7c2911ddd92eba1d83d1cf91408396`).
-It preserves v1 as a historical pre-pilot record and leaves every scientific decision threshold
-unchanged; v2 strengthens the launch/receipt chain and binds the audited
-training-only empirical-prior floor. Its decision is an
+`e7b108dce51cd1445758a9f7dc852532b2ee075a80f783ae009303a7550577ee`).
+It preserves v1 and v2 as historical pre-pilot and pre-health records and
+leaves every scientific setting and decision threshold unchanged. V2
+strengthened the launch/receipt chain and bound the audited training-only
+empirical-prior floor. V3 is a prospective instrumentation repair after the
+first 10-update R health process failed its post-training audit on Lightning's
+documented unranked-checkpoint `+inf` bookkeeping sentinel. That failed R
+performed no denoising or molecular scoring. Since the v2 freeze, no registered
+candidate checkpoint was selected or ranked and no candidate final-evaluation
+run occurred. Earlier ineligible CPU generation smokes and the audited MDLM
+baseline rescoring remain disclosed; v3 does not relabel them. V3 requires a
+closed checkpoint schema, exact structural handling of that one live-bound
+sentinel, exact checkpoint/config, loop, trainer,
+optimizer, scheduler, sampler, and callback bindings, and an independent
+closed-schema summary/receipt verifier. Its decision remains an
 intersection-union gate: all four point requirements and all four interval
 requirements must pass for one candidate that was locked before final seeds
 0, 1, and 2. The lock binds the completed training summary and exit receipt,
@@ -92,7 +103,7 @@ quality, then highest mean diversity, then lexicographically smallest attempt ID
 Artifacts using benchmark-run schema 6 or aggregate-report schema 5 are
 rejected; the required versions are candidate lock 2, candidate ledger 2,
 pilot envelope 2, launcher failure receipt 1, benchmark 7, report 6, launch
-manifest 2, training runtime config 2, training summary 4, and successful exit
+manifest 2, training runtime config 2, training summary 5, and successful exit
 receipt 5.
 
 The MDLM side of the gate is independently bound to
@@ -271,7 +282,12 @@ a schedule bundle hypothesis rather than an exact official-recipe replay.
    Let $H$ be the full 40-character clean pushed source revision used by the
    wrapper. Its deterministic run names are `health-w{W}-r-{H}`,
    `health-w{W}-s-{H}`, and `health-w{W}-e-{H}`; each invocation launches only
-   the first missing arm and rejects incomplete or out-of-order directories. A
+   the first missing arm after a successful prefix and rejects incomplete,
+   failed, malformed, or out-of-order directories. A failed receipt permanently
+   closes that source-revision namespace: preserve its run directory and log in
+   place, repair and push a descendant revision, and restart a fresh R→S→E
+   lineage whose full-revision run names cannot collide with the failed one.
+   Never rename, delete, overwrite, or promote a failed arm's checkpoint. A
    pass is not a favorable
    loss or generated molecule. It is
    `output/udlm/health-w{W}-e-{H}/pilot_exit_status.json` accepted by
@@ -280,6 +296,13 @@ a schedule bundle hypothesis rather than an exact official-recipe replay.
    training/checkpoint state, and checkpoint save/reload. The normalized result
    allows only `screen_authorization`; generation, ranking, superiority, and
    candidate-lock eligibility are all false.
+
+   Training-summary schema 5 checks every model, EMA, optimizer, and remaining
+   non-sentinel floating checkpoint tensor for finiteness. It separately
+   verifies the sole allowed non-finite framework record: Lightning 2.5.1's
+   scalar float32 `ModelCheckpoint.kth_value=+inf` sentinel for the exact
+   unmonitored minimum-mode callback. Any other value, shape, callback state,
+   path, framework version, or additional non-finite tensor fails closed.
 4. **Implemented but not yet registered or authorized scheduler screen:** on E
    only, seed 17, compare 100 updates of E-L0 (the current additive conditioner
    and constant schedule with 2,500-update warmup) against E-L1 (the same
@@ -447,7 +470,7 @@ The exact production observation topology is frozen in
 canonical SHA-256
 `ff45961276df75f445221fd1aa4629262d21fdb852bd9b226ad56fe2559315d5`).
 It lists all 24 FiLM tensors and four timestep-MLP tensors in model order.
-Training-summary schema 4 records a contract-bound audit for A1 and explicit
+Training-summary schema 5 records a contract-bound audit for A1 and explicit
 null for every other arm; exit-receipt schema 5 independently validates and
 echoes it. Every optimization-screen arm also records
 `screen_initialization_state_audit` immediately after the verified MDLM-EMA

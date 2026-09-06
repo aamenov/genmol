@@ -141,9 +141,119 @@ EXPECTED_UPDATES = {"scheduler": 100, "conditioning": 500}
 EXPECTED_ARTIFACT_SCHEMA_VERSIONS = {
     "launch_manifest": 2,
     "runtime_config": 2,
-    "training_summary": 4,
+    "training_summary": 5,
     "exit_receipt": 5,
     "denoising_report": DENOISING_REPORT_SCHEMA_VERSION,
+}
+_STABLE_ARTIFACT_SNAPSHOT_KEYS = {
+    "path",
+    "device",
+    "inode",
+    "mode",
+    "link_count",
+    "size_bytes",
+    "mtime_ns",
+    "ctime_ns",
+    "sha256",
+    "stable_regular_file_verified",
+}
+_RUNTIME_CONFIG_KEYS = {
+    "schema_version",
+    "status",
+    "source_revision",
+    "source",
+    "training_argv",
+    "observed_training_argv",
+    "training_argv_sha256",
+    "resolved_training_config",
+    "resolved_training_config_sha256",
+    "launch_manifest",
+    "completion_contract",
+    "python_environment",
+}
+_TRAINING_SUMMARY_KEYS = {
+    "schema_version",
+    "status",
+    "completed_at_utc",
+    "source_revision",
+    "source",
+    "resolved_training_config_sha256",
+    "training_argv_sha256",
+    "launch_manifest",
+    "runtime_config",
+    "completion_contract",
+    "observed_training_state",
+    "training_accounting",
+    "training_health",
+    "conditioning_gradient_audit",
+    "screen_initialization_state_audit",
+    "final_checkpoint",
+    "tensor_finiteness",
+    "startup",
+}
+_TRAINING_ACCOUNTING_KEYS = {
+    "training_seed",
+    "optimizer_updates",
+    "world_size",
+    "micro_batch_size_per_rank",
+    "accumulate_grad_batches",
+    "effective_global_examples_per_optimizer_step",
+    "total_requested_example_exposures",
+    "hosted_stream_rank_partition_policy",
+    "trainable_parameter_counts",
+}
+_TRAINING_HEALTH_KEYS = {
+    "scope",
+    "all_losses_finite",
+    "all_observed_gradients_finite",
+    "every_optimizer_step_had_a_nonzero_gradient",
+    "loss_checks",
+    "optimizer_step_checks",
+    "gradient_tensor_observations",
+    "gradient_element_observations",
+}
+_EXIT_RECEIPT_KEYS = {
+    "schema_version",
+    "status",
+    "overall_status",
+    "recorded_at_utc",
+    "process_exit_status",
+    "expected_contract",
+    "pipeline",
+    "source_at_receipt",
+    "launch_manifest",
+    "predecessor_receipt_binding",
+    "training_job_lock",
+    "training_summary",
+    "runtime_config",
+    "final_checkpoint",
+    "completion_requirements",
+}
+_EXIT_COMPLETION_KEYS = {
+    "training_exit_zero",
+    "tee_exit_zero",
+    "training_summary_valid_and_launch_bound",
+    "launch_manifest_matches_summary_runtime_and_launch",
+    "predecessor_receipt_binding_unchanged_and_valid",
+    "training_job_lock_valid_before_receipt_publication",
+    "runtime_config_matches_summary_and_launch",
+    "final_checkpoint_matches_training_summary",
+    "clean_pushed_source_still_matches_launch",
+    "all_must_hold",
+}
+_HOSTED_STREAM_RANK_PARTITION_POLICY = (
+    "huggingface_split_dataset_by_node_disjoint_rank_streams"
+)
+_TRAINING_HEALTH_SCOPE = (
+    "global-rank-zero callback counters; identical fail-fast checks "
+    "execute independently on every rank"
+)
+_CONTROLLED_PYTHON_ENVIRONMENT = {
+    "PYTHONNOUSERSITE": "1",
+    "PYTHONOPTIMIZE": "0",
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "PYTHONUTF8": "1",
+    "PYTHONIOENCODING": "utf-8",
 }
 MAX_SAFE_UTILIZATION_PERCENT = 10
 MIN_SAFE_FREE_MEMORY_MIB = 30_000
@@ -2601,15 +2711,361 @@ def _validate_launch_manifest(
     return selected_uuids
 
 
+def _absolute_artifact_path(
+    value: object,
+    *,
+    label: str,
+    expected_ref: Mapping[str, Any] | None = None,
+    suffix: str | None = None,
+) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value.strip() != value
+        or "\\" in value
+        or value.startswith("//")
+    ):
+        raise ScreenValidationError(f"{label} must be a nonempty absolute POSIX path")
+    path = PurePosixPath(value)
+    if (
+        not path.is_absolute()
+        or path.as_posix() != value
+        or any(part in {"", ".", ".."} for part in path.parts[1:])
+    ):
+        raise ScreenValidationError(f"{label} must be normalized and absolute")
+    if suffix is not None and path.suffix != suffix:
+        raise ScreenValidationError(f"{label} must end in {suffix}")
+    if expected_ref is not None:
+        relative = expected_ref.get("relative_path")
+        if not isinstance(relative, str) or not value.endswith(f"/{relative}"):
+            raise ScreenValidationError(f"{label} is not bound to its artifact ref")
+    return value
+
+
+def _validate_source_record(
+    value: object, *, label: str, source_revision: str
+) -> dict[str, Any]:
+    source = _mapping(value, label)
+    _exact_keys(source, {"head", "upstream"}, label)
+    if any(source.get(key) != source_revision for key in ("head", "upstream")):
+        raise ScreenValidationError(f"{label} is not bound to the run revision")
+    return dict(source)
+
+
+def _validate_stable_snapshot(
+    value: object,
+    *,
+    label: str,
+    expected_path: str,
+    expected_ref: Mapping[str, Any] | None = None,
+    extra_keys: set[str] | None = None,
+) -> dict[str, Any]:
+    snapshot = _mapping(value, label)
+    extras = set() if extra_keys is None else extra_keys
+    _exact_keys(snapshot, _STABLE_ARTIFACT_SNAPSHOT_KEYS | extras, label)
+    if snapshot.get("path") != expected_path:
+        raise ScreenValidationError(f"{label} path is unmatched")
+    numeric_fields = (
+        ("device", 0),
+        ("inode", 1),
+        ("mode", 1),
+        ("link_count", 1),
+        ("size_bytes", 1),
+        ("mtime_ns", 0),
+        ("ctime_ns", 0),
+    )
+    for key, minimum in numeric_fields:
+        _integer(snapshot.get(key), f"{label}.{key}", minimum=minimum)
+    if not stat.S_ISREG(snapshot["mode"]) or snapshot["link_count"] != 1:
+        raise ScreenValidationError(f"{label} is not a single-link regular file")
+    _sha256(snapshot.get("sha256"), f"{label}.sha256")
+    if (
+        _boolean(
+            snapshot.get("stable_regular_file_verified"),
+            f"{label}.stable_regular_file_verified",
+        )
+        is not True
+    ):
+        raise ScreenValidationError(f"{label} is not a verified stable file")
+    if expected_ref is not None and (
+        snapshot.get("sha256") != expected_ref.get("sha256")
+        or snapshot.get("size_bytes") != expected_ref.get("size_bytes")
+    ):
+        raise ScreenValidationError(f"{label} content identity is unmatched")
+    return dict(snapshot)
+
+
+def _snapshot_base(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: value[key] for key in _STABLE_ARTIFACT_SNAPSHOT_KEYS}
+
+
+def _validate_completion_contract(
+    value: object,
+    *,
+    label: str,
+    manifest: Mapping[str, Any],
+    expected_steps: int,
+    expected_world_size: int,
+) -> dict[str, Any]:
+    completion = _mapping(value, label)
+    _exact_keys(
+        completion,
+        {
+            "summary_schema_version",
+            "summary_path",
+            "final_checkpoint_path",
+            "expected_max_steps",
+            "expected_world_size",
+            "fail_on_nonfinite_loss",
+            "backward_anomaly_detection",
+        },
+        label,
+    )
+    expected_values = {
+        "summary_schema_version": EXPECTED_ARTIFACT_SCHEMA_VERSIONS["training_summary"],
+        "summary_path": manifest.get("training_summary_path"),
+        "final_checkpoint_path": manifest.get("expected_final_checkpoint_path"),
+        "expected_max_steps": expected_steps,
+        "expected_world_size": expected_world_size,
+        "fail_on_nonfinite_loss": True,
+        "backward_anomaly_detection": True,
+    }
+    if any(
+        not _exact_json_equal(completion.get(key), expected)
+        for key, expected in expected_values.items()
+    ):
+        raise ScreenValidationError(f"{label} is unmatched")
+    return dict(completion)
+
+
+def _validate_launch_completion_contract(value: object) -> None:
+    label = "launch completion contract"
+    completion = _mapping(value, label)
+    _exact_keys(
+        completion,
+        {
+            "status_at_launch",
+            "valid_training_summary_and_successful_exit_receipt_both_required",
+            "complete_only_if_valid_training_summary_exists",
+            "complete_only_if_successful_exit_receipt_exists",
+            "absent_exit_receipt_means",
+            "missing_summary_after_tmux_exit_means",
+            "successful_exit_receipt_requires",
+            "training_job_lock_release",
+        },
+        label,
+    )
+    requirements = _mapping(
+        completion.get("successful_exit_receipt_requires"),
+        f"{label}.successful_exit_receipt_requires",
+    )
+    expected_requirements = {
+        "training_exit_status": 0,
+        "tee_exit_status": 0,
+        "valid_launch_bound_training_summary": True,
+        "exact_launch_manifest_still_matches": True,
+        "clean_pushed_source_at_receipt": True,
+    }
+    if not _exact_json_equal(requirements, expected_requirements):
+        raise ScreenValidationError(f"{label} requirements are unmatched")
+    expected = {
+        "status_at_launch": "pending",
+        "valid_training_summary_and_successful_exit_receipt_both_required": True,
+        "complete_only_if_valid_training_summary_exists": True,
+        "complete_only_if_successful_exit_receipt_exists": True,
+        "absent_exit_receipt_means": "incomplete",
+        "missing_summary_after_tmux_exit_means": "incomplete",
+        "successful_exit_receipt_requires": expected_requirements,
+        "training_job_lock_release": (
+            "after_exit_receipt_publication_for_completed_or_failed_pipeline"
+        ),
+    }
+    if not _exact_json_equal(completion, expected):
+        raise ScreenValidationError(f"{label} is unmatched")
+
+
+def _validate_training_job_lock_binding(
+    value: object,
+    *,
+    manifest: Mapping[str, Any],
+    source_revision: str,
+) -> dict[str, Any]:
+    label = "launch training-job lock binding"
+    binding = _mapping(value, label)
+    _exact_keys(
+        binding,
+        {
+            "path",
+            "sha256",
+            "record",
+            "acquired_before_any_gpu_probe",
+            "release_owner",
+            "stale_lock_policy",
+        },
+        label,
+    )
+    lock_path = _absolute_artifact_path(
+        binding.get("path"), label=f"{label}.path", suffix=".lock"
+    )
+    if not lock_path.endswith("/output/udlm/.single_training_job.lock"):
+        raise ScreenValidationError(f"{label} path is outside the global lease")
+    lock_sha256 = _sha256(binding.get("sha256"), f"{label}.sha256")
+    record = _mapping(binding.get("record"), f"{label}.record")
+    _exact_keys(
+        record,
+        {
+            "schema_version",
+            "status",
+            "owner_token",
+            "acquired_at_utc",
+            "launcher_pid_at_acquisition",
+            "owner_process_exit_does_not_make_lock_stale",
+            "source_revision",
+            "run_name",
+            "training_variant",
+            "purpose",
+            "stale_lock_policy",
+            "release_policy",
+        },
+        f"{label}.record",
+    )
+    acquired_at = _utc_timestamp(
+        record.get("acquired_at_utc"), f"{label}.record.acquired_at_utc"
+    )
+    inventory_at = _utc_timestamp(
+        manifest.get("inventory_snapshot_completed_at_utc"),
+        "launch inventory timestamp",
+    )
+    expected_record = {
+        "schema_version": 1,
+        "status": "held",
+        "owner_token": record.get("owner_token"),
+        "acquired_at_utc": record.get("acquired_at_utc"),
+        "launcher_pid_at_acquisition": record.get("launcher_pid_at_acquisition"),
+        "owner_process_exit_does_not_make_lock_stale": True,
+        "source_revision": source_revision,
+        "run_name": manifest.get("run_name"),
+        "training_variant": "udlm_categorical",
+        "purpose": "enforce_one_registered_optimization_screen_job_at_a_time",
+        "stale_lock_policy": "fail_closed_and_require_manual_review",
+        "release_policy": (
+            "exact_owner_lock_only_after_receipt_or_before_tmux_handoff_failure"
+        ),
+    }
+    _sha256(record.get("owner_token"), f"{label}.record.owner_token")
+    _integer(
+        record.get("launcher_pid_at_acquisition"),
+        f"{label}.record.launcher_pid_at_acquisition",
+        minimum=1,
+    )
+    if not _exact_json_equal(record, expected_record) or acquired_at > inventory_at:
+        raise ScreenValidationError(f"{label} record is unmatched")
+    record_payload = (
+        json.dumps(dict(record), indent=2, sort_keys=True, allow_nan=False) + "\n"
+    ).encode("utf-8")
+    if hashlib.sha256(record_payload).hexdigest() != lock_sha256:
+        raise ScreenValidationError(f"{label} digest is not bound to its record")
+    if (
+        _boolean(
+            binding.get("acquired_before_any_gpu_probe"),
+            f"{label}.acquired_before_any_gpu_probe",
+        )
+        is not True
+        or binding.get("release_owner") != "pilot_exit_receipt_writer_after_publication"
+        or binding.get("stale_lock_policy") != "fail_closed_and_require_manual_review"
+    ):
+        raise ScreenValidationError(f"{label} policy is unmatched")
+    return {**dict(binding), "record": dict(record)}
+
+
+def _validate_manifest_training_bindings(
+    manifest: Mapping[str, Any],
+    *,
+    refs: Mapping[str, Mapping[str, Any]],
+    checkpoint: Mapping[str, Any],
+    arm: Mapping[str, Any],
+    resolved_config: Mapping[str, Any],
+    resolved_config_sha256: str,
+    source_revision: str,
+) -> dict[str, Any]:
+    if (
+        manifest.get("run_name") != arm.get("attempt_id")
+        or manifest.get("training_variant") != "udlm_categorical"
+        or manifest.get("hydra_config_name") != "udlm_categorical"
+        or not _exact_json_equal(
+            manifest.get("resolved_training_config"), resolved_config
+        )
+        or manifest.get("resolved_training_config_sha256") != resolved_config_sha256
+    ):
+        raise ScreenValidationError("launch manifest training binding is unmatched")
+    if canonical_json_sha256(resolved_config) != resolved_config_sha256:
+        raise ScreenValidationError("resolved config content digest is unmatched")
+    argv = manifest.get("training_argv")
+    if (
+        not isinstance(argv, list)
+        or len(argv) < 3
+        or any(not isinstance(item, str) or not item for item in argv)
+        or argv[1] != "-u"
+    ):
+        raise ScreenValidationError("launch manifest training argv is invalid")
+    _absolute_artifact_path(argv[0], label="launch Python interpreter")
+    _absolute_artifact_path(argv[2], label="launch training entrypoint", suffix=".py")
+    if not argv[2].endswith("/scripts/train.py"):
+        raise ScreenValidationError("launch training entrypoint is unmatched")
+    argv_sha256 = _sha256(
+        manifest.get("training_argv_sha256"), "launch training argv digest"
+    )
+    if canonical_json_sha256(argv[2:]) != argv_sha256:
+        raise ScreenValidationError("launch training argv digest is unmatched")
+    path_bindings = (
+        ("launch_manifest_path", refs["launch_manifest"], ".json"),
+        ("runtime_config_path", refs["runtime_config"], ".json"),
+        ("training_summary_path", refs["training_summary"], ".json"),
+        ("pilot_exit_status_path", refs["exit_receipt"], ".json"),
+        ("expected_final_checkpoint_path", checkpoint, ".ckpt"),
+    )
+    for field, ref, suffix in path_bindings:
+        _absolute_artifact_path(
+            manifest.get(field),
+            label=f"launch manifest {field}",
+            expected_ref=ref,
+            suffix=suffix,
+        )
+    repository_prefix = manifest["launch_manifest_path"].removesuffix(
+        f"/{refs['launch_manifest']['relative_path']}"
+    )
+    if str(PurePosixPath(argv[2]).parents[1]) != repository_prefix:
+        raise ScreenValidationError(
+            "launch training entrypoint and artifact repository roots differ"
+        )
+    if (
+        manifest.get("training_summary_schema_version")
+        != EXPECTED_ARTIFACT_SCHEMA_VERSIONS["training_summary"]
+        or manifest.get("pilot_exit_status_schema_version")
+        != EXPECTED_ARTIFACT_SCHEMA_VERSIONS["exit_receipt"]
+    ):
+        raise ScreenValidationError("launch completion schemas are unmatched")
+    _validate_launch_completion_contract(manifest.get("completion_contract"))
+    return _validate_training_job_lock_binding(
+        manifest.get("single_training_job_lock"),
+        manifest=manifest,
+        source_revision=source_revision,
+    )
+
+
 def _validate_runtime_record(
     runtime: Mapping[str, Any],
     *,
     registry: ValidatedRegistry,
-    config_entry: Mapping[str, Any],
+    manifest: Mapping[str, Any],
     manifest_ref: Mapping[str, Any],
     selected_uuids: Sequence[str],
+    resolved_config: Mapping[str, Any],
+    resolved_config_sha256: str,
+    expected_steps: int,
     source_revision: str,
-) -> None:
+) -> dict[str, Any]:
+    _exact_keys(runtime, _RUNTIME_CONFIG_KEYS, "runtime config")
     if (
         _integer(runtime.get("schema_version"), "runtime config schema")
         != EXPECTED_ARTIFACT_SCHEMA_VERSIONS["runtime_config"]
@@ -2619,16 +3075,65 @@ def _validate_runtime_record(
         raise ScreenValidationError("runtime preflight did not complete")
     if runtime.get("source_revision") != source_revision:
         raise ScreenValidationError("runtime source revision is unmatched")
+    source = _validate_source_record(
+        runtime.get("source"), label="runtime source", source_revision=source_revision
+    )
+    manifest_argv = manifest.get("training_argv")
+    runtime_argv = runtime.get("training_argv")
     if (
-        runtime.get("resolved_training_config_sha256")
-        != config_entry["config"]["canonical_sha256"]
+        not isinstance(manifest_argv, list)
+        or not isinstance(runtime_argv, list)
+        or runtime_argv != manifest_argv[2:]
+        or runtime.get("observed_training_argv") != runtime_argv
+        or any(not isinstance(item, str) or not item for item in runtime_argv)
+        or canonical_json_sha256(runtime_argv) != manifest.get("training_argv_sha256")
+        or runtime.get("training_argv_sha256") != manifest.get("training_argv_sha256")
+    ):
+        raise ScreenValidationError("runtime training argv is unmatched")
+    if runtime.get(
+        "resolved_training_config_sha256"
+    ) != resolved_config_sha256 or not _exact_json_equal(
+        runtime.get("resolved_training_config"), resolved_config
     ):
         raise ScreenValidationError("runtime resolved config is unmatched")
-    manifest = _mapping(runtime.get("launch_manifest"), "runtime manifest binding")
-    if manifest.get("sha256") != manifest_ref["sha256"] or manifest.get(
-        "selected_gpu_uuids"
-    ) != list(selected_uuids):
+    runtime_manifest = _validate_stable_snapshot(
+        runtime.get("launch_manifest"),
+        label="runtime launch-manifest snapshot",
+        expected_path=manifest["launch_manifest_path"],
+        expected_ref=manifest_ref,
+        extra_keys={"selected_gpu_uuids"},
+    )
+    if runtime_manifest.get("selected_gpu_uuids") != list(selected_uuids):
         raise ScreenValidationError("runtime manifest/GPU binding is unmatched")
+    completion = _validate_completion_contract(
+        runtime.get("completion_contract"),
+        label="runtime completion contract",
+        manifest=manifest,
+        expected_steps=expected_steps,
+        expected_world_size=registry.data["common_training"]["gpu_count"],
+    )
+    python_environment = _mapping(
+        runtime.get("python_environment"), "runtime Python environment"
+    )
+    if not runtime_argv:
+        raise ScreenValidationError("runtime training argv is empty")
+    training_entrypoint = PurePosixPath(runtime_argv[0])
+    repository_root = training_entrypoint.parents[1]
+    expected_python_environment = {
+        **_CONTROLLED_PYTHON_ENVIRONMENT,
+        "PYTHONHASHSEED": str(EXPECTED_TRAINING_SEED),
+        "PYTHONPATH": os.pathsep.join(
+            (str(repository_root / "src"), str(repository_root))
+        ),
+    }
+    if not _exact_json_equal(python_environment, expected_python_environment):
+        raise ScreenValidationError("runtime Python environment is unmatched")
+    return {
+        "source": source,
+        "training_argv": list(runtime_argv),
+        "launch_manifest": runtime_manifest,
+        "completion_contract": completion,
+    }
 
 
 def _checkpoint_ref(value: object, label: str) -> dict[str, Any]:
@@ -2723,44 +3228,586 @@ def _validate_initialization(
     return {**dict(initialization), "state_audit": dict(state_audit)}
 
 
-def _validate_training_summary(
-    summary: Mapping[str, Any],
+def _validate_checkpoint_finiteness_record(value: object, *, label: str) -> int:
+    record = _mapping(value, label)
+    _exact_keys(
+        record,
+        {"all_finite", "floating_tensor_count", "floating_element_count"},
+        label,
+    )
+    if _boolean(record.get("all_finite"), f"{label}.all_finite") is not True:
+        raise ScreenValidationError(f"{label} is not finite")
+    tensor_count = _integer(
+        record.get("floating_tensor_count"),
+        f"{label}.floating_tensor_count",
+        minimum=1,
+    )
+    element_count = _integer(
+        record.get("floating_element_count"),
+        f"{label}.floating_element_count",
+        minimum=1,
+    )
+    if element_count < tensor_count:
+        raise ScreenValidationError(f"{label} element count is invalid")
+    return tensor_count
+
+
+def _expected_framework_nonfinite_sentinels(*, expected_steps: int) -> dict[str, Any]:
+    callback_key = (
+        "ModelCheckpoint{'monitor': None, 'mode': 'min', "
+        f"'every_n_train_steps': {expected_steps}, 'every_n_epochs': 0, "
+        "'train_time_interval': None}"
+    )
+    return {
+        "all_expected_and_only_expected_verified": True,
+        "nonfinite_tensor_count": 1,
+        "nonfinite_element_count": 1,
+        "records": [
+            {
+                "tensor_path_components": [
+                    "checkpoint",
+                    "callbacks",
+                    callback_key,
+                    "kth_value",
+                ],
+                "framework": "lightning",
+                "framework_version": "2.5.1",
+                "callback": "ModelCheckpoint",
+                "field": "kth_value",
+                "dtype": "float32",
+                "shape": [],
+                "value": "+inf",
+                "meaning": "unranked_min_mode_checkpoint_sentinel",
+                "excluded_from_non_sentinel_finiteness": True,
+            }
+        ],
+    }
+
+
+def _validate_checkpoint_semantic_audit(
+    value: object,
+    *,
+    expected_steps: int,
+    resolved_config: Mapping[str, Any],
+    resolved_config_sha256: str,
+) -> dict[str, Any]:
+    label = "training-summary checkpoint semantic audit"
+    semantic = _mapping(value, label)
+    _exact_keys(
+        semantic,
+        {
+            "deserialized",
+            "global_step",
+            "raw_model",
+            "ema",
+            "ema_metadata",
+            "optimizer",
+            "non_sentinel_checkpoint_tensors",
+            "checkpoint_python_floats",
+            "framework_nonfinite_sentinels",
+            "checkpoint_hyperparameters_match",
+            "checkpoint_loop_state_match",
+            "optimizer_live_state_match",
+            "scheduler_live_state_match",
+            "sampler_live_state_match",
+            "trainer_live_configuration_match",
+            "model_checkpoint_live_state_match",
+            "udlm_process_identity_verified",
+            "live_model_match",
+            "live_ema_match",
+        },
+        label,
+    )
+    if (
+        _boolean(semantic.get("deserialized"), f"{label}.deserialized") is not True
+        or _boolean(
+            semantic.get("udlm_process_identity_verified"),
+            f"{label}.udlm_process_identity_verified",
+        )
+        is not True
+        or _integer(semantic.get("global_step"), f"{label}.global_step")
+        != expected_steps
+    ):
+        raise ScreenValidationError(f"{label} completion identity is invalid")
+    finiteness_records = {
+        key: dict(_mapping(semantic.get(key), f"{label}.{key}"))
+        for key in (
+            "raw_model",
+            "ema",
+            "optimizer",
+            "non_sentinel_checkpoint_tensors",
+        )
+    }
+    finiteness_counts = {
+        key: _validate_checkpoint_finiteness_record(record, label=f"{label}.{key}")
+        for key, record in finiteness_records.items()
+    }
+    covered_tensor_count = sum(
+        finiteness_counts[key] for key in ("raw_model", "ema", "optimizer")
+    )
+    covered_element_count = sum(
+        _integer(
+            finiteness_records[key].get("floating_element_count"),
+            f"{label}.{key}.floating_element_count",
+            minimum=1,
+        )
+        for key in ("raw_model", "ema", "optimizer")
+    )
+    if (
+        finiteness_counts["non_sentinel_checkpoint_tensors"] < covered_tensor_count
+        or _integer(
+            finiteness_records["non_sentinel_checkpoint_tensors"].get(
+                "floating_element_count"
+            ),
+            f"{label}.non_sentinel_checkpoint_tensors.floating_element_count",
+            minimum=1,
+        )
+        < covered_element_count
+    ):
+        raise ScreenValidationError(
+            f"{label} aggregate tensor finiteness undercounts protected state"
+        )
+    sentinel = _mapping(
+        semantic.get("framework_nonfinite_sentinels"),
+        f"{label}.framework_nonfinite_sentinels",
+    )
+    if canonical_json_sha256(sentinel) != canonical_json_sha256(
+        _expected_framework_nonfinite_sentinels(expected_steps=expected_steps)
+    ):
+        raise ScreenValidationError(f"{label} framework sentinel is invalid")
+
+    python_floats = _mapping(
+        semantic.get("checkpoint_python_floats"),
+        f"{label}.checkpoint_python_floats",
+    )
+    _exact_keys(
+        python_floats,
+        {"all_finite", "floating_scalar_count"},
+        f"{label}.checkpoint_python_floats",
+    )
+    if (
+        _boolean(
+            python_floats.get("all_finite"),
+            f"{label}.checkpoint_python_floats.all_finite",
+        )
+        is not True
+    ):
+        raise ScreenValidationError(f"{label} Python floats are not finite")
+    _integer(
+        python_floats.get("floating_scalar_count"),
+        f"{label}.checkpoint_python_floats.floating_scalar_count",
+        minimum=1,
+    )
+
+    trainer_config = _mapping(resolved_config.get("trainer"), "resolved trainer")
+    accumulation = _integer(
+        trainer_config.get("accumulate_grad_batches"),
+        "resolved gradient accumulation",
+        minimum=1,
+    )
+    optim_config = _mapping(resolved_config.get("optim"), "resolved optimizer")
+    scheduler_config = _mapping(
+        optim_config.get("scheduler"), "resolved optimizer scheduler"
+    )
+    warmup_updates = _integer(
+        scheduler_config.get("warmup_updates"),
+        "resolved scheduler warmup",
+        minimum=0,
+    )
+    horizon = scheduler_config.get("horizon_updates")
+    horizon_updates = (
+        0
+        if horizon is None
+        else _integer(horizon, "resolved scheduler horizon", minimum=0)
+    )
+    schedule_checks = (
+        max(
+            expected_steps,
+            warmup_updates + 1,
+            horizon_updates + 1,
+        )
+        + 1
+    )
+
+    optimizer = _mapping(
+        semantic.get("optimizer_live_state_match"),
+        f"{label}.optimizer_live_state_match",
+    )
+    _exact_keys(
+        optimizer,
+        {
+            "exact_serialized_live_match",
+            "optimizer_count",
+            "optimizer_class",
+            "parameter_group_count",
+            "parameter_state_count",
+            "exact_resolved_config_match",
+        },
+        f"{label}.optimizer_live_state_match",
+    )
+    if not _exact_json_equal(
+        optimizer,
+        {
+            "exact_serialized_live_match": True,
+            "optimizer_count": 1,
+            "optimizer_class": "AdamW",
+            "parameter_group_count": 1,
+            "parameter_state_count": optimizer.get("parameter_state_count"),
+            "exact_resolved_config_match": True,
+        },
+    ):
+        raise ScreenValidationError(f"{label} optimizer live-state match is invalid")
+    optimizer_parameter_count = _integer(
+        optimizer.get("parameter_state_count"),
+        f"{label}.optimizer parameter count",
+        minimum=1,
+    )
+    scheduler = _mapping(
+        semantic.get("scheduler_live_state_match"),
+        f"{label}.scheduler_live_state_match",
+    )
+    if not _exact_json_equal(
+        scheduler,
+        {
+            "exact_serialized_live_match": True,
+            "scheduler_count": 1,
+            "scheduler_class": "LambdaLR",
+            "interval": "step",
+            "name": "lr",
+            "last_epoch": expected_steps,
+            "step_count": expected_steps + 1,
+            "exact_model_spec_match": True,
+            "exact_callable_schedule_match": True,
+            "callable_schedule_index_checks": schedule_checks,
+        },
+    ):
+        raise ScreenValidationError(f"{label} scheduler live-state match is invalid")
+    sampler = _mapping(
+        semantic.get("sampler_live_state_match"),
+        f"{label}.sampler_live_state_match",
+    )
+    if not _exact_json_equal(
+        sampler,
+        {
+            "exact_hosted_stream_contract_match": True,
+            "random_state_is_none": True,
+            "live_state_dict_available": False,
+            "sampler_class_module": "torch.utils.data.dataloader",
+            "sampler_class_name": "_InfiniteConstantSampler",
+        },
+    ):
+        raise ScreenValidationError(f"{label} sampler live-state match is invalid")
+    callback_key = (
+        "ModelCheckpoint{'monitor': None, 'mode': 'min', "
+        f"'every_n_train_steps': {expected_steps}, 'every_n_epochs': 0, "
+        "'train_time_interval': None}"
+    )
+    callback = _mapping(
+        semantic.get("model_checkpoint_live_state_match"),
+        f"{label}.model_checkpoint_live_state_match",
+    )
+    if not _exact_json_equal(
+        callback,
+        {
+            "exact_serialized_live_match": True,
+            "model_checkpoint_callback_count": 1,
+            "state_key": callback_key,
+            "configuration_matches_pilot_contract": True,
+        },
+    ):
+        raise ScreenValidationError(f"{label} callback live-state match is invalid")
+    hyperparameters = _mapping(
+        semantic.get("checkpoint_hyperparameters_match"),
+        f"{label}.checkpoint_hyperparameters_match",
+    )
+    if not _exact_json_equal(
+        hyperparameters,
+        {
+            "hparams_name": "kwargs",
+            "exact_hyperparameter_keys": True,
+            "exact_checkpoint_preflight_config_match": True,
+            "exact_live_model_preflight_config_match": True,
+            "exact_live_hparams_preflight_config_match": True,
+            "exact_checkpoint_live_model_unresolved_config_match": True,
+            "exact_checkpoint_live_hparams_unresolved_config_match": True,
+            "resolved_config_sha256": resolved_config_sha256,
+        },
+    ):
+        raise ScreenValidationError(f"{label} hyperparameter match is invalid")
+    configured_clip = trainer_config.get("gradient_clip_val")
+    configured_precision = trainer_config.get("precision")
+    precision_aliases = {
+        "16": "16-mixed",
+        "bf16": "bf16-mixed",
+        "32": "32-true",
+        "64": "64-true",
+        16: "16-mixed",
+        32: "32-true",
+        64: "64-true",
+    }
+    live_precision = precision_aliases.get(configured_precision, configured_precision)
+    configured_clip_algorithm = trainer_config.get("gradient_clip_algorithm")
+    if configured_clip_algorithm is None:
+        configured_clip_algorithm = "norm"
+    configured_clip_decimal = _decimal(
+        configured_clip,
+        f"{label} resolved gradient clip",
+        nonnegative=True,
+    )
+    if not isinstance(live_precision, str) or configured_clip_algorithm not in {
+        "norm",
+        "value",
+    }:
+        raise ScreenValidationError(f"{label} resolved live-Trainer config is invalid")
+    trainer_match = _mapping(
+        semantic.get("trainer_live_configuration_match"),
+        f"{label}.trainer_live_configuration_match",
+    )
+    if not _exact_json_equal(
+        trainer_match,
+        {
+            "exact_detect_anomaly_match": True,
+            "detect_anomaly": True,
+            "exact_gradient_clip_val_match": True,
+            "gradient_clip_val": configured_clip_decimal,
+            "exact_gradient_clip_algorithm_match": True,
+            "gradient_clip_algorithm": configured_clip_algorithm,
+            "exact_precision_match": True,
+            "configured_precision": str(configured_precision),
+            "live_precision": live_precision,
+        },
+    ):
+        raise ScreenValidationError(f"{label} live Trainer match is invalid")
+    loop_state = _mapping(
+        semantic.get("checkpoint_loop_state_match"),
+        f"{label}.checkpoint_loop_state_match",
+    )
+    if not _exact_json_equal(
+        loop_state,
+        {
+            "exact_serialized_progress_match": True,
+            "epoch": 0,
+            "optimizer_steps": expected_steps,
+            "accumulate_grad_batches": accumulation,
+            "microbatches": expected_steps * accumulation,
+        },
+    ):
+        raise ScreenValidationError(f"{label} loop-state match is invalid")
+
+    ema_metadata = _mapping(semantic.get("ema_metadata"), f"{label}.ema_metadata")
+    _exact_keys(
+        ema_metadata,
+        {"shadow_parameter_count", "decay", "num_updates"},
+        f"{label}.ema_metadata",
+    )
+    shadow_count = _integer(
+        ema_metadata.get("shadow_parameter_count"),
+        f"{label}.ema_metadata.shadow_parameter_count",
+        minimum=1,
+    )
+    ema_decay = _decimal(
+        ema_metadata.get("decay"),
+        f"{label}.ema_metadata.decay",
+    )
+    training_config = _mapping(resolved_config.get("training"), "resolved training")
+    configured_ema_decay = _decimal(
+        training_config.get("ema"), f"{label} resolved EMA decay"
+    )
+    if (
+        shadow_count != finiteness_counts["ema"]
+        or shadow_count != optimizer_parameter_count
+        or _integer(
+            ema_metadata.get("num_updates"),
+            f"{label}.ema_metadata.num_updates",
+        )
+        != expected_steps
+        or not Decimal("0") < ema_decay < Decimal("1")
+        or ema_decay != configured_ema_decay
+    ):
+        raise ScreenValidationError(f"{label} EMA metadata is invalid")
+    live_matches: dict[str, dict[str, Any]] = {}
+    for key, required_keys in (
+        ("live_model_match", {"exact_key_set", "exact_tensor_values", "tensor_count"}),
+        ("live_ema_match", {"exact_tensor_values", "tensor_count"}),
+    ):
+        match = _mapping(semantic.get(key), f"{label}.{key}")
+        live_matches[key] = dict(match)
+        _exact_keys(match, required_keys, f"{label}.{key}")
+        for flag in required_keys - {"tensor_count"}:
+            if _boolean(match.get(flag), f"{label}.{key}.{flag}") is not True:
+                raise ScreenValidationError(f"{label}.{key} is invalid")
+        count = _integer(
+            match.get("tensor_count"), f"{label}.{key}.tensor_count", minimum=1
+        )
+        if key == "live_ema_match" and count != shadow_count:
+            raise ScreenValidationError(f"{label} live EMA count is invalid")
+        if key == "live_model_match" and count < finiteness_counts["raw_model"]:
+            raise ScreenValidationError(f"{label} live model count is invalid")
+    return {
+        "raw_model": finiteness_records["raw_model"],
+        "ema": finiteness_records["ema"],
+        "ema_metadata": dict(ema_metadata),
+        "optimizer": finiteness_records["optimizer"],
+        "non_sentinel_checkpoint_tensors": finiteness_records[
+            "non_sentinel_checkpoint_tensors"
+        ],
+        "live_model_match": live_matches["live_model_match"],
+        "live_ema_match": live_matches["live_ema_match"],
+    }
+
+
+def _validate_training_accounting(
+    value: object,
+    *,
+    registry: ValidatedRegistry,
+    arm_id: str,
+    resolved_config: Mapping[str, Any],
+    expected_steps: int,
+) -> dict[str, Any]:
+    label = "summary training accounting"
+    accounting = _mapping(value, label)
+    _exact_keys(accounting, _TRAINING_ACCOUNTING_KEYS, label)
+    loader_config = _mapping(resolved_config.get("loader"), "resolved loader")
+    trainer_config = _mapping(resolved_config.get("trainer"), "resolved trainer")
+    world_size = registry.data["common_training"]["gpu_count"]
+    micro_batch = _integer(
+        loader_config.get("batch_size"), "resolved micro batch size", minimum=1
+    )
+    accumulation = _integer(
+        trainer_config.get("accumulate_grad_batches"),
+        "resolved gradient accumulation",
+        minimum=1,
+    )
+    effective_batch = micro_batch * world_size * accumulation
+    if (
+        _integer(
+            loader_config.get("global_batch_size"),
+            "resolved global batch size",
+            minimum=1,
+        )
+        != effective_batch
+    ):
+        raise ScreenValidationError("resolved batch accounting is inconsistent")
+    expected = {
+        "training_seed": EXPECTED_TRAINING_SEED,
+        "optimizer_updates": expected_steps,
+        "world_size": world_size,
+        "micro_batch_size_per_rank": micro_batch,
+        "accumulate_grad_batches": accumulation,
+        "effective_global_examples_per_optimizer_step": effective_batch,
+        "total_requested_example_exposures": effective_batch * expected_steps,
+    }
+    for key, expected_value in expected.items():
+        observed = _integer(accounting.get(key), f"{label}.{key}", minimum=1)
+        if observed != expected_value:
+            raise ScreenValidationError(f"{label}.{key} is unmatched")
+    if (
+        accounting.get("hosted_stream_rank_partition_policy")
+        != _HOSTED_STREAM_RANK_PARTITION_POLICY
+    ):
+        raise ScreenValidationError(f"{label} rank partition is unmatched")
+    parameter_counts = _mapping(
+        accounting.get("trainable_parameter_counts"),
+        f"{label}.trainable_parameter_counts",
+    )
+    expected_parameter_keys = {"base_backbone", "time_conditioner", "total"}
+    if arm_id == "E-A1":
+        expected_parameter_keys.add("film_modulation")
+    _exact_keys(
+        parameter_counts,
+        expected_parameter_keys,
+        f"{label}.trainable_parameter_counts",
+    )
+    component_keys = expected_parameter_keys - {"total"}
+    components = {
+        key: _integer(
+            parameter_counts.get(key),
+            f"{label}.trainable_parameter_counts.{key}",
+            minimum=1,
+        )
+        for key in component_keys
+    }
+    total = _integer(
+        parameter_counts.get("total"),
+        f"{label}.trainable_parameter_counts.total",
+        minimum=1,
+    )
+    gradient_groups = {
+        group["group_id"]: group
+        for group in registry.data["stages"][1]["gradient_contract"]["groups"]
+    }
+    expected_time_conditioner = sum(
+        math.prod(parameter["shape"])
+        for parameter in gradient_groups["timestep_mlp"]["parameters"]
+    )
+    expected_film_modulation = sum(
+        math.prod(parameter["shape"])
+        for parameter in gradient_groups["film_modulation"]["parameters"]
+    )
+    if (
+        total != sum(components.values())
+        or components["time_conditioner"] != expected_time_conditioner
+        or (
+            arm_id == "E-A1"
+            and components.get("film_modulation") != expected_film_modulation
+        )
+    ):
+        raise ScreenValidationError(f"{label} parameter counts are inconsistent")
+    return {**dict(accounting), "trainable_parameter_counts": dict(parameter_counts)}
+
+
+def _validate_training_health(value: object, *, expected_steps: int) -> None:
+    label = "summary training health"
+    health = _mapping(value, label)
+    _exact_keys(health, _TRAINING_HEALTH_KEYS, label)
+    if health.get("scope") != _TRAINING_HEALTH_SCOPE:
+        raise ScreenValidationError(f"{label} scope is unmatched")
+    for key in (
+        "all_losses_finite",
+        "all_observed_gradients_finite",
+        "every_optimizer_step_had_a_nonzero_gradient",
+    ):
+        if _boolean(health.get(key), f"{label}.{key}") is not True:
+            raise ScreenValidationError(f"{label}.{key} is false")
+    loss_checks = _integer(health.get("loss_checks"), f"{label}.loss_checks", minimum=1)
+    optimizer_checks = _integer(
+        health.get("optimizer_step_checks"),
+        f"{label}.optimizer_step_checks",
+        minimum=1,
+    )
+    gradient_tensors = _integer(
+        health.get("gradient_tensor_observations"),
+        f"{label}.gradient_tensor_observations",
+        minimum=1,
+    )
+    gradient_elements = _integer(
+        health.get("gradient_element_observations"),
+        f"{label}.gradient_element_observations",
+        minimum=1,
+    )
+    if (
+        loss_checks < expected_steps
+        or optimizer_checks != expected_steps
+        or gradient_tensors < optimizer_checks
+        or gradient_elements < gradient_tensors
+    ):
+        raise ScreenValidationError(f"{label} counters are inconsistent")
+
+
+def _validate_summary_startup(
+    value: object,
     *,
     registry: ValidatedRegistry,
     stage_id: str,
-    arm: Mapping[str, Any],
-    config_entry: Mapping[str, Any],
-    manifest_ref: Mapping[str, Any],
-    checkpoint: Mapping[str, Any],
-    gradient_audit: object,
-    initialization: Mapping[str, Any],
-    source_revision: str,
-) -> None:
-    if (
-        _integer(summary.get("schema_version"), "training summary schema")
-        != EXPECTED_ARTIFACT_SCHEMA_VERSIONS["training_summary"]
-        or summary.get("status") != "completed"
-    ):
-        raise ScreenValidationError(
-            "training summary is not a completed schema-4 record"
-        )
-    if summary.get("source_revision") != source_revision:
-        raise ScreenValidationError("training-summary source revision is unmatched")
-    if (
-        summary.get("resolved_training_config_sha256")
-        != config_entry["config"]["canonical_sha256"]
-    ):
-        raise ScreenValidationError("training-summary config is unmatched")
-    manifest = _mapping(summary.get("launch_manifest"), "summary manifest binding")
-    if manifest.get("sha256") != manifest_ref["sha256"]:
-        raise ScreenValidationError("training summary is not launch-manifest-bound")
-    state = _mapping(summary.get("observed_training_state"), "summary training state")
-    if (
-        state.get("global_step") != EXPECTED_UPDATES[stage_id]
-        or state.get("world_size") != registry.data["common_training"]["gpu_count"]
-    ):
-        raise ScreenValidationError("training summary has unmatched completion state")
-    startup = _mapping(summary.get("startup"), "summary startup")
+    arm_id: str,
+    resolved_config: Mapping[str, Any],
+) -> dict[str, Any]:
+    label = "summary startup"
+    startup = _mapping(value, label)
+    expected_keys = {"mode", "verified_mdlm_warm_start_report"}
+    if stage_id == "conditioning":
+        expected_keys.add("training_rng_policy")
+    _exact_keys(startup, expected_keys, label)
     if startup.get("mode") != "warm_start":
         raise ScreenValidationError("screen summary is not a warm start")
     expected_rng_policy = {
@@ -2769,40 +3816,253 @@ def _validate_training_summary(
         "purpose": "isolate_training_randomness_from_architecture_constructor_draws",
         "applied_before_dataloader_and_trainer_construction": True,
     }
-    if stage_id == "conditioning":
-        if startup.get("training_rng_policy") != expected_rng_policy:
-            raise ScreenValidationError(
-                "screen summary training RNG policy is unmatched"
-            )
-    elif "training_rng_policy" in startup:
-        raise ScreenValidationError(
-            "scheduler summary unexpectedly reseeded after warm start"
-        )
+    if stage_id == "conditioning" and not _exact_json_equal(
+        startup.get("training_rng_policy"), expected_rng_policy
+    ):
+        raise ScreenValidationError("screen summary training RNG policy is unmatched")
     warm_start = _mapping(
-        startup.get("verified_mdlm_warm_start_report"), "summary warm-start report"
+        startup.get("verified_mdlm_warm_start_report"),
+        "summary warm-start report",
     )
-    if (
-        warm_start.get("source_sha256")
-        != registry.data["common_training"]["initialization"]["checkpoint"]["sha256"]
-        or warm_start.get("weights") != "ema"
+    expected_warm_start_keys = {
+        "source_path",
+        "source_resolved_path",
+        "source_sha256",
+        "source_size_bytes",
+        "expected_source_sha256",
+        "byte_identity_verified_before_and_after_load",
+        "weights",
+        "parameter_tensors",
+    }
+    if arm_id == "E-A1":
+        expected_warm_start_keys.update(
+            {"conditioning_variant", "conditioning_parameter_tensors"}
+        )
+    _exact_keys(warm_start, expected_warm_start_keys, "summary warm-start report")
+    checkpoint = registry.data["common_training"]["initialization"]["checkpoint"]
+    training = _mapping(resolved_config.get("training"), "resolved training")
+    configured_path = training.get("init_from_mdlm_checkpoint")
+    if warm_start.get("source_path") != configured_path:
+        raise ScreenValidationError("summary warm-start source path is unmatched")
+    _absolute_artifact_path(
+        warm_start.get("source_resolved_path"),
+        label="summary resolved warm-start path",
+        expected_ref=checkpoint,
+        suffix=".ckpt",
+    )
+    expected_values = {
+        "source_sha256": checkpoint["sha256"],
+        "source_size_bytes": checkpoint["size_bytes"],
+        "expected_source_sha256": checkpoint["sha256"],
+        "byte_identity_verified_before_and_after_load": True,
+        "weights": "ema",
+    }
+    if arm_id == "E-A1":
+        expected_values["conditioning_variant"] = "film_adaln"
+    if any(
+        not _exact_json_equal(warm_start.get(key), expected)
+        for key, expected in expected_values.items()
     ):
         raise ScreenValidationError("training summary warm start is unmatched")
-    final_checkpoint = _mapping(summary.get("final_checkpoint"), "summary checkpoint")
-    for field in ("sha256", "size_bytes"):
-        if final_checkpoint.get(field) != checkpoint[field]:
-            raise ScreenValidationError("summary checkpoint differs from evidence")
-    if summary.get("conditioning_gradient_audit") != gradient_audit:
+    _integer(
+        warm_start.get("parameter_tensors"),
+        "summary warm-start parameter_tensors",
+        minimum=1,
+    )
+    if arm_id == "E-A1":
+        registered_conditioning_tensors = sum(
+            len(group["parameters"])
+            for group in registry.data["stages"][1]["gradient_contract"]["groups"]
+        )
+        if (
+            _integer(
+                warm_start.get("conditioning_parameter_tensors"),
+                "summary warm-start conditioning_parameter_tensors",
+                minimum=1,
+            )
+            != registered_conditioning_tensors
+        ):
+            raise ScreenValidationError(
+                "summary warm-start conditioning tensor count is unmatched"
+            )
+    return dict(startup)
+
+
+def _validate_training_summary(
+    summary: Mapping[str, Any],
+    *,
+    registry: ValidatedRegistry,
+    stage_id: str,
+    arm: Mapping[str, Any],
+    config_entry: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+    manifest_ref: Mapping[str, Any],
+    runtime: Mapping[str, Any],
+    runtime_ref: Mapping[str, Any],
+    runtime_validation: Mapping[str, Any],
+    checkpoint: Mapping[str, Any],
+    gradient_audit: object,
+    initialization: Mapping[str, Any],
+    resolved_config: Mapping[str, Any],
+    source_revision: str,
+) -> dict[str, Any]:
+    _exact_keys(summary, _TRAINING_SUMMARY_KEYS, "training summary")
+    if (
+        _integer(summary.get("schema_version"), "training summary schema")
+        != EXPECTED_ARTIFACT_SCHEMA_VERSIONS["training_summary"]
+        or summary.get("status") != "completed"
+    ):
+        raise ScreenValidationError(
+            "training summary is not a completed schema-5 record"
+        )
+    completed_at = _utc_timestamp(
+        summary.get("completed_at_utc"), "training-summary completion timestamp"
+    )
+    if completed_at <= _utc_timestamp(
+        manifest.get("created_at"), "launch-manifest creation timestamp"
+    ):
+        raise ScreenValidationError("training summary predates the launch manifest")
+    if summary.get("source_revision") != source_revision:
+        raise ScreenValidationError("training-summary source revision is unmatched")
+    source = _validate_source_record(
+        summary.get("source"),
+        label="training-summary source",
+        source_revision=source_revision,
+    )
+    resolved_config_sha256 = config_entry["config"]["canonical_sha256"]
+    if summary.get(
+        "resolved_training_config_sha256"
+    ) != resolved_config_sha256 or summary.get("training_argv_sha256") != manifest.get(
+        "training_argv_sha256"
+    ):
+        raise ScreenValidationError("training-summary config/argv is unmatched")
+    summary_manifest = _validate_stable_snapshot(
+        summary.get("launch_manifest"),
+        label="summary launch-manifest snapshot",
+        expected_path=manifest["launch_manifest_path"],
+        expected_ref=manifest_ref,
+        extra_keys={"selected_gpu_uuids"},
+    )
+    if summary_manifest.get("selected_gpu_uuids") != list(
+        runtime_validation["launch_manifest"]["selected_gpu_uuids"]
+    ) or not _exact_json_equal(summary_manifest, runtime_validation["launch_manifest"]):
+        raise ScreenValidationError("training summary is not launch-manifest-bound")
+    summary_runtime = _validate_stable_snapshot(
+        summary.get("runtime_config"),
+        label="summary runtime-config snapshot",
+        expected_path=manifest["runtime_config_path"],
+        expected_ref=runtime_ref,
+        extra_keys={"schema_version", "record_sha256"},
+    )
+    if _integer(
+        summary_runtime.get("schema_version"),
+        "summary runtime-config schema",
+    ) != EXPECTED_ARTIFACT_SCHEMA_VERSIONS["runtime_config"] or summary_runtime.get(
+        "record_sha256"
+    ) != canonical_json_sha256(runtime):
+        raise ScreenValidationError("summary runtime-config binding is unmatched")
+    expected_steps = EXPECTED_UPDATES[stage_id]
+    world_size = registry.data["common_training"]["gpu_count"]
+    completion = _validate_completion_contract(
+        summary.get("completion_contract"),
+        label="summary completion contract",
+        manifest=manifest,
+        expected_steps=expected_steps,
+        expected_world_size=world_size,
+    )
+    if not _exact_json_equal(completion, runtime_validation["completion_contract"]):
+        raise ScreenValidationError("summary/runtime completion contracts differ")
+    training = _mapping(resolved_config.get("training"), "resolved training")
+    trainer = _mapping(resolved_config.get("trainer"), "resolved trainer")
+    if (
+        training.get("pilot_fail_on_nonfinite_loss") is not True
+        or trainer.get("detect_anomaly") is not True
+    ):
+        raise ScreenValidationError("resolved config disables completion safeguards")
+    state = _mapping(summary.get("observed_training_state"), "summary training state")
+    _exact_keys(
+        state, {"global_rank", "global_step", "world_size"}, "summary training state"
+    )
+    expected_state = {
+        "global_rank": 0,
+        "global_step": expected_steps,
+        "world_size": world_size,
+    }
+    if not _exact_json_equal(state, expected_state):
+        raise ScreenValidationError("training summary has unmatched completion state")
+    accounting = _validate_training_accounting(
+        summary.get("training_accounting"),
+        registry=registry,
+        arm_id=arm["arm_id"],
+        resolved_config=resolved_config,
+        expected_steps=expected_steps,
+    )
+    _validate_training_health(
+        summary.get("training_health"), expected_steps=expected_steps
+    )
+    startup = _validate_summary_startup(
+        summary.get("startup"),
+        registry=registry,
+        stage_id=stage_id,
+        arm_id=arm["arm_id"],
+        resolved_config=resolved_config,
+    )
+    final_checkpoint = _validate_stable_snapshot(
+        summary.get("final_checkpoint"),
+        label="summary final-checkpoint snapshot",
+        expected_path=manifest["expected_final_checkpoint_path"],
+        expected_ref=checkpoint,
+        extra_keys={"semantic_audit"},
+    )
+    semantic = _validate_checkpoint_semantic_audit(
+        final_checkpoint.get("semantic_audit"),
+        expected_steps=expected_steps,
+        resolved_config=resolved_config,
+        resolved_config_sha256=resolved_config_sha256,
+    )
+    tensor_finiteness = _mapping(
+        summary.get("tensor_finiteness"), "summary live tensor finiteness"
+    )
+    _exact_keys(
+        tensor_finiteness,
+        {"raw_model", "ema"},
+        "summary live tensor finiteness",
+    )
+    for key in ("raw_model", "ema"):
+        _validate_checkpoint_finiteness_record(
+            tensor_finiteness.get(key),
+            label=f"summary live tensor finiteness.{key}",
+        )
+        if not _exact_json_equal(tensor_finiteness.get(key), semantic[key]):
+            raise ScreenValidationError(
+                "summary live/checkpoint tensor finiteness differs"
+            )
+    if not _exact_json_equal(
+        summary.get("conditioning_gradient_audit"), gradient_audit
+    ):
         raise ScreenValidationError("summary gradient audit differs from evidence")
     expected_audit = gradient_audit if arm["arm_id"] == "E-A1" else None
-    if summary.get("conditioning_gradient_audit") != expected_audit:
+    if not _exact_json_equal(
+        summary.get("conditioning_gradient_audit"), expected_audit
+    ):
         raise ScreenValidationError("gradient audit is present on the wrong arm")
-    if (
-        summary.get("screen_initialization_state_audit")
-        != initialization["state_audit"]
+    if not _exact_json_equal(
+        summary.get("screen_initialization_state_audit"), initialization["state_audit"]
     ):
         raise ScreenValidationError(
             "summary initialization audit differs from evidence"
         )
+    return {
+        "completed_at": completed_at,
+        "source": source,
+        "launch_manifest": summary_manifest,
+        "runtime_config": summary_runtime,
+        "completion_contract": completion,
+        "training_accounting": accounting,
+        "ema_metadata": semantic["ema_metadata"],
+        "final_checkpoint": final_checkpoint,
+        "startup_mode": startup["mode"],
+    }
 
 
 def _validate_exit_receipt(
@@ -2811,96 +4071,315 @@ def _validate_exit_receipt(
     registry: ValidatedRegistry,
     stage_id: str,
     config_entry: Mapping[str, Any],
+    manifest: Mapping[str, Any],
     manifest_ref: Mapping[str, Any],
+    runtime_ref: Mapping[str, Any],
     summary_ref: Mapping[str, Any],
+    summary_validation: Mapping[str, Any],
+    lock_binding: Mapping[str, Any],
     checkpoint: Mapping[str, Any],
     selected_uuids: Sequence[str],
     gradient_audit: object,
     initialization: Mapping[str, Any],
     source_revision: str,
 ) -> None:
+    _exact_keys(receipt, _EXIT_RECEIPT_KEYS, "exit receipt")
     if (
-        receipt.get("schema_version")
+        _integer(receipt.get("schema_version"), "exit receipt schema")
         != EXPECTED_ARTIFACT_SCHEMA_VERSIONS["exit_receipt"]
         or receipt.get("status") != "completed"
         or receipt.get("overall_status") != "completed"
-        or receipt.get("process_exit_status") != 0
+        or _integer(receipt.get("process_exit_status"), "exit process status") != 0
     ):
         raise ScreenValidationError("exit receipt does not certify completion")
+    receipt_time = _utc_timestamp(
+        receipt.get("recorded_at_utc"), "exit receipt timestamp"
+    )
+    if receipt_time <= summary_validation["completed_at"]:
+        raise ScreenValidationError("exit receipt predates the training summary")
     if receipt.get("predecessor_receipt_binding") is not None:
         raise ScreenValidationError(
             "optimization-screen receipt must not claim an R/S/E predecessor"
         )
-    completion = _mapping(
-        receipt.get("completion_requirements"),
-        "receipt completion requirements",
-    )
-    if (
-        completion.get("predecessor_receipt_binding_unchanged_and_valid") is not True
-        or not completion
-        or any(value is not True for value in completion.values())
-    ):
-        raise ScreenValidationError("receipt completion requirements are not all true")
     contract = _mapping(receipt.get("expected_contract"), "receipt expected contract")
-    expected_fields = {
+    expected_contract = {
+        "training_summary_schema_version": EXPECTED_ARTIFACT_SCHEMA_VERSIONS[
+            "training_summary"
+        ],
         "source_revision": source_revision,
         "resolved_training_config_sha256": config_entry["config"]["canonical_sha256"],
+        "training_argv_sha256": manifest.get("training_argv_sha256"),
+        "launch_manifest_path": manifest.get("launch_manifest_path"),
         "launch_manifest_sha256": manifest_ref["sha256"],
         "selected_gpu_uuids": list(selected_uuids),
+        "training_job_lock_path": lock_binding["path"],
+        "training_job_lock_sha256": lock_binding["sha256"],
         "max_steps": EXPECTED_UPDATES[stage_id],
         "world_size": registry.data["common_training"]["gpu_count"],
+        "training_summary_path": manifest.get("training_summary_path"),
+        "final_checkpoint_path": manifest.get("expected_final_checkpoint_path"),
         "initialization_checkpoint_sha256": registry.data["common_training"][
             "initialization"
         ]["checkpoint"]["sha256"],
     }
-    if any(
-        not _exact_json_equal(contract.get(key), expected)
-        for key, expected in expected_fields.items()
-    ):
+    if not _exact_json_equal(contract, expected_contract):
         raise ScreenValidationError("receipt expected contract is unmatched")
+    pipeline = _mapping(receipt.get("pipeline"), "receipt pipeline")
+    _exact_keys(
+        pipeline,
+        {"training", "tee", "pipefail_shell_exit_status"},
+        "receipt pipeline",
+    )
+    expected_pipeline_component = {
+        "possible_termination_signal": None,
+        "shell_exit_status": 0,
+        "shell_status_is_signal_compatible": False,
+        "signal_provenance": None,
+        "succeeded": True,
+    }
+    if (
+        not _exact_json_equal(pipeline.get("training"), expected_pipeline_component)
+        or not _exact_json_equal(pipeline.get("tee"), expected_pipeline_component)
+        or not _exact_json_equal(pipeline.get("pipefail_shell_exit_status"), 0)
+    ):
+        raise ScreenValidationError("receipt pipeline does not certify clean exit")
+    source_at_receipt = _mapping(
+        receipt.get("source_at_receipt"), "receipt source evidence"
+    )
+    expected_source = {
+        "verified": True,
+        "expected_revision": source_revision,
+        "head": source_revision,
+        "upstream": source_revision,
+        "output_directory_excluded_from_cleanliness_check": True,
+    }
+    if not _exact_json_equal(source_at_receipt, expected_source):
+        raise ScreenValidationError("receipt source evidence is unmatched")
+
+    launch_evidence = _mapping(
+        receipt.get("launch_manifest"), "receipt launch-manifest evidence"
+    )
+    _exact_keys(
+        launch_evidence,
+        {
+            "path",
+            "present",
+            "matches_expected_raw_sha256",
+            "selected_gpu_uuids_match_expected",
+            "matches_training_summary_snapshot",
+            "matches_runtime_config_snapshot",
+            "valid_and_launch_bound",
+            "expected_selected_gpu_uuids",
+            "observed_selected_gpu_uuids",
+            "artifact",
+            "validation_error",
+        },
+        "receipt launch-manifest evidence",
+    )
+    launch_snapshot = _validate_stable_snapshot(
+        launch_evidence.get("artifact"),
+        label="receipt launch-manifest snapshot",
+        expected_path=manifest["launch_manifest_path"],
+        expected_ref=manifest_ref,
+    )
+    expected_launch_evidence = {
+        "path": manifest["launch_manifest_path"],
+        "present": True,
+        "matches_expected_raw_sha256": True,
+        "selected_gpu_uuids_match_expected": True,
+        "matches_training_summary_snapshot": True,
+        "matches_runtime_config_snapshot": True,
+        "valid_and_launch_bound": True,
+        "expected_selected_gpu_uuids": list(selected_uuids),
+        "observed_selected_gpu_uuids": list(selected_uuids),
+        "artifact": launch_snapshot,
+        "validation_error": None,
+    }
+    if not _exact_json_equal(
+        launch_evidence, expected_launch_evidence
+    ) or not _exact_json_equal(
+        launch_snapshot,
+        _snapshot_base(summary_validation["launch_manifest"]),
+    ):
+        raise ScreenValidationError("receipt launch-manifest evidence is unmatched")
+
+    lock_evidence = _mapping(
+        receipt.get("training_job_lock"), "receipt training-job lock evidence"
+    )
+    _exact_keys(
+        lock_evidence,
+        {
+            "path",
+            "present",
+            "expected_sha256",
+            "matches_expected_raw_sha256",
+            "matches_launch_manifest_binding",
+            "valid_and_launch_bound_before_receipt_publication",
+            "artifact",
+            "record",
+            "release_policy",
+            "release_result_not_claimed_inside_pre_release_receipt",
+            "validation_error",
+        },
+        "receipt training-job lock evidence",
+    )
+    lock_payload = (
+        json.dumps(
+            dict(lock_binding["record"]), indent=2, sort_keys=True, allow_nan=False
+        )
+        + "\n"
+    ).encode("utf-8")
+    lock_snapshot = _validate_stable_snapshot(
+        lock_evidence.get("artifact"),
+        label="receipt training-job lock snapshot",
+        expected_path=lock_binding["path"],
+        expected_ref={
+            "sha256": lock_binding["sha256"],
+            "size_bytes": len(lock_payload),
+        },
+    )
+    expected_lock_evidence = {
+        "path": lock_binding["path"],
+        "present": True,
+        "expected_sha256": lock_binding["sha256"],
+        "matches_expected_raw_sha256": True,
+        "matches_launch_manifest_binding": True,
+        "valid_and_launch_bound_before_receipt_publication": True,
+        "artifact": lock_snapshot,
+        "record": lock_binding["record"],
+        "release_policy": (
+            "publish_receipt_then_unlink_only_same_stat_identity_and_sha256"
+        ),
+        "release_result_not_claimed_inside_pre_release_receipt": True,
+        "validation_error": None,
+    }
+    if not _exact_json_equal(lock_evidence, expected_lock_evidence):
+        raise ScreenValidationError("receipt training-job lock evidence is unmatched")
+
+    completion = _mapping(
+        receipt.get("completion_requirements"),
+        "receipt completion requirements",
+    )
+    _exact_keys(completion, _EXIT_COMPLETION_KEYS, "receipt completion requirements")
+    if any(
+        _boolean(value, f"receipt completion requirement {key}") is not True
+        for key, value in completion.items()
+    ):
+        raise ScreenValidationError("receipt completion requirements are not all true")
+
     summary_evidence = _mapping(
         receipt.get("training_summary"), "receipt training-summary evidence"
     )
-    if (
-        summary_evidence.get("valid_and_launch_bound") is not True
-        or _mapping(summary_evidence.get("artifact"), "receipt summary artifact").get(
-            "sha256"
-        )
-        != summary_ref["sha256"]
-    ):
-        raise ScreenValidationError("receipt does not validate the bound summary")
+    _exact_keys(
+        summary_evidence,
+        {
+            "path",
+            "present",
+            "valid_and_launch_bound",
+            "artifact",
+            "validated_bindings",
+            "validation_error",
+        },
+        "receipt training-summary evidence",
+    )
+    summary_snapshot = _validate_stable_snapshot(
+        summary_evidence.get("artifact"),
+        label="receipt training-summary snapshot",
+        expected_path=manifest["training_summary_path"],
+        expected_ref=summary_ref,
+    )
     bindings = _mapping(
         summary_evidence.get("validated_bindings"), "receipt validated bindings"
     )
-    if bindings.get("conditioning_gradient_audit") != gradient_audit:
-        raise ScreenValidationError("receipt does not echo the exact gradient audit")
-    if (
-        bindings.get("screen_initialization_state_audit")
-        != initialization["state_audit"]
-    ):
-        raise ScreenValidationError("receipt does not echo the initialization audit")
+    expected_bindings = {
+        "schema_version": EXPECTED_ARTIFACT_SCHEMA_VERSIONS["training_summary"],
+        "source_revision": source_revision,
+        "resolved_training_config_sha256": config_entry["config"]["canonical_sha256"],
+        "training_argv_sha256": manifest["training_argv_sha256"],
+        "launch_manifest_path": manifest["launch_manifest_path"],
+        "launch_manifest_sha256": manifest_ref["sha256"],
+        "selected_gpu_uuids": list(selected_uuids),
+        "observed_global_step": EXPECTED_UPDATES[stage_id],
+        "observed_world_size": registry.data["common_training"]["gpu_count"],
+        "training_accounting": summary_validation["training_accounting"],
+        "ema_metadata": summary_validation["ema_metadata"],
+        "final_checkpoint_path": manifest["expected_final_checkpoint_path"],
+        "final_checkpoint_sha256": checkpoint["sha256"],
+        "startup_mode": summary_validation["startup_mode"],
+        "conditioning_gradient_audit": gradient_audit,
+        "screen_initialization_state_audit": initialization["state_audit"],
+    }
+    if not _exact_json_equal(bindings, expected_bindings):
+        raise ScreenValidationError("receipt validated bindings are unmatched")
+    expected_summary_evidence = {
+        "path": manifest["training_summary_path"],
+        "present": True,
+        "valid_and_launch_bound": True,
+        "artifact": summary_snapshot,
+        "validated_bindings": bindings,
+        "validation_error": None,
+    }
+    if not _exact_json_equal(summary_evidence, expected_summary_evidence):
+        raise ScreenValidationError("receipt does not validate the bound summary")
+
     checkpoint_evidence = _mapping(
         receipt.get("final_checkpoint"), "receipt checkpoint evidence"
     )
-    if (
-        checkpoint_evidence.get("matches_training_summary_snapshot") is not True
-        or _mapping(
-            checkpoint_evidence.get("artifact"), "receipt checkpoint artifact"
-        ).get("sha256")
-        != checkpoint["sha256"]
+    _exact_keys(
+        checkpoint_evidence,
+        {"path", "present", "matches_training_summary_snapshot", "artifact"},
+        "receipt checkpoint evidence",
+    )
+    checkpoint_snapshot = _validate_stable_snapshot(
+        checkpoint_evidence.get("artifact"),
+        label="receipt final-checkpoint snapshot",
+        expected_path=manifest["expected_final_checkpoint_path"],
+        expected_ref=checkpoint,
+    )
+    expected_checkpoint_evidence = {
+        "path": manifest["expected_final_checkpoint_path"],
+        "present": True,
+        "matches_training_summary_snapshot": True,
+        "artifact": checkpoint_snapshot,
+    }
+    if not _exact_json_equal(
+        checkpoint_evidence, expected_checkpoint_evidence
+    ) or not _exact_json_equal(
+        checkpoint_snapshot,
+        _snapshot_base(summary_validation["final_checkpoint"]),
     ):
         raise ScreenValidationError("receipt does not validate the final checkpoint")
-    for component in ("source_at_receipt", "launch_manifest"):
-        record = _mapping(receipt.get(component), f"receipt {component}")
-        flag = (
-            "verified" if component == "source_at_receipt" else "valid_and_launch_bound"
-        )
-        if record.get(flag) is not True:
-            raise ScreenValidationError(f"receipt {component} is not valid")
+
     runtime_evidence = _mapping(receipt.get("runtime_config"), "receipt runtime config")
-    if (
-        runtime_evidence.get("matches_training_summary_snapshot") is not True
-        or runtime_evidence.get("semantic_validation_passed") is not True
+    _exact_keys(
+        runtime_evidence,
+        {
+            "path",
+            "present",
+            "matches_training_summary_snapshot",
+            "semantic_validation_passed",
+            "artifact",
+        },
+        "receipt runtime-config evidence",
+    )
+    runtime_snapshot = _validate_stable_snapshot(
+        runtime_evidence.get("artifact"),
+        label="receipt runtime-config snapshot",
+        expected_path=manifest["runtime_config_path"],
+        expected_ref=runtime_ref,
+    )
+    expected_runtime_evidence = {
+        "path": manifest["runtime_config_path"],
+        "present": True,
+        "matches_training_summary_snapshot": True,
+        "semantic_validation_passed": True,
+        "artifact": runtime_snapshot,
+    }
+    if not _exact_json_equal(
+        runtime_evidence, expected_runtime_evidence
+    ) or not _exact_json_equal(
+        runtime_snapshot,
+        _snapshot_base(summary_validation["runtime_config"]),
     ):
         raise ScreenValidationError("receipt runtime_config is not valid")
 
@@ -2944,24 +4423,47 @@ def _validate_training_artifacts(
         source_revision=source_revision,
         scheduler_dependency=scheduler_dependency,
     )
-    _validate_runtime_record(
-        documents["runtime_config"],
-        registry=registry,
-        config_entry=config_entry,
-        manifest_ref=refs["launch_manifest"],
-        selected_uuids=selected_uuids,
+    resolved_config = _load_config_ref(
+        config_entry["config"],
+        loader=loader,
+        label=f"{arm['arm_id']} resolved training config",
+    )
+    manifest = documents["launch_manifest"]
+    lock_binding = _validate_manifest_training_bindings(
+        manifest,
+        refs=refs,
+        checkpoint=checkpoint,
+        arm=arm,
+        resolved_config=resolved_config,
+        resolved_config_sha256=config_entry["config"]["canonical_sha256"],
         source_revision=source_revision,
     )
-    _validate_training_summary(
+    runtime_validation = _validate_runtime_record(
+        documents["runtime_config"],
+        registry=registry,
+        manifest=manifest,
+        manifest_ref=refs["launch_manifest"],
+        selected_uuids=selected_uuids,
+        resolved_config=resolved_config,
+        resolved_config_sha256=config_entry["config"]["canonical_sha256"],
+        expected_steps=EXPECTED_UPDATES[stage_id],
+        source_revision=source_revision,
+    )
+    summary_validation = _validate_training_summary(
         documents["training_summary"],
         registry=registry,
         stage_id=stage_id,
         arm=arm,
         config_entry=config_entry,
+        manifest=manifest,
         manifest_ref=refs["launch_manifest"],
+        runtime=documents["runtime_config"],
+        runtime_ref=refs["runtime_config"],
+        runtime_validation=runtime_validation,
         checkpoint=checkpoint,
         gradient_audit=gradient_audit,
         initialization=initialization,
+        resolved_config=resolved_config,
         source_revision=source_revision,
     )
     _validate_exit_receipt(
@@ -2969,8 +4471,12 @@ def _validate_training_artifacts(
         registry=registry,
         stage_id=stage_id,
         config_entry=config_entry,
+        manifest=manifest,
         manifest_ref=refs["launch_manifest"],
+        runtime_ref=refs["runtime_config"],
         summary_ref=refs["training_summary"],
+        summary_validation=summary_validation,
+        lock_binding=lock_binding,
         checkpoint=checkpoint,
         selected_uuids=selected_uuids,
         gradient_audit=gradient_audit,

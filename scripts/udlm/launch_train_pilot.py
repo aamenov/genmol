@@ -24,6 +24,7 @@ import shlex
 import stat
 import subprocess
 import tempfile
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -38,7 +39,7 @@ MIN_SAFE_FREE_MEMORY_MIB = 30_000
 # threshold remains eligible when process telemetry is nonempty. Processes are
 # still captured in both selection and final-probe evidence.
 ACTIVE_COMPUTE_PROCESSES_ALLOWED = True
-TRAINING_SUMMARY_SCHEMA_VERSION = 4
+TRAINING_SUMMARY_SCHEMA_VERSION = 5
 PILOT_EXIT_STATUS_SCHEMA_VERSION = 5
 LAUNCH_MANIFEST_SCHEMA_VERSION = 2
 MATCHED_PANEL_SCHEMA_VERSION = 2
@@ -1053,6 +1054,281 @@ def _validate_finiteness_record(value: object, *, label: str) -> dict[str, objec
     if elements < tensors:
         raise ValueError(f"{label} has fewer elements than tensors")
     return record
+
+
+def _expected_framework_nonfinite_sentinels(
+    *, expected_steps: int
+) -> dict[str, object]:
+    callback_key = (
+        "ModelCheckpoint{'monitor': None, 'mode': 'min', "
+        f"'every_n_train_steps': {expected_steps}, 'every_n_epochs': 0, "
+        "'train_time_interval': None}"
+    )
+    return {
+        "all_expected_and_only_expected_verified": True,
+        "nonfinite_tensor_count": 1,
+        "nonfinite_element_count": 1,
+        "records": [
+            {
+                "tensor_path_components": [
+                    "checkpoint",
+                    "callbacks",
+                    callback_key,
+                    "kth_value",
+                ],
+                "framework": "lightning",
+                "framework_version": "2.5.1",
+                "callback": "ModelCheckpoint",
+                "field": "kth_value",
+                "dtype": "float32",
+                "shape": [],
+                "value": "+inf",
+                "meaning": "unranked_min_mode_checkpoint_sentinel",
+                "excluded_from_non_sentinel_finiteness": True,
+            }
+        ],
+    }
+
+
+def _validate_framework_nonfinite_sentinels(
+    value: object, *, expected_steps: int, label: str
+) -> dict[str, object]:
+    record = _required_mapping(value, label=label)
+    expected = _expected_framework_nonfinite_sentinels(expected_steps=expected_steps)
+    if canonical_json_sha256(record) != canonical_json_sha256(expected):
+        raise ValueError(
+            f"{label} does not match the exact Lightning sentinel contract"
+        )
+    return record
+
+
+def _validate_auxiliary_checkpoint_records(
+    semantic: Mapping[str, object],
+    *,
+    expected_steps: int,
+    resolved_training_config: object,
+    label: str,
+) -> int:
+    resolved = _required_mapping(
+        resolved_training_config,
+        label=f"{label} resolved training config",
+    )
+    config_sha256 = canonical_json_sha256(resolved)
+    trainer_config = _required_mapping(
+        resolved.get("trainer"),
+        label=f"{label} resolved trainer config",
+    )
+    accumulation = _positive_integer(
+        trainer_config.get("accumulate_grad_batches"),
+        label=f"{label} resolved accumulation",
+    )
+    optim_config = _required_mapping(
+        resolved.get("optim"),
+        label=f"{label} resolved optimizer config",
+    )
+    scheduler_config = _required_mapping(
+        optim_config.get("scheduler"),
+        label=f"{label} resolved scheduler config",
+    )
+    warmup_updates = scheduler_config.get("warmup_updates")
+    horizon_updates = scheduler_config.get("horizon_updates")
+    if type(warmup_updates) is not int or warmup_updates < 0:
+        raise ValueError(f"{label} resolved scheduler warmup is invalid")
+    if horizon_updates is not None and (
+        type(horizon_updates) is not int or horizon_updates < 0
+    ):
+        raise ValueError(f"{label} resolved scheduler horizon is invalid")
+    schedule_check_count = (
+        max(expected_steps, warmup_updates + 1, (horizon_updates or 0) + 1) + 1
+    )
+    python_floats = _required_mapping(
+        semantic.get("checkpoint_python_floats"),
+        label=f"{label} Python-float finiteness",
+    )
+    _require_exact_keys(
+        python_floats,
+        {"all_finite", "floating_scalar_count"},
+        label=f"{label} Python-float finiteness",
+    )
+    _required_true(
+        python_floats.get("all_finite"),
+        label=f"{label} Python-float all-finite flag",
+    )
+    _positive_integer(
+        python_floats.get("floating_scalar_count"),
+        label=f"{label} Python-float count",
+    )
+
+    optimizer = _required_mapping(
+        semantic.get("optimizer_live_state_match"),
+        label=f"{label} optimizer live-state match",
+    )
+    _require_exact_keys(
+        optimizer,
+        {
+            "exact_serialized_live_match",
+            "optimizer_count",
+            "optimizer_class",
+            "parameter_group_count",
+            "parameter_state_count",
+            "exact_resolved_config_match",
+        },
+        label=f"{label} optimizer live-state match",
+    )
+    _required_true(
+        optimizer.get("exact_serialized_live_match"),
+        label=f"{label} optimizer exact-match flag",
+    )
+    _required_true(
+        optimizer.get("exact_resolved_config_match"),
+        label=f"{label} optimizer resolved-config flag",
+    )
+    _exact_integer(
+        optimizer.get("optimizer_count"), 1, label=f"{label} optimizer count"
+    )
+    _exact_string(
+        optimizer.get("optimizer_class"),
+        "AdamW",
+        label=f"{label} optimizer class",
+    )
+    _exact_integer(
+        optimizer.get("parameter_group_count"),
+        1,
+        label=f"{label} optimizer parameter-group count",
+    )
+    parameter_state_count = _positive_integer(
+        optimizer.get("parameter_state_count"),
+        label=f"{label} optimizer parameter-state count",
+    )
+
+    scheduler = _required_mapping(
+        semantic.get("scheduler_live_state_match"),
+        label=f"{label} scheduler live-state match",
+    )
+    expected_scheduler = {
+        "exact_serialized_live_match": True,
+        "scheduler_count": 1,
+        "scheduler_class": "LambdaLR",
+        "interval": "step",
+        "name": "lr",
+        "last_epoch": expected_steps,
+        "step_count": expected_steps + 1,
+        "exact_model_spec_match": True,
+        "exact_callable_schedule_match": True,
+        "callable_schedule_index_checks": schedule_check_count,
+    }
+    if canonical_json_sha256(scheduler) != canonical_json_sha256(expected_scheduler):
+        raise ValueError(f"{label} scheduler live-state match is invalid")
+
+    sampler = _required_mapping(
+        semantic.get("sampler_live_state_match"),
+        label=f"{label} sampler live-state match",
+    )
+    expected_sampler = {
+        "exact_hosted_stream_contract_match": True,
+        "random_state_is_none": True,
+        "live_state_dict_available": False,
+        "sampler_class_module": "torch.utils.data.dataloader",
+        "sampler_class_name": "_InfiniteConstantSampler",
+    }
+    if canonical_json_sha256(sampler) != canonical_json_sha256(expected_sampler):
+        raise ValueError(f"{label} sampler live-state match is invalid")
+
+    callback_key = (
+        "ModelCheckpoint{'monitor': None, 'mode': 'min', "
+        f"'every_n_train_steps': {expected_steps}, 'every_n_epochs': 0, "
+        "'train_time_interval': None}"
+    )
+    callback = _required_mapping(
+        semantic.get("model_checkpoint_live_state_match"),
+        label=f"{label} ModelCheckpoint live-state match",
+    )
+    expected_callback = {
+        "exact_serialized_live_match": True,
+        "model_checkpoint_callback_count": 1,
+        "state_key": callback_key,
+        "configuration_matches_pilot_contract": True,
+    }
+    if canonical_json_sha256(callback) != canonical_json_sha256(expected_callback):
+        raise ValueError(f"{label} ModelCheckpoint live-state match is invalid")
+
+    hyperparameters = _required_mapping(
+        semantic.get("checkpoint_hyperparameters_match"),
+        label=f"{label} checkpoint hyperparameter match",
+    )
+    expected_hyperparameters = {
+        "hparams_name": "kwargs",
+        "exact_hyperparameter_keys": True,
+        "exact_checkpoint_preflight_config_match": True,
+        "exact_live_model_preflight_config_match": True,
+        "exact_live_hparams_preflight_config_match": True,
+        "exact_checkpoint_live_model_unresolved_config_match": True,
+        "exact_checkpoint_live_hparams_unresolved_config_match": True,
+        "resolved_config_sha256": config_sha256,
+    }
+    if canonical_json_sha256(hyperparameters) != canonical_json_sha256(
+        expected_hyperparameters
+    ):
+        raise ValueError(f"{label} checkpoint hyperparameter match is invalid")
+
+    configured_clip = trainer_config.get("gradient_clip_val")
+    configured_precision = trainer_config.get("precision")
+    precision_aliases = {
+        "16": "16-mixed",
+        "bf16": "bf16-mixed",
+        "32": "32-true",
+        "64": "64-true",
+        16: "16-mixed",
+        32: "32-true",
+        64: "64-true",
+    }
+    live_precision = precision_aliases.get(configured_precision, configured_precision)
+    configured_clip_algorithm = trainer_config.get("gradient_clip_algorithm")
+    if configured_clip_algorithm is None:
+        configured_clip_algorithm = "norm"
+    if (
+        isinstance(configured_clip, bool)
+        or not isinstance(configured_clip, (int, float))
+        or not math.isfinite(configured_clip)
+        or configured_clip < 0.0
+        or not isinstance(live_precision, str)
+        or configured_clip_algorithm not in {"norm", "value"}
+    ):
+        raise ValueError(f"{label} resolved live-Trainer config is invalid")
+    trainer_match = _required_mapping(
+        semantic.get("trainer_live_configuration_match"),
+        label=f"{label} live Trainer configuration match",
+    )
+    expected_trainer_match = {
+        "exact_detect_anomaly_match": True,
+        "detect_anomaly": True,
+        "exact_gradient_clip_val_match": True,
+        "gradient_clip_val": float(configured_clip),
+        "exact_gradient_clip_algorithm_match": True,
+        "gradient_clip_algorithm": configured_clip_algorithm,
+        "exact_precision_match": True,
+        "configured_precision": str(configured_precision),
+        "live_precision": live_precision,
+    }
+    if canonical_json_sha256(trainer_match) != canonical_json_sha256(
+        expected_trainer_match
+    ):
+        raise ValueError(f"{label} live Trainer configuration match is invalid")
+
+    loop_state = _required_mapping(
+        semantic.get("checkpoint_loop_state_match"),
+        label=f"{label} checkpoint loop-state match",
+    )
+    expected_loop_state = {
+        "exact_serialized_progress_match": True,
+        "epoch": 0,
+        "optimizer_steps": expected_steps,
+        "accumulate_grad_batches": accumulation,
+        "microbatches": expected_steps * accumulation,
+    }
+    if canonical_json_sha256(loop_state) != canonical_json_sha256(expected_loop_state):
+        raise ValueError(f"{label} checkpoint loop-state match is invalid")
+    return parameter_state_count
 
 
 def _validate_gpu_state_record(value: object, *, label: str) -> dict[str, object]:
@@ -2853,7 +3129,16 @@ def build_predecessor_receipt_binding(
             "ema",
             "ema_metadata",
             "optimizer",
-            "all_checkpoint_tensors",
+            "non_sentinel_checkpoint_tensors",
+            "checkpoint_python_floats",
+            "framework_nonfinite_sentinels",
+            "checkpoint_hyperparameters_match",
+            "checkpoint_loop_state_match",
+            "optimizer_live_state_match",
+            "scheduler_live_state_match",
+            "sampler_live_state_match",
+            "trainer_live_configuration_match",
+            "model_checkpoint_live_state_match",
             "udlm_process_identity_verified",
             "live_model_match",
             "live_ema_match",
@@ -2874,11 +3159,27 @@ def build_predecessor_receipt_binding(
         label="predecessor checkpoint global step",
     )
     checkpoint_finiteness = {}
-    for key in ("raw_model", "ema", "optimizer", "all_checkpoint_tensors"):
+    for key in (
+        "raw_model",
+        "ema",
+        "optimizer",
+        "non_sentinel_checkpoint_tensors",
+    ):
         checkpoint_finiteness[key] = _validate_finiteness_record(
             semantic_checkpoint.get(key),
             label=f"predecessor checkpoint {key}",
         )
+    _validate_framework_nonfinite_sentinels(
+        semantic_checkpoint.get("framework_nonfinite_sentinels"),
+        expected_steps=common["max_steps"],
+        label="predecessor checkpoint framework non-finite sentinels",
+    )
+    optimizer_parameter_state_count = _validate_auxiliary_checkpoint_records(
+        semantic_checkpoint,
+        expected_steps=common["max_steps"],
+        resolved_training_config=resolved_config,
+        label="predecessor checkpoint",
+    )
     ema_metadata = _required_mapping(
         semantic_checkpoint.get("ema_metadata"),
         label="predecessor checkpoint EMA metadata",
@@ -2892,6 +3193,10 @@ def build_predecessor_receipt_binding(
         ema_metadata.get("shadow_parameter_count"),
         label="predecessor checkpoint EMA shadow count",
     )
+    if optimizer_parameter_state_count != shadow_parameter_count:
+        raise ValueError(
+            "predecessor optimizer parameter-state count disagrees with EMA shadow count"
+        )
     _exact_integer(
         ema_metadata.get("num_updates"),
         common["max_steps"],
@@ -3000,9 +3305,28 @@ def build_predecessor_receipt_binding(
         summary_accounting.get("trainable_parameter_counts"),
         label="predecessor trainable parameter counts",
     )
+    conditioning_variant = resolved_udlm.get("conditioning_variant")
+    if conditioning_variant == "additive":
+        expected_parameter_keys = {
+            "base_backbone",
+            "time_conditioner",
+            "total",
+        }
+    elif conditioning_variant == "film_adaln":
+        expected_parameter_keys = {
+            "base_backbone",
+            "time_conditioner",
+            "film_modulation",
+            "total",
+        }
+    else:
+        raise ValueError(
+            "predecessor resolved UDLM conditioning_variant must be additive or "
+            "film_adaln"
+        )
     _require_exact_keys(
         parameter_counts,
-        {"base_backbone", "time_conditioner", "total"},
+        expected_parameter_keys,
         label="predecessor trainable parameter counts",
     )
     base_count = _positive_integer(
@@ -3013,9 +3337,15 @@ def build_predecessor_receipt_binding(
         parameter_counts.get("time_conditioner"),
         label="predecessor time-conditioner parameter count",
     )
+    film_count = 0
+    if conditioning_variant == "film_adaln":
+        film_count = _positive_integer(
+            parameter_counts.get("film_modulation"),
+            label="predecessor FiLM-modulation parameter count",
+        )
     _exact_integer(
         parameter_counts.get("total"),
-        base_count + time_count,
+        base_count + time_count + film_count,
         label="predecessor total trainable parameter count",
     )
 
@@ -3115,6 +3445,25 @@ def build_predecessor_receipt_binding(
             startup.get("verified_mdlm_warm_start_report"),
             label="predecessor warm-start report",
         )
+        expected_warm_start_keys = {
+            "source_path",
+            "source_resolved_path",
+            "source_sha256",
+            "source_size_bytes",
+            "expected_source_sha256",
+            "byte_identity_verified_before_and_after_load",
+            "weights",
+            "parameter_tensors",
+        }
+        if conditioning_variant == "film_adaln":
+            expected_warm_start_keys.update(
+                {"conditioning_variant", "conditioning_parameter_tensors"}
+            )
+        _require_exact_keys(
+            warm_start,
+            expected_warm_start_keys,
+            label="predecessor warm-start report",
+        )
         for key in ("source_sha256", "expected_source_sha256"):
             _exact_string(
                 warm_start.get(key),
@@ -3145,6 +3494,17 @@ def build_predecessor_receipt_binding(
             warm_start.get("parameter_tensors"),
             label="predecessor warm-start parameter tensor count",
         )
+        if conditioning_variant == "film_adaln":
+            _exact_string(
+                warm_start.get("conditioning_variant"),
+                "film_adaln",
+                label="predecessor warm-start conditioning variant",
+            )
+            _exact_integer(
+                warm_start.get("conditioning_parameter_tensors"),
+                28,
+                label="predecessor warm-start conditioning parameter tensor count",
+            )
     bindings = _required_mapping(
         summary_evidence.get("validated_bindings"),
         label="predecessor validated summary bindings",

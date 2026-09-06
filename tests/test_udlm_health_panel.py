@@ -288,6 +288,7 @@ def _write_member(
                 "weights": "ema",
                 "byte_identity_verified_before_and_after_load": True,
                 "source_size_bytes": (health.EXPECTED_MDLM_CHECKPOINT_SIZE_BYTES),
+                "parameter_tensors": 202,
             },
         },
     }
@@ -704,6 +705,45 @@ def test_health_panel_rejects_non_ema_warm_start(
     _rewrite_summary(r_member)
 
     with pytest.raises(health.HealthPanelValidationError, match="warm start weights"):
+        health.validate_health_panel(health_panel["terminal_path"])
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement", "error"),
+    [
+        ("parameter_tensors", 201, "parameter_tensors"),
+        ("conditioning_variant", "film_adaln", "conditioning_variant"),
+        ("conditioning_parameter_tensors", 28, "conditioning_parameter_tensors"),
+    ],
+)
+def test_health_panel_rejects_wrong_warm_start_topology(
+    health_panel: dict[str, object],
+    field: str,
+    replacement: object,
+    error: str,
+) -> None:
+    r_member = health_panel["members"][0]
+    r_member["summary"]["startup"]["verified_mdlm_warm_start_report"][field] = (
+        replacement
+    )
+    _rewrite_summary(r_member)
+
+    with pytest.raises(health.HealthPanelValidationError, match=error):
+        health.validate_health_panel(health_panel["terminal_path"])
+
+
+def test_health_panel_rejects_extra_warm_start_field(
+    health_panel: dict[str, object],
+) -> None:
+    r_member = health_panel["members"][0]
+    r_member["summary"]["startup"]["verified_mdlm_warm_start_report"][
+        "opaque_extra"
+    ] = {"scientific_result": True}
+    _rewrite_summary(r_member)
+
+    with pytest.raises(
+        health.HealthPanelValidationError, match="warm-start report keys are invalid"
+    ):
         health.validate_health_panel(health_panel["terminal_path"])
 
 

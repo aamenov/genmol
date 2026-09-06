@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import subprocess
 import sys
 from argparse import Namespace
@@ -38,6 +39,16 @@ def _screen_config_factory(repository: Path, original):
         config["training"]["udlm"]["exclude_special_tokens"] = False
         config["loader"]["num_workers"] = 1
         config["trainer"]["detect_anomaly"] = True
+        config["trainer"]["gradient_clip_val"] = 1.0
+        config["trainer"]["precision"] = "bf16"
+        config["optim"].update(
+            {
+                "weight_decay": 0,
+                "beta1": 0.9,
+                "beta2": 0.999,
+                "eps": 1e-8,
+            }
+        )
         config["callback"].update(
             {
                 "dirpath": str(repository / kwargs["output_directory"] / "checkpoints"),
@@ -63,15 +74,21 @@ class _CountedParameter:
         return self._count
 
 
+class _EmptyIterableDataset(torch.utils.data.IterableDataset):
+    def __iter__(self):
+        return iter(())
+
+
 def _fake_model_and_checkpoint(
     path: Path,
     *,
     optimizer_updates: int,
+    resolved_config: dict,
     conditioning_counts: tuple[int, int] | None = None,
 ):
     if conditioning_counts is None:
-        base_parameter = torch.nn.Parameter(torch.ones(3))
-        time_parameter = torch.nn.Parameter(torch.ones(2))
+        base_parameter = _CountedParameter(3)
+        time_parameter = _CountedParameter(787_968)
         film_parameters = []
     else:
         time_count, film_count = conditioning_counts
@@ -87,8 +104,10 @@ def _fake_model_and_checkpoint(
     ]
     raw_state = {"weight": torch.tensor([1.0, -2.0])}
     ema_state = [torch.tensor([0.5, 3.0])]
+    optimizer_parameter = torch.nn.Parameter(torch.ones(2))
     backbone = SimpleNamespace(
         named_parameters=lambda: named_parameters,
+        parameters=lambda: iter([optimizer_parameter]),
         state_dict=lambda: {
             "base_weight": torch.ones(3),
             "time_conditioner.weight": torch.ones(2),
@@ -99,7 +118,33 @@ def _fake_model_and_checkpoint(
             ),
         },
     )
+    checkpoint_config = OmegaConf.create(resolved_config)
+    schedule_spec = train_entrypoint.optimizer_scheduler_spec(resolved_config["optim"])
+    optimizer = torch.optim.AdamW(
+        [optimizer_parameter],
+        lr=resolved_config["optim"]["lr"],
+        betas=(
+            resolved_config["optim"]["beta1"],
+            resolved_config["optim"]["beta2"],
+        ),
+        eps=resolved_config["optim"]["eps"],
+        weight_decay=resolved_config["optim"]["weight_decay"],
+    )
+    scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer,
+        lr_lambda=lambda index: train_entrypoint.optimizer_scheduler_multiplier(
+            schedule_spec, index
+        ),
+    )
+    for _ in range(optimizer_updates):
+        optimizer_parameter.grad = torch.full_like(optimizer_parameter, 0.25)
+        optimizer.step()
+        scheduler.step()
+        optimizer.zero_grad(set_to_none=True)
     model = SimpleNamespace(
+        config=checkpoint_config,
+        hparams={"config": checkpoint_config},
+        optimizer_scheduler_spec=schedule_spec,
         backbone=backbone,
         named_parameters=lambda: [
             (f"backbone.{name}", parameter) for name, parameter in named_parameters
@@ -114,8 +159,24 @@ def _fake_model_and_checkpoint(
         _validate_udlm_conditioning_checkpoint=lambda _checkpoint: None,
     )
     path.parent.mkdir(parents=True, exist_ok=True)
+    callback_key = train_entrypoint._model_checkpoint_callback_state_key(
+        optimizer_updates
+    )
+    callback_state = {
+        "monitor": None,
+        "best_model_score": None,
+        "best_model_path": str(path),
+        "current_score": None,
+        "dirpath": str(path.parent),
+        "best_k_models": {},
+        "kth_best_model_path": "",
+        "kth_value": torch.tensor(float("inf"), dtype=torch.float32),
+        "last_model_path": "",
+    }
     torch.save(
         {
+            "pytorch-lightning_version": "2.5.1",
+            "epoch": 0,
             "global_step": optimizer_updates,
             "state_dict": raw_state,
             "ema": {
@@ -123,21 +184,29 @@ def _fake_model_and_checkpoint(
                 "decay": 0.9999,
                 "num_updates": optimizer_updates,
             },
-            "optimizer_states": [
-                {
-                    "state": {
-                        0: {
-                            "step": torch.tensor(float(optimizer_updates)),
-                            "exp_avg": torch.tensor([0.1, -0.2]),
-                            "exp_avg_sq": torch.tensor([0.01, 0.04]),
-                        }
-                    }
-                }
-            ],
+            "optimizer_states": [optimizer.state_dict()],
+            "lr_schedulers": [scheduler.state_dict()],
+            "sampler": {"random_state": None},
+            "callbacks": {callback_key: callback_state},
+            "hparams_name": "kwargs",
+            "hyper_parameters": {"config": checkpoint_config},
+            "loops": train_entrypoint._expected_lightning_loop_state(
+                optimizer_steps=optimizer_updates,
+                accumulation=resolved_config["trainer"]["accumulate_grad_batches"],
+            ),
         },
         path,
     )
-    return model
+    checkpoint_callback = train_entrypoint.L.pytorch.callbacks.ModelCheckpoint(
+        dirpath=str(path.parent),
+        filename="{step}",
+        save_top_k=-1,
+        auto_insert_metric_name=False,
+        enable_version_counter=False,
+        every_n_train_steps=optimizer_updates,
+    )
+    checkpoint_callback.load_state_dict(callback_state)
+    return model, optimizer, scheduler, checkpoint_callback
 
 
 def _completed_health_callback(optimizer_updates: int):
@@ -255,9 +324,10 @@ def _produce_screen_arm(
                 for parameter in contract_groups["film_modulation"]["parameters"]
             ),
         )
-    model = _fake_model_and_checkpoint(
+    model, optimizer, scheduler, checkpoint_callback = _fake_model_and_checkpoint(
         checkpoint_path,
         optimizer_updates=optimizer_updates,
+        resolved_config=resolved_config,
         conditioning_counts=conditioning_counts,
     )
     selected_uuids = [selected_uuid]
@@ -305,6 +375,14 @@ def _produce_screen_arm(
     # ``training_argv_sha256`` intentionally fingerprints the argv observed by
     # scripts/train.py, excluding the interpreter and ``-u`` prefix.
     monkeypatch.setattr(sys, "argv", command[2:])
+    for key in tuple(os.environ):
+        if key.startswith("PYTHON"):
+            monkeypatch.delenv(key, raising=False)
+    for key, value in train_entrypoint._CONTROLLED_PYTHON_ENVIRONMENT.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv(
+        "PYTHONPATH", os.pathsep.join((str(repository / "src"), str(repository)))
+    )
     monkeypatch.setenv("PYTHONHASHSEED", "17")
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", selected_uuid)
     monkeypatch.setenv("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
@@ -312,9 +390,10 @@ def _produce_screen_arm(
 
     config = OmegaConf.create(resolved_config)
     preflight = train_entrypoint._validate_and_record_pilot_config(config)
+    warm_start_path = resolved_config["training"]["init_from_mdlm_checkpoint"]
     warm_start = {
-        "source_path": "/project/mdlm.ckpt",
-        "source_resolved_path": "/project/mdlm.ckpt",
+        "source_path": warm_start_path,
+        "source_resolved_path": warm_start_path,
         "source_sha256": plan.checkpoint_sha256,
         "source_size_bytes": 1_396_998_679,
         "expected_source_sha256": plan.checkpoint_sha256,
@@ -322,11 +401,18 @@ def _produce_screen_arm(
         "weights": "ema",
         "parameter_tensors": 2,
     }
+    if arm_id == "E-A1":
+        warm_start.update(
+            {
+                "conditioning_variant": "film_adaln",
+                "conditioning_parameter_tensors": 28,
+            }
+        )
     state_audit = train_entrypoint._screen_initialization_state_audit(
         config, model, "warm_start", warm_start
     )
     health_callback = _completed_health_callback(optimizer_updates)
-    callbacks = [health_callback]
+    callbacks = [checkpoint_callback, health_callback]
     if arm_id == "E-A1":
         gradient_callback = train_entrypoint._FilmGradientActivationCallback(
             harness.registry.data["stages"][1]["gradient_contract"]
@@ -343,8 +429,24 @@ def _produce_screen_arm(
         num_nodes=1,
         max_steps=optimizer_updates,
         accumulate_grad_batches=resolved_config["trainer"]["accumulate_grad_batches"],
-        train_dataloader=SimpleNamespace(batch_size=4),
+        _detect_anomaly=True,
+        gradient_clip_val=1.0,
+        gradient_clip_algorithm=(
+            None
+            if resolved_config["trainer"].get("gradient_clip_algorithm") is None
+            else SimpleNamespace(
+                value=resolved_config["trainer"]["gradient_clip_algorithm"]
+            )
+        ),
+        precision="bf16-mixed",
+        train_dataloader=torch.utils.data.DataLoader(
+            _EmptyIterableDataset(), batch_size=4
+        ),
         callbacks=callbacks,
+        optimizers=[optimizer],
+        lr_scheduler_configs=[
+            SimpleNamespace(scheduler=scheduler, interval="step", name="lr")
+        ],
     )
     training_rng_policy = None
     if stage_id == "conditioning":
@@ -387,7 +489,11 @@ def _produce_screen_arm(
         expected_initialization_checkpoint_sha256=plan.checkpoint_sha256,
     )
     receipt, exit_status = receipt_writer.build_exit_receipt(receipt_args)
-    assert exit_status == 0
+    assert exit_status == 0, {
+        key: value.get("validation_error")
+        for key, value in receipt.items()
+        if isinstance(value, dict) and "validation_error" in value
+    }
     receipt_writer._atomic_write_json_exclusive(receipt_path, receipt)
     pilot_launcher.release_exact_training_job_lock(
         lock_path, expected_sha256=lock_sha256

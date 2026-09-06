@@ -34,19 +34,19 @@ from scripts.exps.denovo import report as denovo_report  # noqa: E402
 
 
 SCHEMA_VERSION = 1
-PROTOCOL_RELATIVE_PATH = Path("experiments/udlm/protocols/de_novo_superiority_v2.json")
-PROTOCOL_SHA256 = "f845429dae7ca889c09aad3af7946d20a5a05c189d2a19ec5ad8da7fff075a66"
+PROTOCOL_RELATIVE_PATH = Path("experiments/udlm/protocols/de_novo_superiority_v3.json")
+PROTOCOL_SHA256 = "27a1f3e4fa66988d77eddeb66025eae64b514c452e089bb5c62fff99060c9f16"
 PROTOCOL_CANONICAL_SHA256 = (
-    "b3b890ba19368e0caefda7a6ca9b082c9d7c2911ddd92eba1d83d1cf91408396"
+    "e7b108dce51cd1445758a9f7dc852532b2ee075a80f783ae009303a7550577ee"
 )
 PREVIOUS_PROTOCOL_RELATIVE_PATH = Path(
-    "experiments/udlm/protocols/de_novo_superiority_v1.json"
+    "experiments/udlm/protocols/de_novo_superiority_v2.json"
 )
 PREVIOUS_PROTOCOL_SHA256 = (
-    "d734e2771e94b54f3bdb2e86e6da496d855a3eb7a7bd07abbbcdfbf406ab4a20"
+    "f845429dae7ca889c09aad3af7946d20a5a05c189d2a19ec5ad8da7fff075a66"
 )
 PREVIOUS_PROTOCOL_CANONICAL_SHA256 = (
-    "3b36fc1df19d4fdce4e522b3f9963eb55a9a136575bab361362b114dae25f53d"
+    "b3b890ba19368e0caefda7a6ca9b082c9d7c2911ddd92eba1d83d1cf91408396"
 )
 BASELINE_RELATIVE_PATH = Path("experiments/udlm/baselines/mdlm_50000.json")
 BASELINE_SHA256 = "6da46fc615dedbcca436da087a2c1e9145f5d110036e0c15bb431ded3c2e5539"
@@ -64,7 +64,7 @@ DENOVO_RESCORE_DEPENDENCY_RELATIVE_PATH = Path("scripts/udlm/rescore_mdlm_baseli
 DENOVO_LAUNCHER_RELATIVE_PATH = Path("scripts/exps/denovo/launch_benchmark.py")
 PILOT_EVIDENCE_WRITER_RELATIVE_PATH = Path("scripts/udlm/write_pilot_evidence.py")
 EXPECTED_BASELINE_RESCORE_SOURCE_REVISION = "74482c2742ab5ad15def122c809a6b4e403e94cf"
-EXPECTED_PROTOCOL_ID = "genmol_udlm_de_novo_superiority_v2"
+EXPECTED_PROTOCOL_ID = "genmol_udlm_de_novo_superiority_v3"
 EXPECTED_SEEDS = (0, 1, 2)
 EXPECTED_SAMPLES_PER_SEED = 1_000
 EXPECTED_NFE = 128
@@ -88,7 +88,7 @@ PILOT_FAILURE_RECEIPT_SCHEMA_VERSION = 1
 PILOT_FAILURE_RECEIPT_KIND = "pilot_failure"
 LAUNCH_MANIFEST_SCHEMA_VERSION = 2
 RUNTIME_CONFIG_SCHEMA_VERSION = 2
-TRAINING_SUMMARY_SCHEMA_VERSION = 4
+TRAINING_SUMMARY_SCHEMA_VERSION = 5
 PILOT_EXIT_STATUS_SCHEMA_VERSION = 5
 PILOT_EMPIRICAL_UNIFORM_MIX = 0.0002
 PILOT_EMPIRICAL_UNIFORM_MIX_AUDIT = {
@@ -619,11 +619,13 @@ def validate_protocol(protocol: Mapping[str, Any]) -> None:
         raise GateValidationError(
             "superiority protocol content is not the frozen value"
         )
-    if protocol.get("schema_version") != 2:
-        raise GateValidationError("protocol schema_version must equal 2")
+    if protocol.get("schema_version") != 3:
+        raise GateValidationError("protocol schema_version must equal 3")
     if protocol.get("protocol_id") != EXPECTED_PROTOCOL_ID:
         raise GateValidationError("unexpected superiority protocol ID")
-    if protocol.get("status") != "frozen_before_gpu_pilots":
+    if protocol.get("status") != (
+        "frozen_after_failed_health_instrumentation_before_scientific_screens"
+    ):
         raise GateValidationError("superiority protocol is not frozen")
     amendment = _mapping(protocol.get("amends"), "protocol.amends")
     if dict(amendment) != {
@@ -631,12 +633,55 @@ def validate_protocol(protocol: Mapping[str, Any]) -> None:
         "raw_sha256": PREVIOUS_PROTOCOL_SHA256,
         "canonical_sha256": PREVIOUS_PROTOCOL_CANONICAL_SHA256,
         "reason": (
-            "Replace operator-only R-to-S-to-E ordering with launch-bound, "
-            "receipt-revalidated predecessor evidence and bind the audited "
-            "empirical-prior floor before any GPU pilot."
+            "Advance the training-summary schema from 4 to 5 after a completed "
+            "ten-update health-training process exposed Lightning's intended "
+            "unranked ModelCheckpoint positive-infinity sentinel; require an "
+            "exact checkpoint schema, structural sentinel validation, exact "
+            "checkpoint/config and loop-progress bindings, exact live trainer/"
+            "optimizer/scheduler/sampler/callback bindings, and an exact "
+            "independent screen/receipt verifier without changing any scientific "
+            "setting or threshold."
         ),
-        "gpu_pilots_executed_before_amendment": False,
+        "gpu_training_process_executed_before_amendment": True,
+        "successful_health_panels_before_amendment": False,
+        "failed_health_run_denoising_sampling_executed": False,
+        "failed_health_run_molecular_scoring_executed": False,
+        "registered_candidate_checkpoint_selection_or_ranking_executed_since_v2_freeze": False,
+        "candidate_final_evaluation_run_executed_since_v2_freeze": False,
+        "pre_v2_ineligible_cpu_smokes_and_audited_baseline_rescoring_remain_disclosed": True,
         "scientific_decision_thresholds_changed": False,
+        "failed_health_instrumentation": {
+            "run_id": ("health-w1-r-" "12bdce22809f9672dbb6666fa3a6e828b39aadb0"),
+            "run_relative_path": (
+                "output/udlm/health-w1-r-" "12bdce22809f9672dbb6666fa3a6e828b39aadb0"
+            ),
+            "source_revision": "12bdce22809f9672dbb6666fa3a6e828b39aadb0",
+            "status": "failed_post_training_semantic_audit",
+            "optimizer_updates_completed": 10,
+            "training_summary_published": False,
+            "successful_exit_receipt": False,
+            "scientifically_eligible": False,
+            "launch_manifest_sha256": (
+                "ff0a946c8504b058574e082cadc14441295c4955352adc867e442521bf756f05"
+            ),
+            "runtime_config_sha256": (
+                "14547b9be4772b1c78f5bc639e9d0d2ed17103daf6ea1e3dd8b4a346807bc24a"
+            ),
+            "checkpoint_sha256": (
+                "f85230b09ddacd319082571b59773a9c3d26f61f27cfde8f206eae549cce4cb6"
+            ),
+            "failed_exit_receipt_sha256": (
+                "5336a4791256910632412ae09eec9d20e223c22765bcfd8796d00408248d3b99"
+            ),
+            "training_log_sha256": (
+                "6b6f14759c9d45cb6c0200ce188ccfdb912b91544912e9c01d07cf58a5aeef95"
+            ),
+            "diagnosis": (
+                "The blanket checkpoint finiteness audit rejected Lightning "
+                "2.5.1 ModelCheckpoint.kth_value=+inf even though every learned "
+                "model, EMA, optimizer, and scheduler tensor was finite."
+            ),
+        },
     }:
         raise GateValidationError("superiority protocol amendment is unexpected")
     baseline = _mapping(protocol.get("baseline"), "protocol.baseline")
@@ -790,6 +835,12 @@ def validate_protocol(protocol: Mapping[str, Any]) -> None:
         "final_candidate_qed_sa_diversity_independently_recomputed_from_raw_model_text",
         "independent_rescore_source_and_dependency_hashes_required",
         "gate_report_rescore_launcher_writer_source_hashes_plus_scipy_version_required",
+        "training_summary_checkpoint_audit_excludes_only_exact_live_bound_lightning_sentinel_required",
+        "training_summary_checkpoint_exact_top_level_schema_and_nonfinite_python_numpy_rejection_required",
+        "training_summary_checkpoint_hyperparameters_loop_progress_and_live_trainer_configuration_match_required",
+        "training_summary_optimizer_scheduler_sampler_and_model_checkpoint_live_state_matches_required",
+        "independent_optimization_screen_exact_closed_schema_and_cross_artifact_bindings_required",
+        "failed_health_namespaces_are_immutable_and_never_eligible_for_candidate_selection",
     ):
         if lock_requirements.get(field) is not True:
             raise GateValidationError(f"protocol {field} must be true")
@@ -815,6 +866,36 @@ def validate_protocol(protocol: Mapping[str, Any]) -> None:
         raise GateValidationError(
             "previous superiority protocol canonical digest is unexpected"
         )
+    previous_lock_requirements = _mapping(
+        previous_protocol.get("candidate_lock_requirements"),
+        "previous protocol candidate-lock requirements",
+    )
+    expected_lock_requirements = json.loads(
+        json.dumps(
+            previous_lock_requirements,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+    )
+    expected_lock_requirements["accepted_training_artifact_schema_versions"][
+        "training_summary"
+    ] = TRAINING_SUMMARY_SCHEMA_VERSION
+    for field in (
+        "training_summary_checkpoint_audit_excludes_only_exact_live_bound_lightning_sentinel_required",
+        "training_summary_checkpoint_exact_top_level_schema_and_nonfinite_python_numpy_rejection_required",
+        "training_summary_checkpoint_hyperparameters_loop_progress_and_live_trainer_configuration_match_required",
+        "training_summary_optimizer_scheduler_sampler_and_model_checkpoint_live_state_matches_required",
+        "independent_optimization_screen_exact_closed_schema_and_cross_artifact_bindings_required",
+        "failed_health_namespaces_are_immutable_and_never_eligible_for_candidate_selection",
+    ):
+        expected_lock_requirements[field] = True
+    if dict(lock_requirements) != expected_lock_requirements:
+        raise GateValidationError(
+            "v3 candidate-lock requirements differ beyond the registered "
+            "schema-5 instrumentation amendment"
+        )
     for field in (
         "primary_claim",
         "baseline",
@@ -827,7 +908,7 @@ def validate_protocol(protocol: Mapping[str, Any]) -> None:
     ):
         if protocol.get(field) != previous_protocol.get(field):
             raise GateValidationError(
-                f"v2 unexpectedly changes scientific protocol field {field}"
+                f"v3 unexpectedly changes scientific protocol field {field}"
             )
 
 
@@ -1982,11 +2063,18 @@ def validate_candidate_lock(
     )
 
     parameters = _mapping(training.get("parameter_counts"), "candidate parameters")
-    _exact_keys(
-        parameters,
-        {"base_model_trainable", "time_conditioner_trainable", "total_trainable"},
-        "candidate parameters",
-    )
+    additive_parameter_keys = {
+        "base_model_trainable",
+        "time_conditioner_trainable",
+        "total_trainable",
+    }
+    film_parameter_keys = additive_parameter_keys | {"film_modulation_trainable"}
+    observed_parameter_keys = set(parameters)
+    if observed_parameter_keys not in (additive_parameter_keys, film_parameter_keys):
+        raise GateValidationError(
+            "candidate parameters must use exactly the additive 3-key or "
+            "film_adaln 4-key schema"
+        )
     base_count = _integer(
         parameters.get("base_model_trainable"), "base trainable parameters", minimum=1
     )
@@ -1995,11 +2083,25 @@ def validate_candidate_lock(
         "time-conditioner trainable parameters",
         minimum=1,
     )
+    film_count = 0
+    if observed_parameter_keys == film_parameter_keys:
+        film_count = _integer(
+            parameters.get("film_modulation_trainable"),
+            "FiLM-modulation trainable parameters",
+            minimum=1,
+        )
     total_trainable = _integer(
         parameters.get("total_trainable"), "total trainable parameters", minimum=1
     )
-    if total_trainable != base_count + adapter_count:
+    if total_trainable != base_count + adapter_count + film_count:
         raise GateValidationError("candidate trainable parameter counts do not add up")
+    normalized_parameter_counts = {
+        "base_model_trainable": base_count,
+        "time_conditioner_trainable": adapter_count,
+        "total_trainable": total_trainable,
+    }
+    if observed_parameter_keys == film_parameter_keys:
+        normalized_parameter_counts["film_modulation_trainable"] = film_count
 
     inference = _mapping(candidate_lock.get("inference"), "candidate inference")
     _exact_keys(
@@ -2125,11 +2227,7 @@ def validate_candidate_lock(
             "total_requested_examples": total_requested_examples,
             "stream_partition_policy": exposure["stream_partition_policy"],
         },
-        "parameter_counts": {
-            "base_model_trainable": base_count,
-            "time_conditioner_trainable": adapter_count,
-            "total_trainable": total_trainable,
-        },
+        "parameter_counts": normalized_parameter_counts,
         "evaluation_config_relative_path": evaluation_config_path,
         "evaluation_config_sha256": evaluation_config_sha,
         "sampling_config": dict(sampling_config),
@@ -2442,6 +2540,289 @@ def _validate_finiteness_record(value: object, *, label: str) -> None:
         raise GateValidationError(f"{label} has fewer elements than tensors")
 
 
+def _expected_framework_nonfinite_sentinels(
+    *, expected_steps: int
+) -> dict[str, object]:
+    callback_key = (
+        "ModelCheckpoint{'monitor': None, 'mode': 'min', "
+        f"'every_n_train_steps': {expected_steps}, 'every_n_epochs': 0, "
+        "'train_time_interval': None}"
+    )
+    return {
+        "all_expected_and_only_expected_verified": True,
+        "nonfinite_tensor_count": 1,
+        "nonfinite_element_count": 1,
+        "records": [
+            {
+                "tensor_path_components": [
+                    "checkpoint",
+                    "callbacks",
+                    callback_key,
+                    "kth_value",
+                ],
+                "framework": "lightning",
+                "framework_version": "2.5.1",
+                "callback": "ModelCheckpoint",
+                "field": "kth_value",
+                "dtype": "float32",
+                "shape": [],
+                "value": "+inf",
+                "meaning": "unranked_min_mode_checkpoint_sentinel",
+                "excluded_from_non_sentinel_finiteness": True,
+            }
+        ],
+    }
+
+
+def _validate_framework_nonfinite_sentinels(
+    value: object, *, expected_steps: int, label: str
+) -> None:
+    record = _mapping(value, label)
+    expected = _expected_framework_nonfinite_sentinels(expected_steps=expected_steps)
+    if canonical_json_sha256(record) != canonical_json_sha256(expected):
+        raise GateValidationError(
+            f"{label} does not match the exact Lightning sentinel contract"
+        )
+
+
+def _validate_auxiliary_checkpoint_records(
+    semantic: Mapping[str, object],
+    *,
+    expected_steps: int,
+    resolved_training_config: object,
+    label: str,
+) -> int:
+    resolved = _mapping(
+        resolved_training_config,
+        f"{label} resolved training config",
+    )
+    config_sha256 = canonical_json_sha256(resolved)
+    trainer_config = _mapping(
+        resolved.get("trainer"),
+        f"{label} resolved trainer config",
+    )
+    accumulation = _integer(
+        trainer_config.get("accumulate_grad_batches"),
+        f"{label} resolved accumulation",
+        minimum=1,
+    )
+    optim_config = _mapping(
+        resolved.get("optim"),
+        f"{label} resolved optimizer config",
+    )
+    scheduler_config = _mapping(
+        optim_config.get("scheduler"),
+        f"{label} resolved scheduler config",
+    )
+    warmup_updates = _integer(
+        scheduler_config.get("warmup_updates"),
+        f"{label} resolved scheduler warmup",
+        minimum=0,
+    )
+    horizon_value = scheduler_config.get("horizon_updates")
+    horizon_updates = (
+        0
+        if horizon_value is None
+        else _integer(
+            horizon_value,
+            f"{label} resolved scheduler horizon",
+            minimum=0,
+        )
+    )
+    schedule_check_count = (
+        max(expected_steps, warmup_updates + 1, horizon_updates + 1) + 1
+    )
+    python_floats = _mapping(
+        semantic.get("checkpoint_python_floats"),
+        f"{label} Python-float finiteness",
+    )
+    _exact_keys(
+        python_floats,
+        {"all_finite", "floating_scalar_count"},
+        f"{label} Python-float finiteness",
+    )
+    _required_true(
+        python_floats.get("all_finite"),
+        f"{label} Python-float all-finite flag",
+    )
+    _integer(
+        python_floats.get("floating_scalar_count"),
+        f"{label} Python-float count",
+        minimum=1,
+    )
+
+    optimizer = _mapping(
+        semantic.get("optimizer_live_state_match"),
+        f"{label} optimizer live-state match",
+    )
+    _exact_keys(
+        optimizer,
+        {
+            "exact_serialized_live_match",
+            "optimizer_count",
+            "optimizer_class",
+            "parameter_group_count",
+            "parameter_state_count",
+            "exact_resolved_config_match",
+        },
+        f"{label} optimizer live-state match",
+    )
+    _required_true(
+        optimizer.get("exact_serialized_live_match"),
+        f"{label} optimizer exact-match flag",
+    )
+    _required_true(
+        optimizer.get("exact_resolved_config_match"),
+        f"{label} optimizer resolved-config flag",
+    )
+    if (
+        optimizer.get("optimizer_count") != 1
+        or optimizer.get("optimizer_class") != "AdamW"
+        or optimizer.get("parameter_group_count") != 1
+    ):
+        raise GateValidationError(f"{label} optimizer live-state match is invalid")
+    parameter_state_count = _integer(
+        optimizer.get("parameter_state_count"),
+        f"{label} optimizer parameter-state count",
+        minimum=1,
+    )
+
+    scheduler = _mapping(
+        semantic.get("scheduler_live_state_match"),
+        f"{label} scheduler live-state match",
+    )
+    if canonical_json_sha256(scheduler) != canonical_json_sha256(
+        {
+            "exact_serialized_live_match": True,
+            "scheduler_count": 1,
+            "scheduler_class": "LambdaLR",
+            "interval": "step",
+            "name": "lr",
+            "last_epoch": expected_steps,
+            "step_count": expected_steps + 1,
+            "exact_model_spec_match": True,
+            "exact_callable_schedule_match": True,
+            "callable_schedule_index_checks": schedule_check_count,
+        }
+    ):
+        raise GateValidationError(f"{label} scheduler live-state match is invalid")
+
+    sampler = _mapping(
+        semantic.get("sampler_live_state_match"),
+        f"{label} sampler live-state match",
+    )
+    if canonical_json_sha256(sampler) != canonical_json_sha256(
+        {
+            "exact_hosted_stream_contract_match": True,
+            "random_state_is_none": True,
+            "live_state_dict_available": False,
+            "sampler_class_module": "torch.utils.data.dataloader",
+            "sampler_class_name": "_InfiniteConstantSampler",
+        }
+    ):
+        raise GateValidationError(f"{label} sampler live-state match is invalid")
+
+    callback_key = (
+        "ModelCheckpoint{'monitor': None, 'mode': 'min', "
+        f"'every_n_train_steps': {expected_steps}, 'every_n_epochs': 0, "
+        "'train_time_interval': None}"
+    )
+    callback = _mapping(
+        semantic.get("model_checkpoint_live_state_match"),
+        f"{label} ModelCheckpoint live-state match",
+    )
+    if canonical_json_sha256(callback) != canonical_json_sha256(
+        {
+            "exact_serialized_live_match": True,
+            "model_checkpoint_callback_count": 1,
+            "state_key": callback_key,
+            "configuration_matches_pilot_contract": True,
+        }
+    ):
+        raise GateValidationError(
+            f"{label} ModelCheckpoint live-state match is invalid"
+        )
+
+    hyperparameters = _mapping(
+        semantic.get("checkpoint_hyperparameters_match"),
+        f"{label} checkpoint hyperparameter match",
+    )
+    if canonical_json_sha256(hyperparameters) != canonical_json_sha256(
+        {
+            "hparams_name": "kwargs",
+            "exact_hyperparameter_keys": True,
+            "exact_checkpoint_preflight_config_match": True,
+            "exact_live_model_preflight_config_match": True,
+            "exact_live_hparams_preflight_config_match": True,
+            "exact_checkpoint_live_model_unresolved_config_match": True,
+            "exact_checkpoint_live_hparams_unresolved_config_match": True,
+            "resolved_config_sha256": config_sha256,
+        }
+    ):
+        raise GateValidationError(f"{label} checkpoint hyperparameter match is invalid")
+
+    configured_clip = trainer_config.get("gradient_clip_val")
+    configured_precision = trainer_config.get("precision")
+    precision_aliases = {
+        "16": "16-mixed",
+        "bf16": "bf16-mixed",
+        "32": "32-true",
+        "64": "64-true",
+        16: "16-mixed",
+        32: "32-true",
+        64: "64-true",
+    }
+    live_precision = precision_aliases.get(configured_precision, configured_precision)
+    configured_clip_algorithm = trainer_config.get("gradient_clip_algorithm")
+    if configured_clip_algorithm is None:
+        configured_clip_algorithm = "norm"
+    if (
+        isinstance(configured_clip, bool)
+        or not isinstance(configured_clip, (int, float))
+        or not math.isfinite(configured_clip)
+        or configured_clip < 0.0
+        or not isinstance(live_precision, str)
+        or configured_clip_algorithm not in {"norm", "value"}
+    ):
+        raise GateValidationError(f"{label} resolved live-Trainer config is invalid")
+    trainer_match = _mapping(
+        semantic.get("trainer_live_configuration_match"),
+        f"{label} live Trainer configuration match",
+    )
+    if canonical_json_sha256(trainer_match) != canonical_json_sha256(
+        {
+            "exact_detect_anomaly_match": True,
+            "detect_anomaly": True,
+            "exact_gradient_clip_val_match": True,
+            "gradient_clip_val": float(configured_clip),
+            "exact_gradient_clip_algorithm_match": True,
+            "gradient_clip_algorithm": configured_clip_algorithm,
+            "exact_precision_match": True,
+            "configured_precision": str(configured_precision),
+            "live_precision": live_precision,
+        }
+    ):
+        raise GateValidationError(
+            f"{label} live Trainer configuration match is invalid"
+        )
+
+    loop_state = _mapping(
+        semantic.get("checkpoint_loop_state_match"),
+        f"{label} checkpoint loop-state match",
+    )
+    if canonical_json_sha256(loop_state) != canonical_json_sha256(
+        {
+            "exact_serialized_progress_match": True,
+            "epoch": 0,
+            "optimizer_steps": expected_steps,
+            "accumulate_grad_batches": accumulation,
+            "microbatches": expected_steps * accumulation,
+        }
+    ):
+        raise GateValidationError(f"{label} checkpoint loop-state match is invalid")
+    return parameter_state_count
+
+
 def _validate_training_health(value: object, *, optimizer_updates: int) -> None:
     health = _mapping(value, "training health")
     _exact_keys(
@@ -2697,6 +3078,15 @@ def _derive_predecessor_training_lock(
         "bound predecessor optimizer updates",
         minimum=1,
     )
+    derived_parameter_counts = {
+        "base_model_trainable": parameters.get("base_backbone"),
+        "time_conditioner_trainable": parameters.get("time_conditioner"),
+        "total_trainable": parameters.get("total"),
+    }
+    if "film_modulation" in parameters:
+        derived_parameter_counts["film_modulation_trainable"] = parameters.get(
+            "film_modulation"
+        )
     return {
         "summary": {
             "relative_path": relative_run_directory / "training_summary.json",
@@ -2742,11 +3132,7 @@ def _derive_predecessor_training_lock(
                 "hosted_stream_rank_partition_policy"
             ),
         },
-        "parameter_counts": {
-            "base_model_trainable": parameters.get("base_backbone"),
-            "time_conditioner_trainable": parameters.get("time_conditioner"),
-            "total_trainable": parameters.get("total"),
-        },
+        "parameter_counts": derived_parameter_counts,
         "startup_mode": startup.get("mode"),
         "inference_weights": {
             "source": "ema",
@@ -3922,7 +4308,16 @@ def validate_training_evidence(
             "ema",
             "ema_metadata",
             "optimizer",
-            "all_checkpoint_tensors",
+            "non_sentinel_checkpoint_tensors",
+            "checkpoint_python_floats",
+            "framework_nonfinite_sentinels",
+            "checkpoint_hyperparameters_match",
+            "checkpoint_loop_state_match",
+            "optimizer_live_state_match",
+            "scheduler_live_state_match",
+            "sampler_live_state_match",
+            "trainer_live_configuration_match",
+            "model_checkpoint_live_state_match",
             "udlm_process_identity_verified",
             "live_model_match",
             "live_ema_match",
@@ -3934,10 +4329,26 @@ def validate_training_evidence(
         semantic.get("udlm_process_identity_verified"),
         "checkpoint UDLM process identity",
     )
-    for field in ("raw_model", "ema", "optimizer", "all_checkpoint_tensors"):
+    for field in (
+        "raw_model",
+        "ema",
+        "optimizer",
+        "non_sentinel_checkpoint_tensors",
+    ):
         _validate_finiteness_record(
             semantic.get(field), label=f"checkpoint {field} finiteness"
         )
+    _validate_framework_nonfinite_sentinels(
+        semantic.get("framework_nonfinite_sentinels"),
+        expected_steps=lock["optimizer_updates"],
+        label="checkpoint framework non-finite sentinels",
+    )
+    optimizer_parameter_state_count = _validate_auxiliary_checkpoint_records(
+        semantic,
+        expected_steps=lock["optimizer_updates"],
+        resolved_training_config=runtime.get("resolved_training_config"),
+        label="checkpoint",
+    )
     if semantic.get("global_step") != lock["checkpoint"]["global_step"]:
         raise GateValidationError("semantic checkpoint step disagrees with lock")
     serialized_ema = _mapping(semantic.get("ema"), "serialized EMA finiteness")
@@ -3998,6 +4409,10 @@ def validate_training_evidence(
     if summary_inference_weights != lock["inference_weights"]:
         raise GateValidationError("training-summary EMA metadata disagrees with lock")
     shadow_count = summary_inference_weights["ema"]["shadow_parameter_count"]
+    if optimizer_parameter_state_count != shadow_count:
+        raise GateValidationError(
+            "checkpoint optimizer parameter-state count disagrees with EMA metadata"
+        )
     if live_ema_match.get("tensor_count") != shadow_count:
         raise GateValidationError("live EMA tensor count disagrees with EMA metadata")
     if serialized_ema.get("floating_tensor_count") != shadow_count:
@@ -4013,6 +4428,33 @@ def validate_training_evidence(
     warm_report = startup.get("verified_mdlm_warm_start_report")
     if lock["startup_mode"] == "warm_start":
         warm_report = _mapping(warm_report, "warm-start report")
+        locked_parameter_counts = _mapping(
+            lock.get("parameter_counts"), "locked trainable parameter counts"
+        )
+        expected_conditioning_variant = (
+            "film_adaln"
+            if "film_modulation_trainable" in locked_parameter_counts
+            else "additive"
+        )
+        expected_warm_report_keys = {
+            "source_path",
+            "source_resolved_path",
+            "source_sha256",
+            "source_size_bytes",
+            "expected_source_sha256",
+            "byte_identity_verified_before_and_after_load",
+            "weights",
+            "parameter_tensors",
+        }
+        if expected_conditioning_variant == "film_adaln":
+            expected_warm_report_keys.update(
+                {"conditioning_variant", "conditioning_parameter_tensors"}
+            )
+        _exact_keys(
+            warm_report,
+            expected_warm_report_keys,
+            "warm-start report",
+        )
         if warm_report.get("source_sha256") != lock["initialization_checkpoint_sha256"]:
             raise GateValidationError("warm-start source digest disagrees with lock")
         if (
@@ -4041,6 +4483,21 @@ def validate_training_evidence(
             "warm-start parameter tensor count",
             minimum=1,
         )
+        if expected_conditioning_variant == "film_adaln":
+            if warm_report.get("conditioning_variant") != "film_adaln":
+                raise GateValidationError(
+                    "warm-start conditioning variant disagrees with candidate lock"
+                )
+            conditioning_tensor_count = _integer(
+                warm_report.get("conditioning_parameter_tensors"),
+                "warm-start conditioning parameter tensor count",
+                minimum=1,
+            )
+            if conditioning_tensor_count != 28:
+                raise GateValidationError(
+                    "warm-start conditioning parameter tensor count disagrees with "
+                    "candidate topology"
+                )
     elif warm_report is not None:
         raise GateValidationError(
             "scratch summary unexpectedly contains warm-start evidence"
@@ -4381,6 +4838,17 @@ def validate_training_evidence(
         raise GateValidationError("runtime resolved training config content is unbound")
     if runtime.get("training_argv_sha256") != lock["training_argv_sha256"]:
         raise GateValidationError("runtime training argv digest disagrees with lock")
+    training_config = _mapping(
+        resolved_config.get("training"), "runtime training configuration"
+    )
+    udlm_config = _mapping(
+        training_config.get("udlm"), "runtime UDLM training configuration"
+    )
+    conditioning_variant = udlm_config.get("conditioning_variant")
+    if conditioning_variant not in {"additive", "film_adaln"}:
+        raise GateValidationError(
+            "runtime UDLM conditioning_variant must be additive or film_adaln"
+        )
     if runtime.get("completion_contract") != expected_completion_contract:
         raise GateValidationError(
             "runtime and summary completion contracts disagree with lock"
@@ -4503,9 +4971,22 @@ def validate_training_evidence(
         accounting.get("trainable_parameter_counts"),
         "summary trainable parameter counts",
     )
+    expected_summary_parameter_keys = {
+        "base_backbone",
+        "time_conditioner",
+        "total",
+    }
+    expected_locked_parameter_keys = {
+        "base_model_trainable",
+        "time_conditioner_trainable",
+        "total_trainable",
+    }
+    if conditioning_variant == "film_adaln":
+        expected_summary_parameter_keys.add("film_modulation")
+        expected_locked_parameter_keys.add("film_modulation_trainable")
     _exact_keys(
         parameter_counts,
-        {"base_backbone", "time_conditioner", "total"},
+        expected_summary_parameter_keys,
         "summary trainable parameter counts",
     )
     base_count = _integer(
@@ -4518,18 +4999,62 @@ def validate_training_evidence(
         "summary time-conditioner trainable parameters",
         minimum=1,
     )
+    film_count = 0
+    if conditioning_variant == "film_adaln":
+        film_count = _integer(
+            parameter_counts.get("film_modulation"),
+            "summary FiLM-modulation trainable parameters",
+            minimum=1,
+        )
     total_count = _integer(
         parameter_counts.get("total"),
         "summary total trainable parameters",
         minimum=1,
     )
-    if total_count != base_count + conditioner_count:
+    if total_count != base_count + conditioner_count + film_count:
         raise GateValidationError("summary trainable parameter counts do not add up")
-    locked_parameters = lock["parameter_counts"]
+    locked_parameters = _mapping(
+        lock.get("parameter_counts"), "locked trainable parameter counts"
+    )
+    _exact_keys(
+        locked_parameters,
+        expected_locked_parameter_keys,
+        "locked trainable parameter counts",
+    )
+    locked_base_count = _integer(
+        locked_parameters.get("base_model_trainable"),
+        "locked base trainable parameters",
+        minimum=1,
+    )
+    locked_conditioner_count = _integer(
+        locked_parameters.get("time_conditioner_trainable"),
+        "locked time-conditioner trainable parameters",
+        minimum=1,
+    )
+    locked_film_count = 0
+    if conditioning_variant == "film_adaln":
+        locked_film_count = _integer(
+            locked_parameters.get("film_modulation_trainable"),
+            "locked FiLM-modulation trainable parameters",
+            minimum=1,
+        )
+    locked_total_count = _integer(
+        locked_parameters.get("total_trainable"),
+        "locked total trainable parameters",
+        minimum=1,
+    )
+    if locked_total_count != (
+        locked_base_count + locked_conditioner_count + locked_film_count
+    ):
+        raise GateValidationError(
+            "training-accounting parameter counts disagree with lock: locked counts "
+            "do not add up"
+        )
     if (
-        base_count != locked_parameters["base_model_trainable"]
-        or conditioner_count != locked_parameters["time_conditioner_trainable"]
-        or total_count != locked_parameters["total_trainable"]
+        base_count != locked_base_count
+        or conditioner_count != locked_conditioner_count
+        or film_count != locked_film_count
+        or total_count != locked_total_count
     ):
         raise GateValidationError(
             "training-accounting parameter counts disagree with lock"
@@ -4645,9 +5170,6 @@ def validate_training_evidence(
         raise GateValidationError("runtime micro-batch size disagrees with accounting")
     if loader_config.get("global_batch_size") != global_examples:
         raise GateValidationError("runtime global batch size disagrees with accounting")
-    training_config = _mapping(
-        resolved_config.get("training"), "runtime training configuration"
-    )
     _close(
         training_config.get("ema"),
         summary_inference_weights["ema"]["decay"],
